@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+dist/
+
+# Rust / Tauri
+src-tauri/target/
+# Note: Cargo.lock IS committed for binary applications
+
+# Data
+src-tauri/data/
+*.db
+*.db-journal
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.local
+
+# SQLx offline data (regenerate with `cargo sqlx prepare`)
+# .sqlx/ — uncomment to ignore, but keep for CI builds
