@@ -12,10 +12,9 @@ pub async fn start_server(app: AppHandle) -> AppResult<()> {
     let port = 9842u16;
     let host = "127.0.0.1";
 
-    let state = app.state::<std::sync::Arc<crate::AppState>>().clone();
+    // Data-plane handlers access the shared pool via AppHandle::state (Tauri
+    // managed state), so the router itself carries no Axum state for now.
     let router = router::create_router(app.clone());
-
-    let _ = state; // Will be used as Axum state when fully wired
 
     let addr = format!("{}:{}", host, port);
     tracing::info!("DongX gateway server starting on http://{}", addr);

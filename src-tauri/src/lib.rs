@@ -13,16 +13,11 @@ use std::sync::Arc;
 use tauri::Manager;
 
 /// Application shared state (shared between Axum data plane and Tauri management plane)
+///
+/// SqlitePool is internally an Arc'd pool handle: clone() shares the same pool,
+/// so no Mutex is needed (unlike Java where you'd wrap a DataSource in a singleton).
 pub struct AppState {
-    pub db: tokio::sync::Mutex<Option<sqlx::SqlitePool>>,
-}
-
-impl AppState {
-    pub fn new() -> Self {
-        Self {
-            db: tokio::sync::Mutex::new(None),
-        }
-    }
+    pub db: sqlx::SqlitePool,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -37,7 +32,6 @@ pub fn run() {
             None,
         ))
         .plugin(tauri_plugin_dialog::init())
-        .manage(Arc::new(AppState::new()))
         .invoke_handler(tauri::generate_handler![
             commands::channel::list_channels,
             commands::channel::create_channel,
@@ -58,6 +52,30 @@ pub fn run() {
             commands::settings::get_dashboard_stats,
         ])
         .setup(|app| {
+            // Initialize logging before anything else
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| "dongx=info,tauri=info".into()),
+                )
+                .init();
+
+            // Resolve db path: %APPDATA%/com.dongx.app/dongx.db
+            let data_dir = app.path().app_data_dir()?;
+            let db_path = data_dir.join("dongx.db");
+
+            // setup() is sync; block on async pool init before the UI opens.
+            // (Equivalent to initializing the DataSource eagerly at Spring Boot startup)
+            let pool = tauri::async_runtime::block_on(db::init_pool(&db_path))
+                .map_err(|e| {
+                    eprintln!("Failed to initialize database: {}", e);
+                    e
+                })?;
+
+            // AppState managed here; commands access it via
+            // State<'_, Arc<AppState>> and clone the pool handle freely.
+            app.manage(Arc::new(AppState { db: pool.clone() }));
+
             // Spawn Axum HTTP server (data plane) in background
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -65,6 +83,7 @@ pub fn run() {
                     tracing::error!("Axum server error: {}", e);
                 }
             });
+
             Ok(())
         })
         .run(tauri::generate_context!())
