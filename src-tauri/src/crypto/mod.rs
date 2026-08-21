@@ -74,7 +74,7 @@ pub fn generate_api_key() -> String {
     let encoded = BASE64.encode(&bytes);
     // URL-safe, no padding
     let encoded = encoded.replace('+', "-").replace('/', "_").trim_end_matches('=').to_string();
-    format!("sk-dong-{}", encoded)
+    format!("sk-dongapi-{}", encoded)
 }
 
 /// Derive encryption key from machine identity.

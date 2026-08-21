@@ -22,9 +22,9 @@ pub async fn list_api_keys() -> AppResult<Vec<serde_json::Value>> {
 /// Create a new gateway API key
 #[tauri::command]
 pub async fn create_api_key(input: ApiKeyInput) -> AppResult<serde_json::Value> {
-    // TODO: Generate sk-dong-<random>, hash it, store, return plaintext once
+    // TODO: Generate sk-dongapi-<random>, hash it, store, return plaintext once
     let _ = input;
-    let key = format!("sk-dong-{}", uuid::Uuid::new_v4().simple());
+    let key = format!("sk-dongapi-{}", uuid::Uuid::new_v4().simple());
     Ok(serde_json::json!({
         "id": uuid::Uuid::new_v4().to_string(),
         "key": key,

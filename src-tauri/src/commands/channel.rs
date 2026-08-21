@@ -90,6 +90,12 @@ pub async fn list_provider_presets() -> AppResult<Vec<ProviderPresetDto>> {
             requires_api_key: true,
         },
         ProviderPresetDto {
+            r#type: "gemini".into(),
+            label: "Google Gemini".into(),
+            default_base_url: "https://generativelanguage.googleapis.com/v1beta/openai".into(),
+            requires_api_key: true,
+        },
+        ProviderPresetDto {
             r#type: "zhipu".into(),
             label: "智谱 GLM".into(),
             default_base_url: "https://open.bigmodel.cn/api/paas/v4".into(),

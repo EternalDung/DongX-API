@@ -42,8 +42,8 @@ pub fn redact_secrets(text: &str) -> String {
     // Redact sk-* patterns (OpenAI-style API keys)
     redact_pattern(&mut result, r"sk-[a-zA-Z0-9]{20,}", "sk-****REDACTED****");
 
-    // Redact sk-dong-* patterns (gateway keys)
-    redact_pattern(&mut result, r"sk-dong-[a-zA-Z0-9_\-]+", "sk-dong-****REDACTED****");
+    // Redact sk-dongapi-* patterns (gateway keys)
+    redact_pattern(&mut result, r"sk-dongapi-[a-zA-Z0-9_\-]+", "sk-dongapi-****REDACTED****");
 
     // Redact Bearer tokens
     redact_pattern(&mut result, r"Bearer\s+[a-zA-Z0-9\-_]+", "Bearer ****REDACTED****");

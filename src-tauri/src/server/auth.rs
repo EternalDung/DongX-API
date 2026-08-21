@@ -1,12 +1,12 @@
 use axum::http::HeaderMap;
 
 /// Extract and validate the gateway key from Authorization header
-/// Expected format: "Bearer sk-dong-xxxx"
+/// Expected format: "Bearer sk-dongapi-xxxx"
 pub fn extract_gateway_key(headers: &HeaderMap) -> Option<String> {
     let auth_header = headers.get(axum::http::header::AUTHORIZATION)?;
     let auth_str = auth_header.to_str().ok()?;
     let key = auth_str.strip_prefix("Bearer ")?;
-    if key.starts_with("sk-dong-") {
+    if key.starts_with("sk-dongapi-") {
         Some(key.to_string())
     } else {
         None
