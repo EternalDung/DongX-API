@@ -5,6 +5,7 @@ import {
   Network,
   Timer,
   RefreshCw,
+  ArrowUpRight,
 } from "lucide-react";
 import {
   Card,
@@ -14,7 +15,9 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
+import { EmptyState } from "@/components/ui/empty-state";
+import { StatusBadge, type StatusTone } from "@/components/ui/status-badge";
 import { statsApi, channelApi } from "@/lib/api";
 import type { DashboardStats, Channel } from "@/types";
 
@@ -22,6 +25,45 @@ function formatNumber(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
   return String(n);
+}
+
+const CHANNEL_TONE: Record<number, { tone: StatusTone; label: string }> = {
+  1: { tone: "success", label: "启用" },
+  2: { tone: "destructive", label: "异常" },
+  0: { tone: "secondary", label: "禁用" },
+};
+
+interface StatDef {
+  title: string;
+  value: string;
+  icon: typeof Activity;
+  description: string;
+  hint?: string;
+}
+
+function StatCard({ stat }: { stat: StatDef }) {
+  const Icon = stat.icon;
+  return (
+    <Card className="group relative overflow-hidden transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md">
+      <CardContent className="pt-6">
+        <div className="flex items-start justify-between">
+          <div className="space-y-1">
+            <p className="text-sm text-muted-foreground">{stat.title}</p>
+            <p className="text-3xl font-semibold tracking-tight tabular-nums">
+              {stat.value}
+            </p>
+          </div>
+          <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-primary/10 text-primary ring-1 ring-inset ring-primary/15 transition-colors group-hover:bg-primary/15">
+            <Icon className="h-5 w-5" />
+          </div>
+        </div>
+        <div className="mt-3 flex items-center gap-1.5 text-xs text-muted-foreground">
+          <ArrowUpRight className="h-3.5 w-3.5 text-success" />
+          <span>{stat.description}</span>
+        </div>
+      </CardContent>
+    </Card>
+  );
 }
 
 export function DashboardPage() {
@@ -46,7 +88,7 @@ export function DashboardPage() {
     load();
   }, []);
 
-  const cards = [
+  const cards: StatDef[] = [
     {
       title: "今日请求",
       value: stats ? formatNumber(stats.today_requests) : "--",
@@ -74,10 +116,10 @@ export function DashboardPage() {
   ];
 
   return (
-    <div className="p-6">
+    <div>
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold">仪表盘</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">仪表盘</h1>
           <p className="mt-1 text-sm text-muted-foreground">
             请求统计、Token 消耗、渠道状态概览
           </p>
@@ -89,26 +131,23 @@ export function DashboardPage() {
       </div>
 
       {/* 统计卡片 */}
-      <div className="mt-6 grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
-        {cards.map((card) => {
-          const Icon = card.icon;
-          return (
-            <Card key={card.title}>
-              <CardHeader className="flex-row items-center justify-between space-y-0">
-                <CardTitle className="text-sm font-medium text-muted-foreground">
-                  {card.title}
-                </CardTitle>
-                <Icon className="h-4 w-4 text-muted-foreground" />
-              </CardHeader>
-              <CardContent>
-                <div className="text-2xl font-bold">{card.value}</div>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  {card.description}
-                </p>
-              </CardContent>
-            </Card>
-          );
-        })}
+      <div className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        {loading
+          ? Array.from({ length: 4 }).map((_, i) => (
+              <Card key={i}>
+                <CardContent className="pt-6">
+                  <div className="flex items-start justify-between">
+                    <div className="space-y-2">
+                      <Skeleton className="h-4 w-20" />
+                      <Skeleton className="h-8 w-24" />
+                    </div>
+                    <Skeleton className="h-11 w-11 rounded-xl" />
+                  </div>
+                  <Skeleton className="mt-3 h-3 w-32" />
+                </CardContent>
+              </Card>
+            ))
+          : cards.map((card) => <StatCard key={card.title} stat={card} />)}
       </div>
 
       {/* 渠道状态列表 */}
@@ -118,35 +157,37 @@ export function DashboardPage() {
           <CardDescription>各上游渠道的运行情况</CardDescription>
         </CardHeader>
         <CardContent>
-          {channels.length === 0 ? (
-            <div className="flex flex-col items-center gap-2 py-8 text-center">
-              <Network className="h-8 w-8 text-muted-foreground" />
-              <p className="text-sm text-muted-foreground">
-                暂无渠道，前往「渠道管理」添加第一个渠道
-              </p>
-            </div>
-          ) : (
-            <div className="space-y-2">
-              {channels.map((ch) => (
-                <div
-                  key={ch.id}
-                  className="flex items-center justify-between rounded-md border px-4 py-2"
-                >
-                  <div className="flex items-center gap-3">
-                    <span className="font-medium">{ch.name}</span>
-                    <span className="text-xs text-muted-foreground">
-                      {ch.type} · {ch.models.length} 模型
-                    </span>
-                  </div>
-                  <Badge
-                    variant={
-                      ch.status === 1 ? "success" : ch.status === 2 ? "destructive" : "secondary"
-                    }
-                  >
-                    {ch.status === 1 ? "启用" : ch.status === 2 ? "异常" : "禁用"}
-                  </Badge>
-                </div>
+          {loading ? (
+            <div className="space-y-3">
+              {Array.from({ length: 3 }).map((_, i) => (
+                <Skeleton key={i} className="h-12 w-full" />
               ))}
+            </div>
+          ) : channels.length === 0 ? (
+            <EmptyState
+              icon={Network}
+              title="暂无渠道"
+              description="前往「渠道管理」添加第一个上游供应商渠道，网关即可开始代理请求。"
+            />
+          ) : (
+            <div className="divide-y">
+              {channels.map((ch) => {
+                const meta = CHANNEL_TONE[ch.status] ?? CHANNEL_TONE[0];
+                return (
+                  <div
+                    key={ch.id}
+                    className="flex items-center justify-between gap-4 rounded-lg px-2 py-3 transition-colors hover:bg-accent/40"
+                  >
+                    <div className="flex min-w-0 items-center gap-3">
+                      <span className="font-medium">{ch.name}</span>
+                      <span className="font-mono text-xs text-muted-foreground">
+                        {ch.type} · {ch.models.length} 模型
+                      </span>
+                    </div>
+                    <StatusBadge tone={meta.tone}>{meta.label}</StatusBadge>
+                  </div>
+                );
+              })}
             </div>
           )}
         </CardContent>

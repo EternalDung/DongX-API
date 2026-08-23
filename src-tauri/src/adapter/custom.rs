@@ -5,47 +5,64 @@ use crate::adapter::{
 use async_trait::async_trait;
 use serde_json::json;
 
-/// OpenAI adaptor — also the canonical OpenAI-compatible implementation
-/// reused by zhipu / ollama / moonshot / qwen via `get_adaptor()`.
-pub struct OpenAIAdaptor;
+/// Custom adaptor — OpenAI-compatible passthrough for any user-defined
+/// endpoint (self-hosted vLLM, LiteLLM, one-api, ...).
+///
+/// Differs from the OpenAI adaptor only in defaults; the endpoint path can
+/// be overridden via `config.extra["chat_path"]`.
+pub struct CustomAdaptor;
 
-impl OpenAIAdaptor {
-    fn request_url(&self, config: &ChannelConfig) -> String {
-        let base = config.base_url.trim_end_matches('/');
-        // Preset base_url already contains the version segment (e.g. ".../v1")
-        format!("{}/chat/completions", base)
+impl CustomAdaptor {
+    fn chat_path(&self, config: &ChannelConfig) -> String {
+        config
+            .extra
+            .get("chat_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("/chat/completions")
+            .to_string()
     }
 
-    /// Shared request body builder (model mapping applied here).
-    fn build_body(&self, request: &ProxyRequest, config: &ChannelConfig) -> serde_json::Value {
-        let mut body = request.body.clone();
-        body["model"] = json!(map_model(request, config));
-        body
+    fn request_url(&self, config: &ChannelConfig) -> String {
+        let base = config.base_url.trim_end_matches('/');
+        format!("{}{}", base, self.chat_path(config))
     }
 }
 
 #[async_trait]
-impl Adaptor for OpenAIAdaptor {
+impl Adaptor for CustomAdaptor {
     fn channel_type(&self) -> &'static str {
-        "openai"
+        "custom"
     }
 
     fn default_models(&self) -> Vec<&'static str> {
-        vec!["gpt-4o", "gpt-4o-mini", "gpt-4.1", "o3-mini"]
+        vec![] // user must supply models explicitly
     }
 
     fn default_base_url(&self) -> &str {
-        "https://api.openai.com/v1"
+        ""
     }
 
     async fn test(&self, config: &ChannelConfig) -> Result<TestResult, anyhow::Error> {
+        if config.base_url.is_empty() {
+            return Ok(TestResult {
+                success: false,
+                message: "base_url is empty".into(),
+                latency_ms: 0,
+            });
+        }
+        if config.models.is_empty() {
+            return Ok(TestResult {
+                success: false,
+                message: "no model configured".into(),
+                latency_ms: 0,
+            });
+        }
+
         let client = build_client(config)?;
         let body = json!({
-            "model": config.models.first().map(String::as_str)
-                .unwrap_or_else(|| self.default_models().first().copied().unwrap_or("gpt-4o-mini")),
+            "model": config.models[0],
             "messages": [{ "role": "user", "content": "ping" }],
             "max_tokens": 5,
-            "stream": false,
         });
 
         let start = std::time::Instant::now();
@@ -61,25 +78,18 @@ impl Adaptor for OpenAIAdaptor {
             Ok(r) => {
                 let status = r.status();
                 if status.is_success() {
-                    Ok(TestResult {
-                        success: true,
-                        message: "OK".into(),
-                        latency_ms: latency,
-                    })
+                    Ok(TestResult { success: true, message: "OK".into(), latency_ms: latency })
                 } else {
                     let text = r.text().await.unwrap_or_default();
                     Ok(TestResult {
                         success: false,
-                        message: format!("HTTP {}: {}", status.as_u16(), truncate(&text, 200)),
+                        message: format!("HTTP {}: {}", status.as_u16(),
+                            crate::adapter::openai::truncate(&text, 200)),
                         latency_ms: latency,
                     })
                 }
             }
-            Err(e) => Ok(TestResult {
-                success: false,
-                message: e.to_string(),
-                latency_ms: latency,
-            }),
+            Err(e) => Ok(TestResult { success: false, message: e.to_string(), latency_ms: latency }),
         }
     }
 
@@ -89,10 +99,13 @@ impl Adaptor for OpenAIAdaptor {
         config: &ChannelConfig,
     ) -> Result<(u16, serde_json::Value, Option<TokenUsage>), anyhow::Error> {
         let client = build_client(config)?;
+        let mut body = request.body.clone();
+        body["model"] = json!(map_model(request, config));
+
         let resp = client
             .post(self.request_url(config))
             .bearer_auth(&config.api_key)
-            .json(&self.build_body(request, config))
+            .json(&body)
             .send()
             .await?;
 
@@ -108,9 +121,9 @@ impl Adaptor for OpenAIAdaptor {
         config: &ChannelConfig,
     ) -> Result<reqwest::Response, anyhow::Error> {
         let client = build_client(config)?;
-        let mut body = self.build_body(request, config);
+        let mut body = request.body.clone();
+        body["model"] = json!(map_model(request, config));
         body["stream"] = json!(true);
-        body["stream_options"] = json!({ "include_usage": true });
 
         let resp = client
             .post(self.request_url(config))
@@ -119,13 +132,5 @@ impl Adaptor for OpenAIAdaptor {
             .send()
             .await?;
         Ok(resp)
-    }
-}
-
-pub(crate) fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max])
     }
 }

@@ -6,6 +6,7 @@ import {
   Zap,
   RefreshCw,
   Network,
+  AlertTriangle,
 } from "lucide-react";
 import {
   Card,
@@ -15,7 +16,10 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
-import { Select } from "@/components/ui/select";
+import { Skeleton } from "@/components/ui/skeleton";
+import { EmptyState } from "@/components/ui/empty-state";
+import { StatusBadge, type StatusTone } from "@/components/ui/status-badge";
+import { useToast } from "@/components/ui/toast";
 import {
   Dialog,
   DialogContent,
@@ -27,7 +31,6 @@ import {
 import { channelApi, type ChannelInput } from "@/lib/api";
 import type { Channel, ProviderPreset } from "@/types";
 
-/** 空表单 */
 const emptyForm = (): ChannelInput => ({
   name: "",
   protocol: "openai",
@@ -42,22 +45,29 @@ const emptyForm = (): ChannelInput => ({
   endpoints: [],
 });
 
+const CHANNEL_TONE: Record<number, { tone: StatusTone; label: string }> = {
+  1: { tone: "success", label: "启用" },
+  2: { tone: "destructive", label: "异常" },
+  0: { tone: "secondary", label: "禁用" },
+};
+
 export function ChannelsPage() {
+  const toast = useToast();
   const [channels, setChannels] = useState<Channel[]>([]);
   const [presets, setPresets] = useState<ProviderPreset[]>([]);
   const [loading, setLoading] = useState(true);
 
-  // Dialog 状态
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<ChannelInput>(emptyForm());
   const [modelsText, setModelsText] = useState("");
   const [saving, setSaving] = useState(false);
 
-  // 测试中的渠道 id
   const [testingId, setTestingId] = useState<string | null>(null);
-  // 测试结果: channelId -> ok / fail
   const [testResults, setTestResults] = useState<Record<string, boolean>>({});
+
+  const [deleteTarget, setDeleteTarget] = useState<Channel | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -67,6 +77,7 @@ export function ChannelsPage() {
       setPresets(ps);
     } catch (e) {
       console.error("Failed to load channels:", e);
+      toast.error("渠道列表加载失败");
     } finally {
       setLoading(false);
     }
@@ -76,7 +87,6 @@ export function ChannelsPage() {
     load();
   }, []);
 
-  // ---------- 新建 ----------
   const openCreate = () => {
     setEditingId(null);
     setForm(emptyForm());
@@ -84,7 +94,6 @@ export function ChannelsPage() {
     setDialogOpen(true);
   };
 
-  // ---------- 编辑 ----------
   const openEdit = (ch: Channel) => {
     setEditingId(ch.id);
     setForm({
@@ -92,7 +101,7 @@ export function ChannelsPage() {
       protocol: ch.protocol,
       type: ch.type,
       base_url: ch.base_url,
-      api_key: "", // 编辑时不回填密钥（后端只返回掩码）
+      api_key: "",
       models: ch.models,
       priority: ch.priority,
       weight: ch.weight,
@@ -104,11 +113,8 @@ export function ChannelsPage() {
     setDialogOpen(true);
   };
 
-  // ---------- 保存（新建 / 编辑） ----------
   const handleSave = async () => {
-    if (!form.name.trim() || !form.base_url.trim()) {
-      return;
-    }
+    if (!form.name.trim() || !form.base_url.trim()) return;
     setSaving(true);
     try {
       const input: ChannelInput = {
@@ -120,50 +126,57 @@ export function ChannelsPage() {
       };
       if (editingId) {
         await channelApi.update(editingId, input);
+        toast.success("渠道已更新");
       } else {
         await channelApi.create(input);
+        toast.success("渠道已创建");
       }
       setDialogOpen(false);
       await load();
     } catch (e) {
       console.error("Failed to save channel:", e);
+      toast.error("保存失败，请检查配置");
     } finally {
       setSaving(false);
     }
   };
 
-  // ---------- 删除 ----------
-  const handleDelete = async (id: string, name: string) => {
-    if (!window.confirm(`确认删除渠道「${name}」？此操作不可恢复。`)) return;
+  const handleConfirmDelete = async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
     try {
-      await channelApi.remove(id);
+      await channelApi.remove(deleteTarget.id);
+      toast.success(`已删除渠道「${deleteTarget.name}」`);
+      setDeleteTarget(null);
       await load();
     } catch (e) {
       console.error("Failed to delete channel:", e);
+      toast.error("删除失败");
+    } finally {
+      setDeleting(false);
     }
   };
 
-  // ---------- 测试连通性 ----------
   const handleTest = async (id: string) => {
     setTestingId(id);
     try {
       const ok = await channelApi.test(id);
       setTestResults((prev) => ({ ...prev, [id]: ok }));
+      toast[ok ? "success" : "error"](ok ? "连通性测试通过" : "连通性测试失败");
     } catch {
       setTestResults((prev) => ({ ...prev, [id]: false }));
+      toast.error("连通性测试失败");
     } finally {
       setTestingId(null);
     }
   };
 
-  // 选择渠道类型时自动填充 base_url 和协议
   const handleTypeChange = (type: string) => {
     const preset = presets.find((p) => p.type === type);
     setForm((f) => ({
       ...f,
       type,
       protocol: type === "claude" ? "anthropic" : type === "ollama" ? "ollama" : "openai",
-      // 仅当 base_url 为空或等于其他预设默认值时自动填充
       base_url:
         !f.base_url || presets.some((p) => p.default_base_url === f.base_url)
           ? preset?.default_base_url ?? ""
@@ -172,10 +185,10 @@ export function ChannelsPage() {
   };
 
   return (
-    <div className="p-6">
+    <div>
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold">渠道管理</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">渠道管理</h1>
           <p className="mt-1 text-sm text-muted-foreground">
             管理上游供应商渠道：OpenAI / DeepSeek / Claude / Gemini 等
           </p>
@@ -195,65 +208,78 @@ export function ChannelsPage() {
       <Card className="mt-6">
         <CardContent className="pt-2">
           {loading ? (
-            <div className="py-12 text-center text-sm text-muted-foreground">
-              加载中...
+            <div className="space-y-2 py-4">
+              {Array.from({ length: 4 }).map((_, i) => (
+                <Skeleton key={i} className="h-14 w-full" />
+              ))}
             </div>
           ) : channels.length === 0 ? (
-            <div className="flex flex-col items-center gap-2 py-12 text-center">
-              <Network className="h-10 w-10 text-muted-foreground" />
-              <p className="text-sm text-muted-foreground">暂无渠道</p>
-              <Button size="sm" variant="outline" onClick={openCreate}>
-                <Plus />
-                添加第一个渠道
-              </Button>
-            </div>
+            <EmptyState
+              icon={Network}
+              title="暂无渠道"
+              description="添加第一个上游 LLM 供应商，网关即可开始统一代理请求。"
+              action={
+                <Button size="sm" variant="outline" onClick={openCreate}>
+                  <Plus />
+                  添加第一个渠道
+                </Button>
+              }
+            />
           ) : (
             <div className="divide-y">
-              {channels.map((ch) => (
-                <div
-                  key={ch.id}
-                  className="flex items-center justify-between gap-4 py-3"
-                >
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <span className="font-medium">{ch.name}</span>
-                      <Badge variant="outline">{ch.type}</Badge>
-                      {testResults[ch.id] !== undefined && (
-                        <Badge variant={testResults[ch.id] ? "success" : "destructive"}>
-                          {testResults[ch.id] ? "连通" : "失败"}
+              {channels.map((ch) => {
+                const meta = CHANNEL_TONE[ch.status] ?? CHANNEL_TONE[0];
+                const tested = testResults[ch.id];
+                return (
+                  <div
+                    key={ch.id}
+                    className="group flex items-center justify-between gap-4 rounded-lg px-2 py-3 transition-colors hover:bg-accent/40"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-medium">{ch.name}</span>
+                        <Badge variant="outline" className="font-mono text-[11px]">
+                          {ch.type}
                         </Badge>
-                      )}
+                        <StatusBadge tone={meta.tone}>{meta.label}</StatusBadge>
+                        {tested !== undefined && (
+                          <StatusBadge tone={tested ? "success" : "destructive"}>
+                            {tested ? "连通" : "失败"}
+                          </StatusBadge>
+                        )}
+                      </div>
+                      <p className="mt-1 truncate font-mono text-xs text-muted-foreground">
+                        {ch.base_url} · {ch.models.length} 模型 · 权重 {ch.weight} · 优先级{" "}
+                        {ch.priority}
+                      </p>
                     </div>
-                    <p className="mt-0.5 truncate text-xs text-muted-foreground">
-                      {ch.base_url} · {ch.models.length} 模型 · 权重 {ch.weight} · 优先级 {ch.priority}
-                    </p>
+                    <div className="flex shrink-0 items-center gap-1 opacity-70 transition-opacity group-hover:opacity-100">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => handleTest(ch.id)}
+                        disabled={testingId === ch.id}
+                      >
+                        <Zap className={testingId === ch.id ? "animate-pulse" : ""} />
+                        测试
+                      </Button>
+                      <Button variant="ghost" size="sm" onClick={() => openEdit(ch)}>
+                        <Pencil />
+                        编辑
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                        onClick={() => setDeleteTarget(ch)}
+                      >
+                        <Trash2 />
+                        删除
+                      </Button>
+                    </div>
                   </div>
-                  <div className="flex shrink-0 items-center gap-1">
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => handleTest(ch.id)}
-                      disabled={testingId === ch.id}
-                    >
-                      <Zap className={testingId === ch.id ? "animate-pulse" : ""} />
-                      测试
-                    </Button>
-                    <Button variant="ghost" size="sm" onClick={() => openEdit(ch)}>
-                      <Pencil />
-                      编辑
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="text-destructive hover:text-destructive"
-                      onClick={() => handleDelete(ch.id, ch.name)}
-                    >
-                      <Trash2 />
-                      删除
-                    </Button>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </CardContent>
@@ -272,21 +298,16 @@ export function ChannelsPage() {
           </DialogHeader>
 
           <div className="grid gap-4">
-            {/* 渠道类型 */}
             <div className="grid grid-cols-2 gap-4">
               <div className="grid gap-2">
                 <Label htmlFor="ch-type">渠道类型</Label>
-                <Select
+                <Input
                   id="ch-type"
                   value={form.type}
-                  onChange={(e) => handleTypeChange(e.target.value)}
-                >
-                  {presets.map((p) => (
-                    <option key={p.type} value={p.type}>
-                      {p.label}
-                    </option>
-                  ))}
-                </Select>
+                  readOnly
+                  className="bg-muted/50 font-mono text-xs"
+                />
+                <SelectType value={form.type} presets={presets} onChange={handleTypeChange} />
               </div>
               <div className="grid gap-2">
                 <Label htmlFor="ch-name">渠道名称</Label>
@@ -299,7 +320,6 @@ export function ChannelsPage() {
               </div>
             </div>
 
-            {/* Base URL */}
             <div className="grid gap-2">
               <Label htmlFor="ch-url">Base URL</Label>
               <Input
@@ -310,7 +330,6 @@ export function ChannelsPage() {
               />
             </div>
 
-            {/* API Key */}
             <div className="grid gap-2">
               <Label htmlFor="ch-key">
                 API Key{editingId && <span className="text-xs text-muted-foreground">（留空保持不变）</span>}
@@ -324,7 +343,6 @@ export function ChannelsPage() {
               />
             </div>
 
-            {/* 模型列表 */}
             <div className="grid gap-2">
               <Label htmlFor="ch-models">
                 模型列表<span className="text-xs text-muted-foreground">（逗号或换行分隔）</span>
@@ -337,7 +355,6 @@ export function ChannelsPage() {
               />
             </div>
 
-            {/* 权重 / 优先级 */}
             <div className="grid grid-cols-2 gap-4">
               <div className="grid gap-2">
                 <Label htmlFor="ch-weight">
@@ -374,12 +391,82 @@ export function ChannelsPage() {
             <Button variant="outline" onClick={() => setDialogOpen(false)}>
               取消
             </Button>
-            <Button onClick={handleSave} disabled={saving || !form.name.trim() || !form.base_url.trim()}>
+            <Button
+              onClick={handleSave}
+              disabled={saving || !form.name.trim() || !form.base_url.trim()}
+            >
               {saving ? "保存中..." : "保存"}
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* 删除确认 Dialog */}
+      <Dialog open={deleteTarget !== null} onOpenChange={(o) => !o && setDeleteTarget(null)}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="h-5 w-5 text-destructive" />
+              删除渠道
+            </DialogTitle>
+            <DialogDescription>
+              确认删除渠道「{deleteTarget?.name}」？此操作不可恢复，相关路由配置将一并移除。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteTarget(null)}>
+              取消
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={handleConfirmDelete}
+              disabled={deleting}
+            >
+              {deleting ? "删除中..." : "确认删除"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+/** 渠道类型选择：用带品牌感的按钮组代替原生下拉 */
+function SelectType({
+  value,
+  presets,
+  onChange,
+}: {
+  value: string;
+  presets: ProviderPreset[];
+  onChange: (v: string) => void;
+}) {
+  const list = presets.length
+    ? presets
+    : [
+        { type: "openai", label: "OpenAI" },
+        { type: "deepseek", label: "DeepSeek" },
+        { type: "claude", label: "Claude" },
+        { type: "gemini", label: "Gemini" },
+        { type: "custom", label: "自定义" },
+      ];
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {list.map((p) => (
+        <button
+          key={p.type}
+          type="button"
+          onClick={() => onChange(p.type)}
+          className={
+            "rounded-md border px-2.5 py-1 text-xs transition-colors " +
+            (value === p.type
+              ? "border-primary bg-primary/10 text-primary"
+              : "text-muted-foreground hover:bg-accent/50")
+          }
+        >
+          {p.label}
+        </button>
+      ))}
     </div>
   );
 }

@@ -7,6 +7,7 @@ import {
   KeyRound,
   RefreshCw,
   CheckCircle2,
+  AlertTriangle,
 } from "lucide-react";
 import {
   Card,
@@ -15,7 +16,10 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Badge } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
+import { EmptyState } from "@/components/ui/empty-state";
+import { StatusBadge, type StatusTone } from "@/components/ui/status-badge";
+import { useToast } from "@/components/ui/toast";
 import {
   Dialog,
   DialogContent,
@@ -32,19 +36,27 @@ function formatQuota(used: number, limit: number): string {
   return `${used.toLocaleString()} / ${limit.toLocaleString()}`;
 }
 
+const KEY_TONE: Record<number, { tone: StatusTone; label: string }> = {
+  1: { tone: "success", label: "启用" },
+  2: { tone: "warning", label: "过期" },
+  0: { tone: "secondary", label: "禁用" },
+};
+
 export function ApiKeysPage() {
+  const toast = useToast();
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [loading, setLoading] = useState(true);
 
-  // 创建 Dialog
   const [createOpen, setCreateOpen] = useState(false);
   const [name, setName] = useState("");
-  const [quota, setQuota] = useState("0"); // 0 = 不限
+  const [quota, setQuota] = useState("0");
   const [creating, setCreating] = useState(false);
 
-  // 明文展示 Dialog（创建成功后一次性展示）
   const [plainKey, setPlainKey] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+
+  const [deleteTarget, setDeleteTarget] = useState<ApiKey | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -52,6 +64,7 @@ export function ApiKeysPage() {
       setKeys(await keyApi.list());
     } catch (e) {
       console.error("Failed to load api keys:", e);
+      toast.error("密钥列表加载失败");
     } finally {
       setLoading(false);
     }
@@ -76,22 +89,29 @@ export function ApiKeysPage() {
       setPlainKey(result.key);
       setName("");
       setQuota("0");
+      toast.success("密钥已生成");
       await load();
     } catch (e) {
       console.error("Failed to create api key:", e);
+      toast.error("密钥生成失败");
     } finally {
       setCreating(false);
     }
   };
 
-  const handleDelete = async (id: string, keyName: string) => {
-    if (!window.confirm(`确认删除密钥「${keyName}」？使用该密钥的客户端将立即失去访问权限。`))
-      return;
+  const handleConfirmDelete = async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
     try {
-      await keyApi.remove(id);
+      await keyApi.remove(deleteTarget.id);
+      toast.success(`已删除密钥「${deleteTarget.name}」`);
+      setDeleteTarget(null);
       await load();
     } catch (e) {
       console.error("Failed to delete api key:", e);
+      toast.error("删除失败");
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -103,14 +123,15 @@ export function ApiKeysPage() {
       setTimeout(() => setCopied(false), 2000);
     } catch {
       console.error("Copy failed");
+      toast.error("复制失败");
     }
   };
 
   return (
-    <div className="p-6">
+    <div>
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold">密钥管理</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">密钥管理</h1>
           <p className="mt-1 text-sm text-muted-foreground">
             网关密钥管理：创建 sk-dongapi-* 密钥、配额限制、绑定渠道
           </p>
@@ -130,61 +151,66 @@ export function ApiKeysPage() {
       <Card className="mt-6">
         <CardContent className="pt-2">
           {loading ? (
-            <div className="py-12 text-center text-sm text-muted-foreground">
-              加载中...
+            <div className="space-y-2 py-4">
+              {Array.from({ length: 3 }).map((_, i) => (
+                <Skeleton key={i} className="h-16 w-full" />
+              ))}
             </div>
           ) : keys.length === 0 ? (
-            <div className="flex flex-col items-center gap-2 py-12 text-center">
-              <KeyRound className="h-10 w-10 text-muted-foreground" />
-              <p className="text-sm text-muted-foreground">暂无密钥</p>
-              <p className="text-xs text-muted-foreground">
-                创建 sk-dongapi-* 密钥后，客户端即可通过网关调用 LLM
-              </p>
-            </div>
+            <EmptyState
+              icon={KeyRound}
+              title="暂无密钥"
+              description="创建 sk-dongapi-* 密钥后，客户端即可通过网关以 OpenAI 兼容协议调用 LLM。"
+              action={
+                <Button size="sm" variant="outline" onClick={() => setCreateOpen(true)}>
+                  <Plus />
+                  创建第一个密钥
+                </Button>
+              }
+            />
           ) : (
             <div className="divide-y">
               {keys.map((k) => {
+                const meta = KEY_TONE[k.status] ?? KEY_TONE[0];
                 const quotaPct =
                   k.quota_limit > 0 ? Math.min(100, (k.quota_used / k.quota_limit) * 100) : 0;
+                const barColor =
+                  quotaPct >= 90
+                    ? "bg-destructive"
+                    : quotaPct >= 70
+                      ? "bg-warning"
+                      : "bg-success";
                 return (
-                  <div key={k.id} className="flex items-center justify-between gap-4 py-3">
+                  <div
+                    key={k.id}
+                    className="group flex items-center justify-between gap-4 rounded-lg px-2 py-3 transition-colors hover:bg-accent/40"
+                  >
                     <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
                         <span className="font-medium">{k.name}</span>
-                        {k.status === 1 ? (
-                          <Badge variant="success">启用</Badge>
-                        ) : (
-                          <Badge variant="secondary">
-                            {k.status === 2 ? "过期" : "禁用"}
-                          </Badge>
-                        )}
+                        <StatusBadge tone={meta.tone}>{meta.label}</StatusBadge>
                       </div>
-                      <p className="mt-0.5 font-mono text-xs text-muted-foreground">{k.key}</p>
-                      {/* 配额进度条 */}
-                      <div className="mt-1.5 flex items-center gap-2">
+                      <p className="mt-1 truncate font-mono text-xs text-muted-foreground">
+                        {k.key}
+                      </p>
+                      <div className="mt-2 flex items-center gap-2">
                         <div className="h-1.5 w-40 overflow-hidden rounded-full bg-muted">
                           <div
-                            className={`h-full rounded-full ${
-                              quotaPct >= 90
-                                ? "bg-destructive"
-                                : quotaPct >= 70
-                                  ? "bg-amber-500"
-                                  : "bg-emerald-500"
-                            }`}
+                            className={`h-full rounded-full transition-all ${barColor}`}
                             style={{ width: `${k.quota_limit > 0 ? quotaPct : 0}%` }}
                           />
                         </div>
-                        <span className="text-xs text-muted-foreground">
+                        <span className="font-mono text-xs tabular-nums text-muted-foreground">
                           {formatQuota(k.quota_used, k.quota_limit)} tokens
                         </span>
                       </div>
                     </div>
-                    <div className="flex shrink-0 items-center gap-1">
+                    <div className="flex shrink-0 items-center gap-1 opacity-70 transition-opacity group-hover:opacity-100">
                       <Button
                         variant="ghost"
                         size="sm"
-                        className="text-destructive hover:text-destructive"
-                        onClick={() => handleDelete(k.id, k.name)}
+                        className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                        onClick={() => setDeleteTarget(k)}
                       >
                         <Trash2 />
                         删除
@@ -252,7 +278,7 @@ export function ApiKeysPage() {
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
-              <CheckCircle2 className="h-5 w-5 text-emerald-500" />
+              <CheckCircle2 className="h-5 w-5 text-success" />
               密钥创建成功
             </DialogTitle>
             <DialogDescription>
@@ -260,16 +286,43 @@ export function ApiKeysPage() {
             </DialogDescription>
           </DialogHeader>
 
-          <div className="flex items-center gap-2 rounded-md border bg-muted/50 p-3">
+          <div className="flex items-center gap-2 rounded-lg border bg-muted/40 p-3">
             <code className="flex-1 break-all font-mono text-sm">{plainKey}</code>
             <Button variant="outline" size="sm" onClick={handleCopy}>
-              {copied ? <Check className="text-emerald-500" /> : <Copy />}
+              {copied ? <Check className="text-success" /> : <Copy />}
               {copied ? "已复制" : "复制"}
             </Button>
           </div>
 
           <DialogFooter>
             <Button onClick={() => setPlainKey(null)}>我已保存，关闭</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 删除确认 Dialog */}
+      <Dialog open={deleteTarget !== null} onOpenChange={(o) => !o && setDeleteTarget(null)}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="h-5 w-5 text-destructive" />
+              删除密钥
+            </DialogTitle>
+            <DialogDescription>
+              确认删除密钥「{deleteTarget?.name}」？使用该密钥的客户端将立即失去访问权限。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteTarget(null)}>
+              取消
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={handleConfirmDelete}
+              disabled={deleting}
+            >
+              {deleting ? "删除中..." : "确认删除"}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

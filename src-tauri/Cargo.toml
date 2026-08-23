@@ -79,6 +79,7 @@ dirs = "5"                           # 系统目录（app_data_dir / config_dir�
 regex = "1"                          # 安全扫描（敏感信息脱敏）
 anyhow = "1"                         # 第三方错误兜底（AppError::From<anyhow::Error>）
 thiserror = "2"                      # AppError derive 宏
+async-trait = "0.1"                  # adapter trait 需要 dyn Adaptor（原生 async fn in trait 不支持 trait 对象）
 
 # ============================================================
 # 日志（tracing 生态，不引入 log crate）

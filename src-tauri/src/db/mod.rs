@@ -2,6 +2,8 @@ use std::path::Path;
 use std::str::FromStr;
 use std::time::Duration;
 
+pub mod repository;
+
 use sqlx::sqlite::{
     SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous,
 };

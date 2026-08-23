@@ -14,9 +14,13 @@ import { Switch } from "@/components/ui/switch";
 import { Select } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { settingsApi, type SettingsUpdate } from "@/lib/api";
+import { applyTheme } from "@/lib/theme";
+import { Skeleton } from "@/components/ui/skeleton";
+import { useToast } from "@/components/ui/toast";
 import type { Settings, ThemeMode, SecurityMode } from "@/types";
 
 export function SettingsPage() {
+  const toast = useToast();
   const [settings, setSettings] = useState<Settings | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -65,9 +69,11 @@ export function SettingsPage() {
       const result = await settingsApi.update(update);
       setSettings(result);
       setSaved(true);
+      toast.success("设置已保存");
       setTimeout(() => setSaved(false), 2000);
     } catch (e) {
       console.error("Failed to save settings:", e);
+      toast.error("保存失败");
     } finally {
       setSaving(false);
     }
@@ -75,18 +81,19 @@ export function SettingsPage() {
 
   if (loading || !settings) {
     return (
-      <div className="p-6">
-        <h1 className="text-2xl font-bold">设置</h1>
-        <p className="mt-12 text-center text-sm text-muted-foreground">加载中...</p>
+      <div className="space-y-4">
+        <Skeleton className="h-9 w-44" />
+        <Skeleton className="h-5 w-72" />
+        <Skeleton className="mt-6 h-72 w-full rounded-xl" />
       </div>
     );
   }
 
   return (
-    <div className="p-6">
+    <div>
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold">设置</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">设置</h1>
           <p className="mt-1 text-sm text-muted-foreground">服务配置、通用设置、界面、重试策略</p>
         </div>
         <div className="flex gap-2">
@@ -234,7 +241,11 @@ export function SettingsPage() {
                 <Select
                   id="ap-theme"
                   value={settings.ui_theme}
-                  onChange={(e) => patch({ ui_theme: e.target.value as ThemeMode })}
+                  onChange={(e) => {
+                    const mode = e.target.value as ThemeMode;
+                    patch({ ui_theme: mode });
+                    applyTheme(mode);
+                  }}
                 >
                   <option value="system">跟随系统</option>
                   <option value="light">浅色</option>

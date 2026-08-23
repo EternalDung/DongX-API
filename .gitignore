@@ -4,6 +4,7 @@ dist/
 
 # Rust / Tauri
 src-tauri/target/
+src-tauri/target_old/
 # Note: Cargo.lock IS committed for binary applications
 
 # Data

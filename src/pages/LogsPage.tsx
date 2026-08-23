@@ -4,6 +4,7 @@ import {
   RefreshCw,
   ScrollText,
   Trash2,
+  AlertTriangle,
 } from "lucide-react";
 import {
   Card,
@@ -13,6 +14,10 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Select } from "@/components/ui/select";
+import { Skeleton } from "@/components/ui/skeleton";
+import { EmptyState } from "@/components/ui/empty-state";
+import { StatusBadge, type StatusTone } from "@/components/ui/status-badge";
+import { useToast } from "@/components/ui/toast";
 import {
   Table,
   TableBody,
@@ -21,13 +26,26 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { logApi, channelApi } from "@/lib/api";
 import type { RequestLog, Channel } from "@/types";
 
-function statusVariant(code: number): "success" | "destructive" | "warning" {
+function statusTone(code: number): StatusTone {
   if (code >= 500) return "destructive";
   if (code >= 400) return "warning";
   return "success";
+}
+function statusLabel(code: number): string {
+  if (code >= 500) return "服务端错误";
+  if (code >= 400) return "客户端错误";
+  return "成功";
 }
 
 function formatTime(iso: string): string {
@@ -38,15 +56,18 @@ function formatTime(iso: string): string {
 }
 
 export function LogsPage() {
+  const toast = useToast();
   const [logs, setLogs] = useState<RequestLog[]>([]);
   const [channels, setChannels] = useState<Channel[]>([]);
   const [loading, setLoading] = useState(true);
 
-  // 筛选条件
   const [keyword, setKeyword] = useState("");
   const [channelFilter, setChannelFilter] = useState("all");
   const [modelFilter, setModelFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
+
+  const [clearOpen, setClearOpen] = useState(false);
+  const [clearing, setClearing] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -56,6 +77,7 @@ export function LogsPage() {
       setChannels(chList);
     } catch (e) {
       console.error("Failed to load logs:", e);
+      toast.error("日志加载失败");
     } finally {
       setLoading(false);
     }
@@ -65,22 +87,17 @@ export function LogsPage() {
     load();
   }, []);
 
-  // 模型去重列表（用于下拉）
   const modelOptions = useMemo(() => {
     const set = new Set(logs.map((l) => l.model));
     return Array.from(set).sort();
   }, [logs]);
 
-  // 客户端过滤（关键词跨字段模糊匹配）
   const filtered = useMemo(() => {
     const kw = keyword.trim().toLowerCase();
     return logs.filter((l) => {
       if (channelFilter !== "all" && l.channel_name !== channelFilter) return false;
       if (modelFilter !== "all" && l.model !== modelFilter) return false;
-      if (statusFilter !== "all") {
-        const prefix = statusFilter; // "2" "4" "5"
-        if (!String(l.status_code).startsWith(prefix)) return false;
-      }
+      if (statusFilter !== "all" && !String(l.status_code).startsWith(statusFilter)) return false;
       if (kw) {
         const haystack = [
           l.model,
@@ -98,13 +115,25 @@ export function LogsPage() {
   }, [logs, keyword, channelFilter, modelFilter, statusFilter]);
 
   const handleClear = async () => {
-    if (!window.confirm("确认清空全部请求日志？此操作不可恢复。")) return;
+    setClearing(true);
     try {
       await logApi.clear();
+      toast.success("日志已清空");
+      setClearOpen(false);
       await load();
     } catch (e) {
       console.error("Failed to clear logs:", e);
+      toast.error("清空失败");
+    } finally {
+      setClearing(false);
     }
+  };
+
+  const resetFilters = () => {
+    setKeyword("");
+    setChannelFilter("all");
+    setModelFilter("all");
+    setStatusFilter("all");
   };
 
   const hasFilter =
@@ -114,13 +143,17 @@ export function LogsPage() {
     statusFilter !== "all";
 
   return (
-    <div className="p-6">
+    <div>
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold">请求日志</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">请求日志</h1>
           <p className="mt-1 text-sm text-muted-foreground">
             逐条请求明细：状态、Token、延迟
-            {filtered.length !== logs.length && `（${filtered.length}/${logs.length}）`}
+            {filtered.length !== logs.length && (
+              <span className="ml-1 font-mono text-xs">
+                （{filtered.length}/{logs.length}）
+              </span>
+            )}
           </p>
         </div>
         <div className="flex gap-2">
@@ -131,8 +164,8 @@ export function LogsPage() {
           <Button
             variant="outline"
             size="sm"
-            className="text-destructive hover:text-destructive"
-            onClick={handleClear}
+            className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+            onClick={() => setClearOpen(true)}
           >
             <Trash2 />
             清空
@@ -151,11 +184,7 @@ export function LogsPage() {
             onChange={(e) => setKeyword(e.target.value)}
           />
         </div>
-        <Select
-          className="w-40"
-          value={channelFilter}
-          onChange={(e) => setChannelFilter(e.target.value)}
-        >
+        <Select className="w-40" value={channelFilter} onChange={(e) => setChannelFilter(e.target.value)}>
           <option value="all">全部渠道</option>
           {channels.map((c) => (
             <option key={c.id} value={c.name}>
@@ -163,11 +192,7 @@ export function LogsPage() {
             </option>
           ))}
         </Select>
-        <Select
-          className="w-44"
-          value={modelFilter}
-          onChange={(e) => setModelFilter(e.target.value)}
-        >
+        <Select className="w-44" value={modelFilter} onChange={(e) => setModelFilter(e.target.value)}>
           <option value="all">全部模型</option>
           {modelOptions.map((m) => (
             <option key={m} value={m}>
@@ -175,11 +200,7 @@ export function LogsPage() {
             </option>
           ))}
         </Select>
-        <Select
-          className="w-32"
-          value={statusFilter}
-          onChange={(e) => setStatusFilter(e.target.value)}
-        >
+        <Select className="w-32" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
           <option value="all">全部状态</option>
           <option value="2">2xx 成功</option>
           <option value="4">4xx 客户端</option>
@@ -188,35 +209,35 @@ export function LogsPage() {
       </div>
 
       {/* 日志表格 */}
-      <Card className="mt-4">
+      <Card className="mt-4 overflow-hidden">
         <CardContent className="pt-2">
           {loading ? (
-            <div className="py-12 text-center text-sm text-muted-foreground">加载中...</div>
-          ) : filtered.length === 0 ? (
-            <div className="flex flex-col items-center gap-2 py-12 text-center">
-              <ScrollText className="h-10 w-10 text-muted-foreground" />
-              <p className="text-sm text-muted-foreground">
-                {hasFilter ? "没有匹配的日志" : "暂无请求日志"}
-              </p>
-              {hasFilter && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => {
-                    setKeyword("");
-                    setChannelFilter("all");
-                    setModelFilter("all");
-                    setStatusFilter("all");
-                  }}
-                >
-                  清除筛选条件
-                </Button>
-              )}
+            <div className="space-y-2 py-4">
+              {Array.from({ length: 6 }).map((_, i) => (
+                <Skeleton key={i} className="h-10 w-full" />
+              ))}
             </div>
+          ) : filtered.length === 0 ? (
+            <EmptyState
+              icon={ScrollText}
+              title={hasFilter ? "没有匹配的日志" : "暂无请求日志"}
+              description={
+                hasFilter
+                  ? "试着放宽筛选条件，或清除筛选后查看全部记录。"
+                  : "网关开始代理请求后，这里会逐条记录每次调用的明细。"
+              }
+              action={
+                hasFilter ? (
+                  <Button size="sm" variant="outline" onClick={resetFilters}>
+                    清除筛选条件
+                  </Button>
+                ) : undefined
+              }
+            />
           ) : (
             <Table>
               <TableHeader>
-                <TableRow>
+                <TableRow className="hover:bg-transparent">
                   <TableHead>时间</TableHead>
                   <TableHead>渠道</TableHead>
                   <TableHead>模型</TableHead>
@@ -229,7 +250,7 @@ export function LogsPage() {
               <TableBody>
                 {filtered.map((l) => (
                   <TableRow key={l.id}>
-                    <TableCell className="text-muted-foreground">
+                    <TableCell className="whitespace-nowrap text-muted-foreground">
                       {formatTime(l.created_at)}
                     </TableCell>
                     <TableCell>{l.channel_name ?? "-"}</TableCell>
@@ -237,9 +258,11 @@ export function LogsPage() {
                       <span className="font-mono text-xs">{l.model}</span>
                     </TableCell>
                     <TableCell>
-                      <Badge variant={statusVariant(l.status_code)}>{l.status_code}</Badge>
+                      <StatusBadge tone={statusTone(l.status_code)}>
+                        {l.status_code} {statusLabel(l.status_code)}
+                      </StatusBadge>
                     </TableCell>
-                    <TableCell className="text-right font-mono text-xs">
+                    <TableCell className="text-right font-mono text-xs tabular-nums">
                       {l.total_tokens > 0 ? (
                         <span title={`P:${l.prompt_tokens} / C:${l.completion_tokens}`}>
                           {l.total_tokens.toLocaleString()}
@@ -248,7 +271,7 @@ export function LogsPage() {
                         "-"
                       )}
                     </TableCell>
-                    <TableCell className="text-right font-mono text-xs">
+                    <TableCell className="text-right font-mono text-xs tabular-nums">
                       {l.duration_ms}ms
                     </TableCell>
                     <TableCell>
@@ -267,6 +290,29 @@ export function LogsPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* 清空确认 Dialog */}
+      <Dialog open={clearOpen} onOpenChange={setClearOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="h-5 w-5 text-destructive" />
+              清空请求日志
+            </DialogTitle>
+            <DialogDescription>
+              确认清空全部请求日志？此操作不可恢复，审计事件不受影响。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setClearOpen(false)}>
+              取消
+            </Button>
+            <Button variant="destructive" onClick={handleClear} disabled={clearing}>
+              {clearing ? "清空中..." : "确认清空"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

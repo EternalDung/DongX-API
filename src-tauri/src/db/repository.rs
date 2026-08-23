@@ -1,0 +1,630 @@
+//! Repository layer — all SQL CRUD operations.
+//!
+//! Java mental model: 等价于 Spring Data JPA 的 Repository 接口，
+//! 但这里是具体实现（sqlx 没有运行时代理）。
+//! - 每个 pub async fn ≈ 一个 DAO 方法，&SqlitePool ≈ 注入的 DataSource
+//! - 动态筛选用 QueryBuilder（≈ JPA Specification / MyBatis 动态 SQL）
+//! - 用 query_as 函数形式而非 query! 宏：宏需要编译期连库校验，
+//!   函数形式零配置，SQL 正确性靠集成测试保证
+
+use chrono::Utc;
+use sqlx::sqlite::Sqlite;
+use sqlx::{QueryBuilder, Row, SqlitePool};
+
+use crate::models::{
+    AuditEventRow, ChannelRow, DashboardStatsRow, GatewayKeyRow, RequestLogListItem,
+    RequestLogRow, SettingRow,
+};
+
+fn now() -> String {
+    Utc::now().to_rfc3339()
+}
+
+fn new_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
+// ============================================================
+// channels
+// ============================================================
+pub mod channels {
+    use super::*;
+
+    pub async fn list(pool: &SqlitePool) -> Result<Vec<ChannelRow>, sqlx::Error> {
+        sqlx::query_as::<_, ChannelRow>(
+            "SELECT * FROM channels ORDER BY priority DESC, created_at DESC",
+        )
+        .fetch_all(pool)
+        .await
+    }
+
+    pub async fn get_by_id(
+        pool: &SqlitePool,
+        id: &str,
+    ) -> Result<Option<ChannelRow>, sqlx::Error> {
+        sqlx::query_as::<_, ChannelRow>("SELECT * FROM channels WHERE id = ?")
+            .bind(id)
+            .fetch_optional(pool)
+            .await
+    }
+
+    /// Insert a new channel. `row.id` / timestamps are filled here if absent.
+    pub async fn insert(
+        pool: &SqlitePool,
+        name: &str,
+        protocol: &str,
+        channel_type: &str,
+        base_url: &str,
+        cred_encrypted: &str,
+        models: &str,        // JSON array string
+        priority: i32,
+        weight: i32,
+        config: &str,        // JSON object string
+        model_mapping: &str, // JSON object string
+        endpoints: &str,     // JSON array string
+    ) -> Result<ChannelRow, sqlx::Error> {
+        let id = new_id();
+        let ts = now();
+        sqlx::query(
+            "INSERT INTO channels (id, name, protocol, type, base_url, cred_encrypted,
+                models, status, priority, weight, config, model_mapping, endpoints,
+                created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8, ?9, ?10, ?11, ?12, ?13, ?13)",
+        )
+        .bind(&id)
+        .bind(name)
+        .bind(protocol)
+        .bind(channel_type)
+        .bind(base_url)
+        .bind(cred_encrypted)
+        .bind(models)
+        .bind(priority)
+        .bind(weight)
+        .bind(config)
+        .bind(model_mapping)
+        .bind(endpoints)
+        .bind(&ts)
+        .execute(pool)
+        .await?;
+
+        Ok(get_by_id(pool, &id).await?.expect("just inserted"))
+    }
+
+    /// Full update (all mutable fields).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn update(
+        pool: &SqlitePool,
+        id: &str,
+        name: &str,
+        protocol: &str,
+        channel_type: &str,
+        base_url: &str,
+        cred_encrypted: &str,
+        models: &str,
+        priority: i32,
+        weight: i32,
+        config: &str,
+        model_mapping: &str,
+        endpoints: &str,
+        status: i32,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "UPDATE channels SET name=?2, protocol=?3, type=?4, base_url=?5,
+                cred_encrypted=?6, models=?7, priority=?8, weight=?9, config=?10,
+                model_mapping=?11, endpoints=?12, status=?13, updated_at=?14
+             WHERE id = ?1",
+        )
+        .bind(id)
+        .bind(name)
+        .bind(protocol)
+        .bind(channel_type)
+        .bind(base_url)
+        .bind(cred_encrypted)
+        .bind(models)
+        .bind(priority)
+        .bind(weight)
+        .bind(config)
+        .bind(model_mapping)
+        .bind(endpoints)
+        .bind(status)
+        .bind(now())
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Update only enable/disable status (0=disabled 1=enabled).
+    pub async fn set_status(pool: &SqlitePool, id: &str, status: i32) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE channels SET status=?2, updated_at=?3 WHERE id=?1")
+            .bind(id)
+            .bind(status)
+            .bind(now())
+            .execute(pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn delete(pool: &SqlitePool, id: &str) -> Result<u64, sqlx::Error> {
+        let res = sqlx::query("DELETE FROM channels WHERE id = ?")
+            .bind(id)
+            .execute(pool)
+            .await?;
+        Ok(res.rows_affected())
+    }
+
+    /// Record last connectivity test result.
+    pub async fn set_test_result(
+        pool: &SqlitePool,
+        id: &str,
+        ok: bool,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE channels SET last_test_at=?2, last_test_ok=?3 WHERE id=?1")
+            .bind(id)
+            .bind(now())
+            .bind(ok as i32)
+            .execute(pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Channels eligible for routing (enabled only), ordered by priority.
+    pub async fn list_enabled(pool: &SqlitePool) -> Result<Vec<ChannelRow>, sqlx::Error> {
+        sqlx::query_as::<_, ChannelRow>(
+            "SELECT * FROM channels WHERE status = 1 ORDER BY priority DESC, weight DESC",
+        )
+        .fetch_all(pool)
+        .await
+    }
+}
+
+// ============================================================
+// gateway_keys
+// ============================================================
+pub mod gateway_keys {
+    use super::*;
+
+    pub async fn list(pool: &SqlitePool) -> Result<Vec<GatewayKeyRow>, sqlx::Error> {
+        sqlx::query_as::<_, GatewayKeyRow>("SELECT * FROM gateway_keys ORDER BY created_at DESC")
+            .fetch_all(pool)
+            .await
+    }
+
+    pub async fn get_by_id(
+        pool: &SqlitePool,
+        id: &str,
+    ) -> Result<Option<GatewayKeyRow>, sqlx::Error> {
+        sqlx::query_as::<_, GatewayKeyRow>("SELECT * FROM gateway_keys WHERE id = ?")
+            .bind(id)
+            .fetch_optional(pool)
+            .await
+    }
+
+    /// Lookup by key hash — the hot path of gateway authentication.
+    pub async fn get_by_key_hash(
+        pool: &SqlitePool,
+        key_hash: &str,
+    ) -> Result<Option<GatewayKeyRow>, sqlx::Error> {
+        sqlx::query_as::<_, GatewayKeyRow>("SELECT * FROM gateway_keys WHERE key_hash = ?")
+            .bind(key_hash)
+            .fetch_optional(pool)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert(
+        pool: &SqlitePool,
+        name: &str,
+        key_masked: &str, // masked display: sk-dongapi-****a1b2
+        key_hash: &str,   // SHA-256 hex
+        allowed_models: &str,
+        allowed_channels: &str,
+        quota_limit: i64,
+        expires_at: Option<&str>,
+    ) -> Result<GatewayKeyRow, sqlx::Error> {
+        let id = new_id();
+        let ts = now();
+        sqlx::query(
+            "INSERT INTO gateway_keys (id, name, key, key_hash, status, allowed_models,
+                allowed_channels, quota_limit, quota_used, expires_at, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, ?7, 0, ?8, ?9, ?9)",
+        )
+        .bind(&id)
+        .bind(name)
+        .bind(key_masked)
+        .bind(key_hash)
+        .bind(allowed_models)
+        .bind(allowed_channels)
+        .bind(quota_limit)
+        .bind(expires_at)
+        .bind(&ts)
+        .execute(pool)
+        .await?;
+
+        Ok(get_by_id(pool, &id).await?.expect("just inserted"))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn update(
+        pool: &SqlitePool,
+        id: &str,
+        name: &str,
+        allowed_models: &str,
+        allowed_channels: &str,
+        quota_limit: i64,
+        expires_at: Option<&str>,
+        status: i32,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "UPDATE gateway_keys SET name=?2, allowed_models=?3, allowed_channels=?4,
+                quota_limit=?5, expires_at=?6, status=?7, updated_at=?8
+             WHERE id=?1",
+        )
+        .bind(id)
+        .bind(name)
+        .bind(allowed_models)
+        .bind(allowed_channels)
+        .bind(quota_limit)
+        .bind(expires_at)
+        .bind(status)
+        .bind(now())
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn delete(pool: &SqlitePool, id: &str) -> Result<u64, sqlx::Error> {
+        let res = sqlx::query("DELETE FROM gateway_keys WHERE id = ?")
+            .bind(id)
+            .execute(pool)
+            .await?;
+        Ok(res.rows_affected())
+    }
+
+    /// Atomically add consumed tokens; auto-disable key when quota exhausted.
+    /// (0 = unlimited, never exhausted)
+    pub async fn add_quota_used(
+        pool: &SqlitePool,
+        id: &str,
+        tokens: i64,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "UPDATE gateway_keys
+             SET quota_used = quota_used + ?2,
+                 status = CASE
+                     WHEN quota_limit > 0 AND quota_used + ?2 >= quota_limit THEN 0
+                     ELSE status END,
+                 updated_at = ?3
+             WHERE id = ?1",
+        )
+        .bind(id)
+        .bind(tokens)
+        .bind(now())
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+}
+
+// ============================================================
+// request_logs
+// ============================================================pub mod
+
+/// Log filter conditions (all optional) — mirrors commands::log::LogQuery.
+#[derive(Debug, Default, Clone)]
+pub struct LogFilter {
+    pub keyword: Option<String>,     // fuzzy match model / channel_name / error_message
+    pub channel_name: Option<String>,
+    pub model: Option<String>,
+    pub status_code: Option<i32>,
+    pub start_time: Option<String>,  // RFC3339
+    pub end_time: Option<String>,
+    pub page: u32,
+    pub page_size: u32,
+}
+
+pub mod request_logs {
+    use super::*;
+
+    /// Insert a full log entry. `row.id` will be generated if absent.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert(
+        pool: &SqlitePool,
+        api_key_name: Option<&str>,
+        channel_name: Option<&str>,
+        model: &str,
+        upstream_model: Option<&str>,
+        mode: &str,
+        status_code: i32,
+        prompt_tokens: i64,
+        completion_tokens: i64,
+        total_tokens: i64,
+        duration_ms: i64,
+        error_message: Option<&str>,
+        is_stream: bool,
+        is_retry: bool,
+        request_body: Option<&str>,
+        response_body: Option<&str>,
+        risk_level: &str,
+        risk_score: i64,
+        risk_summary: Option<&str>,
+        security_action: &str,
+        sanitized: bool,
+        blocked_reason: Option<&str>,
+    ) -> Result<String, sqlx::Error> {
+        let id = new_id();
+        let seq: Option<i64> = sqlx::query("SELECT MAX(seq) FROM request_logs")
+            .fetch_one(pool)
+            .await?
+            .get(0);
+        let ts = now();
+
+        sqlx::query(
+            "INSERT INTO request_logs (id, seq, api_key_name, channel_name, model,
+                upstream_model, mode, status_code, prompt_tokens, completion_tokens,
+                total_tokens, duration_ms, error_message, is_stream, is_retry,
+                created_at, request_body, response_body, risk_level, risk_score,
+                risk_summary, security_action, sanitized, blocked_reason)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,
+                ?19,?20,?21,?22,?23,?24)",
+        )
+        .bind(&id)
+        .bind(seq.map_or(1, |s| s + 1))
+        .bind(api_key_name)
+        .bind(channel_name)
+        .bind(model)
+        .bind(upstream_model)
+        .bind(mode)
+        .bind(status_code)
+        .bind(prompt_tokens)
+        .bind(completion_tokens)
+        .bind(total_tokens)
+        .bind(duration_ms)
+        .bind(error_message)
+        .bind(is_stream as i32)
+        .bind(is_retry as i32)
+        .bind(&ts)
+        .bind(request_body)
+        .bind(response_body)
+        .bind(risk_level)
+        .bind(risk_score)
+        .bind(risk_summary)
+        .bind(security_action)
+        .bind(sanitized as i32)
+        .bind(blocked_reason)
+        .execute(pool)
+        .await?;
+
+        Ok(id)
+    }
+
+    /// List logs (slim rows, no bodies) with dynamic filters + pagination.
+    pub async fn list_filtered(
+        pool: &SqlitePool,
+        filter: &LogFilter,
+    ) -> Result<Vec<RequestLogListItem>, sqlx::Error> {
+        let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(
+            "SELECT id, seq, api_key_name, channel_name, model, mode, status_code,
+                    total_tokens, duration_ms, is_stream, is_retry, created_at,
+                    error_message, risk_level, security_action
+             FROM request_logs WHERE 1=1 ",
+        );
+
+        if let Some(kw) = &filter.keyword {
+            let like = format!("%{}%", kw);
+            qb.push("AND (model LIKE ").push_bind(like.clone());
+            qb.push(" OR channel_name LIKE ").push_bind(like.clone());
+            qb.push(" OR error_message LIKE ").push_bind(like);
+            qb.push(") ");
+        }
+        if let Some(c) = &filter.channel_name {
+            qb.push(" AND channel_name = ").push_bind(c.clone());
+        }
+        if let Some(m) = &filter.model {
+            qb.push(" AND model LIKE ").push_bind(format!("%{}%", m));
+        }
+        if let Some(sc) = filter.status_code {
+            qb.push(" AND status_code = ").push_bind(sc);
+        }
+        if let Some(s) = &filter.start_time {
+            qb.push(" AND created_at >= ").push_bind(s.clone());
+        }
+        if let Some(e) = &filter.end_time {
+            qb.push(" AND created_at <= ").push_bind(e.clone());
+        }
+
+        let page_size = filter.page_size.clamp(1, 200);
+        let offset = filter.page.saturating_sub(1).saturating_mul(page_size) as i64;
+        qb.push(" ORDER BY created_at DESC LIMIT ");
+        qb.push_bind(page_size as i64);
+        qb.push(" OFFSET ");
+        qb.push_bind(offset);
+
+        qb.build_query_as::<RequestLogListItem>()
+            .fetch_all(pool)
+            .await
+    }
+
+    /// Full log entry including request/response bodies.
+    pub async fn get_detail(
+        pool: &SqlitePool,
+        id: &str,
+    ) -> Result<Option<RequestLogRow>, sqlx::Error> {
+        sqlx::query_as::<_, RequestLogRow>("SELECT * FROM request_logs WHERE id = ?")
+            .bind(id)
+            .fetch_optional(pool)
+            .await
+    }
+
+    /// Clear all logs, or only those older than N days (None = all).
+    pub async fn clear(
+        pool: &SqlitePool,
+        older_than_days: Option<i32>,
+    ) -> Result<u64, sqlx::Error> {
+        let res = match older_than_days {
+            Some(days) => {
+                sqlx::query(
+                    "DELETE FROM request_logs
+                     WHERE created_at < datetime('now', '-' || ?1 || ' days')",
+                )
+                .bind(days)
+                .execute(pool)
+                .await?
+            }
+            None => sqlx::query("DELETE FROM request_logs").execute(pool).await?,
+        };
+        Ok(res.rows_affected())
+    }
+}
+
+// ============================================================
+// audit_events
+// ============================================================
+/// Audit filter conditions (all optional).
+#[derive(Debug, Default, Clone)]
+pub struct AuditFilter {
+    pub severity: Option<String>,
+    pub event_type: Option<String>,
+    pub start_time: Option<String>,
+    pub end_time: Option<String>,
+    pub page: u32,
+    pub page_size: u32,
+}
+
+pub mod audit_events {
+    use super::*;
+
+    pub async fn insert(
+        pool: &SqlitePool,
+        event_type: &str,
+        severity: &str,
+        actor: Option<&str>,
+        message: &str,
+        meta: Option<&str>, // JSON string
+    ) -> Result<String, sqlx::Error> {
+        let id = new_id();
+        sqlx::query(
+            "INSERT INTO audit_events (id, timestamp, type, severity, actor, message, meta)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )
+        .bind(&id)
+        .bind(now())
+        .bind(event_type)
+        .bind(severity)
+        .bind(actor)
+        .bind(message)
+        .bind(meta)
+        .execute(pool)
+        .await?;
+        Ok(id)
+    }
+
+    pub async fn list_filtered(
+        pool: &SqlitePool,
+        filter: &AuditFilter,
+    ) -> Result<Vec<AuditEventRow>, sqlx::Error> {
+        let mut qb: QueryBuilder<Sqlite> =
+            QueryBuilder::new("SELECT * FROM audit_events WHERE 1=1 ");
+
+        if let Some(s) = &filter.severity {
+            qb.push(" AND severity = ").push_bind(s.clone());
+        }
+        if let Some(t) = &filter.event_type {
+            qb.push(" AND type = ").push_bind(t.clone());
+        }
+        if let Some(s) = &filter.start_time {
+            qb.push(" AND timestamp >= ").push_bind(s.clone());
+        }
+        if let Some(e) = &filter.end_time {
+            qb.push(" AND timestamp <= ").push_bind(e.clone());
+        }
+
+        let page_size = filter.page_size.clamp(1, 200);
+        let offset = filter.page.saturating_sub(1).saturating_mul(page_size) as i64;
+        qb.push(" ORDER BY timestamp DESC LIMIT ");
+        qb.push_bind(page_size as i64);
+        qb.push(" OFFSET ");
+        qb.push_bind(offset);
+
+        qb.build_query_as::<AuditEventRow>().fetch_all(pool).await
+    }
+}
+
+// ============================================================
+// settings (key-value store, JSON-encoded values)
+// ============================================================
+pub mod settings {
+    use super::*;
+
+    /// Load all settings rows.
+    pub async fn get_all(pool: &SqlitePool) -> Result<Vec<SettingRow>, sqlx::Error> {
+        sqlx::query_as::<_, SettingRow>("SELECT key, value FROM settings")
+            .fetch_all(pool)
+            .await
+    }
+
+    /// Get a single value (raw JSON-encoded string).
+    pub async fn get(pool: &SqlitePool, key: &str) -> Result<Option<String>, sqlx::Error> {
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT value FROM settings WHERE key = ?")
+                .bind(key)
+                .fetch_optional(pool)
+                .await?;
+        Ok(row.map(|(v,)| v))
+    }
+
+    /// Upsert a single setting. Value must be JSON-encoded by the caller
+    /// (e.g. serde_json::to_string(&v)).
+    pub async fn upsert(pool: &SqlitePool, key: &str, value: &str) -> Result<(), sqlx::Error> {
+        sqlx::query("INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = ?2")
+            .bind(key)
+            .bind(value)
+            .execute(pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Batch upsert — one transaction, all-or-nothing.
+    pub async fn upsert_many(
+        pool: &SqlitePool,
+        entries: &[(String, String)],
+    ) -> Result<(), sqlx::Error> {
+        let mut tx = pool.begin().await?;
+        for (k, v) in entries {
+            sqlx::query(
+                "INSERT INTO settings (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = ?2",
+            )
+            .bind(k)
+            .bind(v)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await
+    }
+}
+
+// ============================================================
+// dashboard stats (single aggregate query)
+// ============================================================
+pub mod stats {
+    use super::*;
+
+    pub async fn dashboard(pool: &SqlitePool) -> Result<DashboardStatsRow, sqlx::Error> {
+        sqlx::query_as::<_, DashboardStatsRow>(
+            "SELECT
+                COALESCE((SELECT COUNT(*) FROM request_logs
+                    WHERE substr(created_at,1,10) = strftime('%Y-%m-%d','now')), 0) AS today_requests,
+                COALESCE((SELECT SUM(total_tokens) FROM request_logs
+                    WHERE substr(created_at,1,10) = strftime('%Y-%m-%d','now')), 0) AS today_total_tokens,
+                COALESCE((SELECT CAST(AVG(duration_ms) AS INTEGER) FROM request_logs
+                    WHERE substr(created_at,1,10) = strftime('%Y-%m-%d','now')), 0) AS avg_latency_ms,
+                (SELECT COUNT(*) FROM channels WHERE status = 1) AS active_channels,
+                (SELECT COUNT(*) FROM channels) AS total_channels,
+                (SELECT COUNT(*) FROM gateway_keys WHERE status = 1) AS total_api_keys,
+                COALESCE((SELECT COUNT(*) FROM request_logs), 0) AS total_requests,
+                COALESCE((SELECT SUM(total_tokens) FROM request_logs), 0) AS total_tokens",
+        )
+        .fetch_one(pool)
+        .await
+    }
+}
