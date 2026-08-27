@@ -6,6 +6,8 @@ import {
   Timer,
   RefreshCw,
   ArrowUpRight,
+  KeyRound,
+  BarChart3,
 } from "lucide-react";
 import {
   Card,
@@ -112,6 +114,24 @@ export function DashboardPage() {
       value: stats ? `${stats.avg_latency_ms}ms` : "--",
       icon: Timer,
       description: "上游响应耗时（均值）",
+    },
+    {
+      title: "累计请求",
+      value: stats ? formatNumber(stats.total_requests) : "--",
+      icon: BarChart3,
+      description: "历史代理请求总数",
+    },
+    {
+      title: "累计 Token",
+      value: stats ? formatNumber(stats.total_tokens) : "--",
+      icon: Coins,
+      description: "历史 Token 累计消耗",
+    },
+    {
+      title: "密钥总数",
+      value: stats ? String(stats.total_api_keys) : "--",
+      icon: KeyRound,
+      description: "已创建网关密钥",
     },
   ];
 

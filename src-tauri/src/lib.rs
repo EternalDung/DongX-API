@@ -1,4 +1,5 @@
 mod adapter;
+mod channel_presets;
 mod commands;
 mod config;
 mod core;
@@ -39,13 +40,16 @@ pub fn run() {
             commands::channel::delete_channel,
             commands::channel::test_channel,
             commands::channel::list_provider_presets,
+            commands::channel::list_provider_models,
             commands::key::list_api_keys,
             commands::key::create_api_key,
             commands::key::update_api_key,
             commands::key::delete_api_key,
+            commands::key::set_api_key_status,
             commands::log::list_logs,
             commands::log::get_log_detail,
             commands::log::clear_logs,
+            commands::log::delete_log,
             commands::audit::list_audit_events,
             commands::settings::get_settings,
             commands::settings::update_settings,

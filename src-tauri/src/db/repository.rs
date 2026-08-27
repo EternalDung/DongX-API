@@ -199,13 +199,13 @@ pub mod gateway_keys {
             .await
     }
 
-    /// Lookup by key hash — the hot path of gateway authentication.
-    pub async fn get_by_key_hash(
+    /// Lookup by plaintext key — gateway authentication (local plaintext storage).
+    pub async fn get_by_key(
         pool: &SqlitePool,
-        key_hash: &str,
+        key: &str,
     ) -> Result<Option<GatewayKeyRow>, sqlx::Error> {
-        sqlx::query_as::<_, GatewayKeyRow>("SELECT * FROM gateway_keys WHERE key_hash = ?")
-            .bind(key_hash)
+        sqlx::query_as::<_, GatewayKeyRow>("SELECT * FROM gateway_keys WHERE key = ?")
+            .bind(key)
             .fetch_optional(pool)
             .await
     }
@@ -214,8 +214,7 @@ pub mod gateway_keys {
     pub async fn insert(
         pool: &SqlitePool,
         name: &str,
-        key_masked: &str, // masked display: sk-dongapi-****a1b2
-        key_hash: &str,   // SHA-256 hex
+        key: &str, // plaintext gateway key (local storage)
         allowed_models: &str,
         allowed_channels: &str,
         quota_limit: i64,
@@ -226,12 +225,11 @@ pub mod gateway_keys {
         sqlx::query(
             "INSERT INTO gateway_keys (id, name, key, key_hash, status, allowed_models,
                 allowed_channels, quota_limit, quota_used, expires_at, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, ?7, 0, ?8, ?9, ?9)",
+             VALUES (?1, ?2, ?3, '', 1, ?4, ?5, ?6, 0, ?7, ?8, ?8)",
         )
         .bind(&id)
         .bind(name)
-        .bind(key_masked)
-        .bind(key_hash)
+        .bind(key)
         .bind(allowed_models)
         .bind(allowed_channels)
         .bind(quota_limit)
@@ -241,6 +239,21 @@ pub mod gateway_keys {
         .await?;
 
         Ok(get_by_id(pool, &id).await?.expect("just inserted"))
+    }
+
+    /// Enable / disable a gateway key (status: 0=disabled 1=active).
+    pub async fn set_status(
+        pool: &SqlitePool,
+        id: &str,
+        status: i32,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE gateway_keys SET status = ?, updated_at = ? WHERE id = ?")
+            .bind(status)
+            .bind(now())
+            .bind(id)
+            .execute(pool)
+            .await?;
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -472,6 +485,15 @@ pub mod request_logs {
             }
             None => sqlx::query("DELETE FROM request_logs").execute(pool).await?,
         };
+        Ok(res.rows_affected())
+    }
+
+    /// Delete a single log entry by id.
+    pub async fn delete(pool: &SqlitePool, id: &str) -> Result<u64, sqlx::Error> {
+        let res = sqlx::query("DELETE FROM request_logs WHERE id = ?")
+            .bind(id)
+            .execute(pool)
+            .await?;
         Ok(res.rows_affected())
     }
 }

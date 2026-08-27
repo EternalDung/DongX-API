@@ -85,7 +85,7 @@ pub trait Adaptor: Send + Sync {
 pub fn get_adaptor(channel_type: &str) -> Box<dyn Adaptor> {
     match channel_type {
         "openai" => Box::new(openai::OpenAIAdaptor),
-        "deepseek" => Box::new(deepseek::DeepSeekAdaptor),
+        "deepseek" => Box::new(deepseek::DeepSeekAdaptor::new()),
         "claude" => Box::new(claude::ClaudeAdaptor),
         "gemini" => Box::new(gemini::GeminiAdaptor),
         // OpenAI-compatible providers reuse the OpenAI adaptor

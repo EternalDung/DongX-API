@@ -67,6 +67,12 @@ impl From<anyhow::Error> for AppError {
     }
 }
 
+impl From<serde_json::Error> for AppError {
+    fn from(e: serde_json::Error) -> Self {
+        AppError::Internal(format!("JSON error: {}", e))
+    }
+}
+
 // --- Axum integration ---
 
 #[derive(Serialize)]

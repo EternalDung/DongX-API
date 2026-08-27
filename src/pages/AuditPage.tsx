@@ -1,9 +1,6 @@
-import { useEffect, useState } from "react";
-import { ShieldAlert, RefreshCw } from "lucide-react";
-import {
-  Card,
-  CardContent,
-} from "@/components/ui/card";
+import { Fragment, useEffect, useState } from "react";
+import { ShieldAlert, RefreshCw, ChevronDown, ChevronRight } from "lucide-react";
+import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -17,8 +14,27 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { auditApi } from "@/lib/api";
+import { Select } from "@/components/ui/select";
+import { auditApi, type AuditQuery } from "@/lib/api";
 import type { AuditEvent, AuditEventType, AuditSeverity } from "@/types";
+
+const PAGE_SIZE = 20;
+
+const SEVERITIES: { value: string; label: string }[] = [
+  { value: "", label: "全部级别" },
+  { value: "info", label: "信息" },
+  { value: "warning", label: "警告" },
+  { value: "critical", label: "严重" },
+];
+
+const TYPES: { value: string; label: string }[] = [
+  { value: "", label: "全部类型" },
+  { value: "rate_limit", label: "限流触发" },
+  { value: "invalid_key", label: "无效密钥" },
+  { value: "quota_exhaust", label: "配额耗尽" },
+  { value: "suspicious", label: "可疑行为" },
+  { value: "config_change", label: "配置变更" },
+];
 
 const SEVERITY_TONE: Record<AuditSeverity, StatusTone> = {
   info: "info",
@@ -45,11 +61,22 @@ export function AuditPage() {
   const toast = useToast();
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [loading, setLoading] = useState(true);
+  const [severity, setSeverity] = useState("");
+  const [type, setType] = useState("");
+  const [page, setPage] = useState(0);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
 
-  const load = async () => {
+  const load = async (nextPage = page, sev = severity, typ = type) => {
     setLoading(true);
     try {
-      setEvents(await auditApi.list());
+      const query: AuditQuery = {
+        severity: sev || undefined,
+        event_type: typ || undefined,
+        page: nextPage + 1,
+        page_size: PAGE_SIZE,
+      };
+      const list = await auditApi.list(query);
+      setEvents(list);
     } catch (e) {
       console.error("Failed to load audit events:", e);
       toast.error("审计事件加载失败");
@@ -59,8 +86,30 @@ export function AuditPage() {
   };
 
   useEffect(() => {
-    load();
+    load(0, "", "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const applyFilter = (sev: string, typ: string) => {
+    setSeverity(sev);
+    setType(typ);
+    setExpandedId(null);
+    load(0, sev, typ);
+  };
+
+  const goPrev = () => {
+    if (page <= 0) return;
+    const p = page - 1;
+    setPage(p);
+    load(p);
+  };
+
+  const goNext = () => {
+    if (events.length < PAGE_SIZE) return;
+    const p = page + 1;
+    setPage(p);
+    load(p);
+  };
 
   return (
     <div>
@@ -71,13 +120,45 @@ export function AuditPage() {
             风控规则命中、异常访问与配置变更记录
           </p>
         </div>
-        <Button variant="outline" size="sm" onClick={load} disabled={loading}>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => load()}
+          disabled={loading}
+        >
           <RefreshCw className={loading ? "animate-spin" : ""} />
           刷新
         </Button>
       </div>
 
-      <Card className="mt-6 overflow-hidden">
+      {/* 过滤 */}
+      <div className="mt-4 flex flex-wrap items-center gap-2">
+        <Select
+          value={severity}
+          onChange={(e) => applyFilter(e.target.value, type)}
+          className="w-32"
+        >
+          {SEVERITIES.map((s) => (
+            <option key={s.value} value={s.value}>
+              {s.label}
+            </option>
+          ))}
+        </Select>
+        <Select
+          value={type}
+          onChange={(e) => applyFilter(severity, e.target.value)}
+          className="w-36"
+        >
+          {TYPES.map((t) => (
+            <option key={t.value} value={t.value}>
+              {t.label}
+            </option>
+          ))}
+        </Select>
+        <span className="ml-auto text-xs text-muted-foreground">第 {page + 1} 页</span>
+      </div>
+
+      <Card className="mt-3 overflow-hidden">
         <CardContent className="pt-2">
           {loading ? (
             <div className="space-y-2 py-4">
@@ -95,6 +176,7 @@ export function AuditPage() {
             <Table>
               <TableHeader>
                 <TableRow className="hover:bg-transparent">
+                  <TableHead className="w-8"></TableHead>
                   <TableHead>时间</TableHead>
                   <TableHead>级别</TableHead>
                   <TableHead>类型</TableHead>
@@ -103,28 +185,92 @@ export function AuditPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {events.map((ev) => (
-                  <TableRow key={ev.id}>
-                    <TableCell className="whitespace-nowrap font-mono text-xs text-muted-foreground">
-                      {formatTime(ev.timestamp)}
-                    </TableCell>
-                    <TableCell>
-                      <StatusBadge tone={SEVERITY_TONE[ev.severity]}>
-                        {ev.severity}
-                      </StatusBadge>
-                    </TableCell>
-                    <TableCell>{TYPE_LABEL[ev.type] ?? ev.type}</TableCell>
-                    <TableCell className="text-muted-foreground">
-                      {ev.actor ?? "-"}
-                    </TableCell>
-                    <TableCell className="max-w-md text-sm">{ev.message}</TableCell>
-                  </TableRow>
-                ))}
+                {events.map((ev) => {
+                  const expanded = expandedId === ev.id;
+                  return (
+                    <Fragment key={ev.id}>
+                      <TableRow
+                        className="cursor-pointer"
+                        onClick={() => setExpandedId(expanded ? null : ev.id)}
+                      >
+                        <TableCell className="w-8 text-muted-foreground">
+                          {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                        </TableCell>
+                        <TableCell className="whitespace-nowrap font-mono text-xs text-muted-foreground">
+                          {formatTime(ev.timestamp)}
+                        </TableCell>
+                        <TableCell>
+                          <StatusBadge tone={SEVERITY_TONE[ev.severity]}>
+                            {ev.severity}
+                          </StatusBadge>
+                        </TableCell>
+                        <TableCell>{TYPE_LABEL[ev.type] ?? ev.type}</TableCell>
+                        <TableCell className="text-muted-foreground">
+                          {ev.actor ?? "-"}
+                        </TableCell>
+                        <TableCell className="max-w-md truncate text-sm">
+                          {ev.message}
+                        </TableCell>
+                      </TableRow>
+                      {expanded && (
+                        <TableRow className="hover:bg-transparent">
+                          <TableCell colSpan={6} className="bg-muted/30">
+                            <div className="grid gap-3 p-1 text-sm">
+                              <div>
+                                <p className="mb-1 text-xs font-medium text-muted-foreground">
+                                  详情
+                                </p>
+                                <p className="whitespace-pre-wrap leading-relaxed">
+                                  {ev.message}
+                                </p>
+                              </div>
+                              {ev.meta && Object.keys(ev.meta).length > 0 && (
+                                <div>
+                                  <p className="mb-1 text-xs font-medium text-muted-foreground">
+                                    元数据
+                                  </p>
+                                  <pre className="max-h-64 overflow-auto rounded-lg border bg-zinc-950 p-3 font-mono text-[12px] leading-relaxed text-zinc-100">
+                                    {JSON.stringify(ev.meta, null, 2)}
+                                  </pre>
+                                </div>
+                              )}
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      )}
+                    </Fragment>
+                  );
+                })}
               </TableBody>
             </Table>
           )}
         </CardContent>
       </Card>
+
+      {/* 分页 */}
+      {!loading && events.length > 0 && (
+        <div className="mt-4 flex items-center justify-between">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={goPrev}
+            disabled={page === 0}
+          >
+            上一页
+          </Button>
+          <span className="text-xs text-muted-foreground">
+            {events.length < PAGE_SIZE ? "已到最后一页" : "还有更多"}
+          </span>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={goNext}
+            disabled={events.length < PAGE_SIZE}
+          >
+            下一页
+          </Button>
+        </div>
+      )}
     </div>
   );
 }

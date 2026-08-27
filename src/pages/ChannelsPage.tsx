@@ -1,17 +1,7 @@
-import { useEffect, useState } from "react";
-import {
-  Plus,
-  Pencil,
-  Trash2,
-  Zap,
-  RefreshCw,
-  Network,
-  AlertTriangle,
-} from "lucide-react";
-import {
-  Card,
-  CardContent,
-} from "@/components/ui/card";
+import { useEffect, useMemo, useState, Fragment } from "react";
+import { Plus, Pencil, Trash2, Zap, RefreshCw, Network, AlertTriangle, ChevronDown, ChevronRight } from "lucide-react";
+import { cn } from "@/lib/utils";
+import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -29,21 +19,59 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { channelApi, type ChannelInput } from "@/lib/api";
-import type { Channel, ProviderPreset } from "@/types";
+import type {
+  Channel,
+  ChannelProtocol,
+  ChannelEndpoint,
+  ChannelPreset,
+  ChannelProtocolPresetGroup,
+} from "@/types";
+import { ProviderDropdown } from "@/components/channel-form/ProviderDropdown";
 
-const emptyForm = (): ChannelInput => ({
-  name: "",
-  protocol: "openai",
-  type: "openai",
-  base_url: "",
-  api_key: "",
-  models: [],
-  priority: 0,
-  weight: 1,
-  config: {},
-  model_mapping: {},
-  endpoints: [],
-});
+// ---------------------------------------------------------------------------
+// Protocol-level UI constants. Vendor URLs / models / endpoints are NOT
+// hard-coded here — they come from the backend preset registry
+// (channelApi.presets()), consumed via the ProviderDropdown.
+// ---------------------------------------------------------------------------
+
+const PROTOCOLS: ChannelProtocol[] = ["openai", "anthropic", "ollama"];
+const PROTOCOL_LABELS: Record<ChannelProtocol, string> = {
+  openai: "OpenAI",
+  anthropic: "Anthropic",
+  ollama: "Ollama",
+};
+
+/** Selectable endpoints per protocol (Anthropic/Ollama are fixed). */
+const PROTOCOL_ENDPOINT_OPTIONS: Record<ChannelProtocol, ChannelEndpoint[]> = {
+  openai: ["chat_completions", "responses"],
+  anthropic: ["messages"],
+  ollama: ["api_chat"],
+};
+
+const ENDPOINT_LABELS: Record<string, string> = {
+  chat_completions: "Chat Completions",
+  responses: "Responses",
+  messages: "Messages",
+  api_chat: "/api/chat",
+};
+const ENDPOINT_PATHS: Record<string, string> = {
+  chat_completions: "/chat/completions",
+  responses: "/responses",
+  messages: "/messages",
+  api_chat: "/api/chat",
+};
+
+/** Default checked endpoints for the custom preset of each protocol. */
+function defaultEndpointsFor(protocol: ChannelProtocol): ChannelEndpoint[] {
+  switch (protocol) {
+    case "openai":
+      return ["chat_completions"];
+    case "anthropic":
+      return ["messages"];
+    case "ollama":
+      return ["api_chat"];
+  }
+}
 
 const CHANNEL_TONE: Record<number, { tone: StatusTone; label: string }> = {
   1: { tone: "success", label: "启用" },
@@ -51,17 +79,69 @@ const CHANNEL_TONE: Record<number, { tone: StatusTone; label: string }> = {
   0: { tone: "secondary", label: "禁用" },
 };
 
+interface KeyRow {
+  key: string;
+  weight: number;
+}
+interface MappingRow {
+  from: string;
+  to: string;
+}
+
+interface ChannelForm {
+  protocol: ChannelProtocol;
+  provider: string; // ChannelProvider enum value
+  legacyType: string; // adapter type written back to the DB
+  native_base_url: string;
+  name: string;
+  keys: KeyRow[];
+  native_endpoints: ChannelEndpoint[];
+  modelsText: string;
+  mappings: MappingRow[];
+  priority: number;
+  weight: number;
+  timeout_secs: number;
+}
+
+function emptyForm(): ChannelForm {
+  return {
+    protocol: "openai",
+    provider: "custom",
+    legacyType: "openai",
+    native_base_url: "",
+    name: "",
+    keys: [{ key: "", weight: 1 }],
+    native_endpoints: ["chat_completions"],
+    modelsText: "",
+    mappings: [{ from: "", to: "" }],
+    priority: 0,
+    weight: 1,
+    timeout_secs: 30,
+  };
+}
+
+function fmtTime(iso: string | null): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+// ---------------------------------------------------------------------------
+// Page
+// ---------------------------------------------------------------------------
+
 export function ChannelsPage() {
   const toast = useToast();
   const [channels, setChannels] = useState<Channel[]>([]);
-  const [presets, setPresets] = useState<ProviderPreset[]>([]);
   const [loading, setLoading] = useState(true);
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [form, setForm] = useState<ChannelInput>(emptyForm());
-  const [modelsText, setModelsText] = useState("");
+  const [form, setForm] = useState<ChannelForm>(emptyForm());
   const [saving, setSaving] = useState(false);
+  const [fetchingModels, setFetchingModels] = useState(false);
 
   const [testingId, setTestingId] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<Record<string, boolean>>({});
@@ -69,12 +149,24 @@ export function ChannelsPage() {
   const [deleteTarget, setDeleteTarget] = useState<Channel | null>(null);
   const [deleting, setDeleting] = useState(false);
 
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+
+  // ── preset registry (single source of truth for the picker) ──────────────
+  const [presetGroups, setPresetGroups] = useState<ChannelProtocolPresetGroup[]>([]);
+  const [presetsLoading, setPresetsLoading] = useState(true);
+  useEffect(() => {
+    channelApi
+      .presets()
+      .then(setPresetGroups)
+      .catch(() => setPresetGroups([]))
+      .finally(() => setPresetsLoading(false));
+  }, []);
+
   const load = async () => {
     setLoading(true);
     try {
-      const [list, ps] = await Promise.all([channelApi.list(), channelApi.presets()]);
+      const list = await channelApi.list();
       setChannels(list);
-      setPresets(ps);
     } catch (e) {
       console.error("Failed to load channels:", e);
       toast.error("渠道列表加载失败");
@@ -90,39 +182,150 @@ export function ChannelsPage() {
   const openCreate = () => {
     setEditingId(null);
     setForm(emptyForm());
-    setModelsText("");
     setDialogOpen(true);
   };
 
   const openEdit = (ch: Channel) => {
     setEditingId(ch.id);
+    const mappings: MappingRow[] = Object.entries(ch.model_mapping ?? {}).map(
+      ([from, to]) => ({ from, to: to as string }),
+    );
+    const protocol = (PROTOCOLS.includes(ch.protocol) ? ch.protocol : "openai") as ChannelProtocol;
     setForm({
+      protocol,
+      // provider is restored via currentPreset (matched by legacy_type) for highlight
+      provider: "custom",
+      legacyType: ch.type,
+      native_base_url: ch.base_url,
       name: ch.name,
-      protocol: ch.protocol,
-      type: ch.type,
-      base_url: ch.base_url,
-      api_key: "",
-      models: ch.models,
+      keys: [{ key: "", weight: 1 }], // keys are encrypted at rest, never prefilled
+      native_endpoints: (ch.endpoints?.length
+        ? ch.endpoints
+        : defaultEndpointsFor(protocol)) as ChannelEndpoint[],
+      modelsText: (ch.models ?? []).join(", "),
+      mappings: mappings.length ? mappings : [{ from: "", to: "" }],
       priority: ch.priority,
       weight: ch.weight,
-      config: ch.config,
-      model_mapping: ch.model_mapping,
-      endpoints: ch.endpoints,
+      timeout_secs: (ch.config as Record<string, number>)?.timeout_secs ?? 30,
     });
-    setModelsText(ch.models.join(", "));
     setDialogOpen(true);
   };
 
+  // The preset currently reflected by the form (used for highlight + defaults).
+  const currentPreset = useMemo<ChannelPreset | null>(() => {
+    const group = presetGroups.find((g) => g.protocol === form.protocol);
+    if (!group) return null;
+    return (
+      group.presets.find((p) => p.provider === form.provider) ??
+      group.presets.find((p) => p.legacy_type === form.legacyType && p.provider !== "custom") ??
+      group.presets[0] ??
+      null
+    );
+  }, [presetGroups, form.protocol, form.provider, form.legacyType]);
+
+  const authScheme = currentPreset?.auth_scheme ?? "bearer";
+  const keyRequired = authScheme !== "optional_bearer";
+
+  const requestProtocolSwitch = (protocol: ChannelProtocol) => {
+    if (protocol === form.protocol) return;
+    const group = presetGroups.find((g) => g.protocol === protocol);
+    const custom = group?.presets.find((p) => p.provider === "custom");
+    setForm((f) => ({
+      ...f,
+      protocol,
+      provider: "custom",
+      legacyType: custom?.legacy_type ?? (protocol === "anthropic" ? "claude" : "openai"),
+      native_base_url: custom?.native_base_url ?? "",
+      native_endpoints: defaultEndpointsFor(protocol),
+      modelsText: "",
+    }));
+  };
+
+  const selectProvider = (provider: string) => {
+    if (provider === form.provider) return;
+    const preset = presetGroups
+      .find((g) => g.protocol === form.protocol)
+      ?.presets.find((p) => p.provider === provider);
+    if (!preset) return;
+    setForm((f) => ({
+      ...f,
+      provider: preset.provider,
+      legacyType: preset.legacy_type,
+      native_base_url: preset.native_base_url,
+      native_endpoints: [...preset.default_checked_endpoints],
+      modelsText: preset.model_suggestions.map((m) => m.id).join(", "),
+    }));
+  };
+
+  const updateKey = (i: number, field: keyof KeyRow, val: string | number) =>
+    setForm((f) => ({
+      ...f,
+      keys: f.keys.map((k, idx) => (idx === i ? { ...k, [field]: val } : k)),
+    }));
+  const addKey = () => setForm((f) => ({ ...f, keys: [...f.keys, { key: "", weight: 1 }] }));
+  const removeKey = (i: number) =>
+    setForm((f) => ({ ...f, keys: f.keys.filter((_, idx) => idx !== i) }));
+
+  const updateMapping = (i: number, field: keyof MappingRow, val: string) =>
+    setForm((f) => ({
+      ...f,
+      mappings: f.mappings.map((m, idx) => (idx === i ? { ...m, [field]: val } : m)),
+    }));
+  const addMapping = () =>
+    setForm((f) => ({ ...f, mappings: [...f.mappings, { from: "", to: "" }] }));
+  const removeMapping = (i: number) =>
+    setForm((f) => ({ ...f, mappings: f.mappings.filter((_, idx) => idx !== i) }));
+
+  const toggleEndpoint = (ep: ChannelEndpoint) =>
+    setForm((f) => ({
+      ...f,
+      native_endpoints: f.native_endpoints.includes(ep)
+        ? f.native_endpoints.filter((e) => e !== ep)
+        : [...f.native_endpoints, ep],
+    }));
+
+  const modelsList = form.modelsText
+    .split(/[,\n]/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  const handleFetchModels = async () => {
+    setFetchingModels(true);
+    try {
+      const list = await channelApi.fetchModels(form.legacyType || form.protocol);
+      const merged = Array.from(new Set([...modelsList, ...list])).join(", ");
+      setForm((f) => ({ ...f, modelsText: merged }));
+      toast.success("已拉取模型列表");
+    } catch {
+      toast.error("拉取模型失败");
+    } finally {
+      setFetchingModels(false);
+    }
+  };
+
   const handleSave = async () => {
-    if (!form.name.trim() || !form.base_url.trim()) return;
+    if (!form.name.trim() || !form.native_base_url.trim()) return;
     setSaving(true);
     try {
       const input: ChannelInput = {
-        ...form,
-        models: modelsText
-          .split(/[,\n]/)
-          .map((s) => s.trim())
-          .filter(Boolean),
+        name: form.name,
+        protocol: form.protocol,
+        type: currentPreset?.legacy_type ?? form.legacyType,
+        base_url: form.native_base_url,
+        keys: form.keys
+          .filter((k) => k.key.trim())
+          .map((k) => ({ key: k.key.trim(), weight: k.weight || 1 })),
+        endpoints: form.native_endpoints,
+        models: modelsList,
+        priority: form.priority,
+        weight: form.weight,
+        config: {},
+        model_mapping: Object.fromEntries(
+          form.mappings
+            .filter((m) => m.from.trim() && m.to.trim())
+            .map((m) => [m.from.trim(), m.to.trim()]),
+        ),
+        timeout_secs: form.timeout_secs,
       };
       if (editingId) {
         await channelApi.update(editingId, input);
@@ -171,17 +374,15 @@ export function ChannelsPage() {
     }
   };
 
-  const handleTypeChange = (type: string) => {
-    const preset = presets.find((p) => p.type === type);
-    setForm((f) => ({
-      ...f,
-      type,
-      protocol: type === "claude" ? "anthropic" : type === "ollama" ? "ollama" : "openai",
-      base_url:
-        !f.base_url || presets.some((p) => p.default_base_url === f.base_url)
-          ? preset?.default_base_url ?? ""
-          : f.base_url,
-    }));
+  const presetOptions = presetGroups.find((g) => g.protocol === form.protocol)?.presets ?? [];
+
+  const copyText = async (text: string, label: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast.success(`${label}已复制`);
+    } catch {
+      toast.error("复制失败");
+    }
   };
 
   return (
@@ -229,55 +430,163 @@ export function ChannelsPage() {
             <div className="divide-y">
               {channels.map((ch) => {
                 const meta = CHANNEL_TONE[ch.status] ?? CHANNEL_TONE[0];
-                const tested = testResults[ch.id];
+                const memOk = testResults[ch.id];
+                const persistedOk =
+                  memOk !== undefined
+                    ? memOk
+                    : ch.last_test_ok === 1
+                      ? true
+                      : ch.last_test_ok === 0
+                        ? false
+                        : undefined;
+                const expanded = expandedId === ch.id;
                 return (
-                  <div
-                    key={ch.id}
-                    className="group flex items-center justify-between gap-4 rounded-lg px-2 py-3 transition-colors hover:bg-accent/40"
-                  >
-                    <div className="min-w-0 flex-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="font-medium">{ch.name}</span>
-                        <Badge variant="outline" className="font-mono text-[11px]">
-                          {ch.type}
-                        </Badge>
-                        <StatusBadge tone={meta.tone}>{meta.label}</StatusBadge>
-                        {tested !== undefined && (
-                          <StatusBadge tone={tested ? "success" : "destructive"}>
-                            {tested ? "连通" : "失败"}
-                          </StatusBadge>
-                        )}
+                  <Fragment key={ch.id}>
+                    <div
+                      className={cn(
+                        "group flex items-center justify-between gap-3 rounded-lg px-2 py-3 transition-colors hover:bg-accent/40",
+                        expanded && "bg-accent/40",
+                      )}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => setExpandedId(expanded ? null : ch.id)}
+                        className="shrink-0 text-muted-foreground transition-colors hover:text-foreground"
+                        aria-label={expanded ? "收起" : "展开"}
+                      >
+                        {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                      </button>
+                      <div
+                        className="min-w-0 flex-1 cursor-pointer"
+                        onClick={() => setExpandedId(expanded ? null : ch.id)}
+                      >
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-medium">{ch.name}</span>
+                          <Badge variant="outline" className="font-mono text-[11px]">
+                            {ch.type}
+                          </Badge>
+                          <StatusBadge tone={meta.tone}>{meta.label}</StatusBadge>
+                          {persistedOk !== undefined && (
+                            <StatusBadge tone={persistedOk ? "success" : "destructive"}>
+                              {persistedOk ? "连通" : "失败"}
+                            </StatusBadge>
+                          )}
+                        </div>
+                        <p className="mt-1 truncate font-mono text-xs text-muted-foreground">
+                          {ch.base_url} · {ch.models.length} 模型 · 权重 {ch.weight} · 优先级{" "}
+                          {ch.priority}
+                        </p>
                       </div>
-                      <p className="mt-1 truncate font-mono text-xs text-muted-foreground">
-                        {ch.base_url} · {ch.models.length} 模型 · 权重 {ch.weight} · 优先级{" "}
-                        {ch.priority}
-                      </p>
+                      <div className="flex shrink-0 items-center gap-1 opacity-70 transition-opacity group-hover:opacity-100">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleTest(ch.id)}
+                          disabled={testingId === ch.id}
+                        >
+                          <Zap className={testingId === ch.id ? "animate-pulse" : ""} />
+                          测试
+                        </Button>
+                        <Button variant="ghost" size="sm" onClick={() => openEdit(ch)}>
+                          <Pencil />
+                          编辑
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                          onClick={() => setDeleteTarget(ch)}
+                        >
+                          <Trash2 />
+                          删除
+                        </Button>
+                      </div>
                     </div>
-                    <div className="flex shrink-0 items-center gap-1 opacity-70 transition-opacity group-hover:opacity-100">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => handleTest(ch.id)}
-                        disabled={testingId === ch.id}
-                      >
-                        <Zap className={testingId === ch.id ? "animate-pulse" : ""} />
-                        测试
-                      </Button>
-                      <Button variant="ghost" size="sm" onClick={() => openEdit(ch)}>
-                        <Pencil />
-                        编辑
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="text-destructive hover:bg-destructive/10 hover:text-destructive"
-                        onClick={() => setDeleteTarget(ch)}
-                      >
-                        <Trash2 />
-                        删除
-                      </Button>
-                    </div>
-                  </div>
+                    {expanded && (
+                      <div className="px-2 pb-4 pl-10">
+                        <div className="grid gap-4 rounded-lg border bg-muted/30 p-4 text-sm sm:grid-cols-2">
+                          {/* 模型列表 */}
+                          <div className="grid gap-1.5">
+                            <p className="text-xs font-medium text-muted-foreground">
+                              模型列表（点击复制）
+                            </p>
+                            <div className="flex flex-wrap gap-1.5">
+                              {ch.models.length === 0 ? (
+                                <span className="text-muted-foreground">未配置</span>
+                              ) : (
+                                ch.models.map((m) => (
+                                  <button
+                                    key={m}
+                                    type="button"
+                                    onClick={() => copyText(m, "模型名")}
+                                    className="rounded-md border bg-background px-2 py-1 font-mono text-[11px] hover:border-primary/50"
+                                  >
+                                    {m}
+                                  </button>
+                                ))
+                              )}
+                            </div>
+                          </div>
+                          {/* 模型映射 */}
+                          <div className="grid gap-1.5">
+                            <p className="text-xs font-medium text-muted-foreground">模型映射</p>
+                            {Object.keys(ch.model_mapping ?? {}).length === 0 ? (
+                              <span className="text-muted-foreground">无</span>
+                            ) : (
+                              <div className="flex flex-col gap-1">
+                                {Object.entries(ch.model_mapping).map(([from, to]) => (
+                                  <span key={from} className="font-mono text-[11px]">
+                                    {from}{" "}
+                                    <span className="text-muted-foreground">→</span> {to}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                          {/* 端点 */}
+                          <div className="grid gap-1.5">
+                            <p className="text-xs font-medium text-muted-foreground">端点</p>
+                            <div className="flex flex-wrap gap-1.5">
+                              {(ch.endpoints ?? []).map((ep) => (
+                                <span
+                                  key={ep}
+                                  className="rounded-md border bg-background px-2 py-1 font-mono text-[11px]"
+                                >
+                                  {ENDPOINT_LABELS[ep] ?? ep}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                          {/* 最近测试 */}
+                          <div className="grid gap-1.5">
+                            <p className="text-xs font-medium text-muted-foreground">最近测试</p>
+                            {ch.last_test_at ? (
+                              <span className="text-[13px]">
+                                {fmtTime(ch.last_test_at)} ·{" "}
+                                <span
+                                  className={
+                                    ch.last_test_ok === 1
+                                      ? "text-success"
+                                      : ch.last_test_ok === 0
+                                        ? "text-destructive"
+                                        : "text-muted-foreground"
+                                  }
+                                >
+                                  {ch.last_test_ok === 1
+                                    ? "成功"
+                                    : ch.last_test_ok === 0
+                                      ? "失败"
+                                      : "未知"}
+                                </span>
+                              </span>
+                            ) : (
+                              <span className="text-muted-foreground">尚未测试</span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </Fragment>
                 );
               })}
             </div>
@@ -287,7 +596,7 @@ export function ChannelsPage() {
 
       {/* 新建 / 编辑 Dialog */}
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent className="sm:max-w-2xl">
+        <DialogContent className="sm:max-w-2xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{editingId ? "编辑渠道" : "添加渠道"}</DialogTitle>
             <DialogDescription>
@@ -297,74 +606,247 @@ export function ChannelsPage() {
             </DialogDescription>
           </DialogHeader>
 
-          <div className="grid gap-4">
-            <div className="grid grid-cols-2 gap-4">
-              <div className="grid gap-2">
-                <Label htmlFor="ch-type">渠道类型</Label>
-                <Input
-                  id="ch-type"
-                  value={form.type}
-                  readOnly
-                  className="bg-muted/50 font-mono text-xs"
+          <div className="grid gap-5">
+            {/* 协议（主动向三选一） */}
+            <div className="grid gap-2">
+              <Label>协议</Label>
+              <div className="grid grid-cols-3 gap-2">
+                {PROTOCOLS.map((p) => {
+                  const active = form.protocol === p;
+                  return (
+                    <button
+                      key={p}
+                      type="button"
+                      onClick={() => requestProtocolSwitch(p)}
+                      className={cn(
+                        "rounded-lg border px-3 py-2 text-center text-sm font-medium transition-colors",
+                        active
+                          ? "border-primary bg-primary/10 text-primary"
+                          : "border-border text-muted-foreground hover:border-primary/50",
+                      )}
+                    >
+                      {PROTOCOL_LABELS[p]}
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="text-xs text-muted-foreground">
+                先选协议，再在下方选择该协议下的提供商。同一厂商可出现在多个协议下（如 DeepSeek 同时支持 OpenAI 与 Anthropic 接口）。
+              </p>
+            </div>
+
+            {/* 名称 */}
+            <div className="grid gap-2">
+              <Label htmlFor="ch-name">名称</Label>
+              <Input
+                id="ch-name"
+                placeholder="如：OpenAI 官方"
+                value={form.name}
+                onChange={(e) => setForm({ ...form, name: e.target.value })}
+              />
+            </div>
+
+            {/* 渠道提供商（按协议过滤的分组下拉，真实品牌图标） */}
+            <div className="grid gap-2">
+              <Label>渠道提供商</Label>
+              {presetsLoading ? (
+                <div className="flex items-center gap-2 rounded-lg border border-dashed border-border bg-background/40 px-3 py-4 text-sm text-muted-foreground">
+                  <RefreshCw size={14} className="animate-spin" /> 正在加载提供商模板…
+                </div>
+              ) : presetOptions.length === 0 ? (
+                <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                  提供商模板加载失败，请刷新后重试。
+                </div>
+              ) : (
+                <ProviderDropdown
+                  presets={presetOptions}
+                  current={currentPreset?.provider ?? "custom"}
+                  onSelect={selectProvider}
                 />
-                <SelectType value={form.type} presets={presets} onChange={handleTypeChange} />
+              )}
+            </div>
+
+            {/* 端点（按协议多选；Anthropic / Ollama 端点固定） */}
+            <div className="grid gap-2">
+              <Label>
+                端点<span className="ml-1 text-xs text-muted-foreground">（可多选）</span>
+              </Label>
+              <div className="flex flex-wrap gap-5">
+                {PROTOCOL_ENDPOINT_OPTIONS[form.protocol].map((ep) => {
+                  const checked = form.native_endpoints.includes(ep);
+                  const fixed = form.protocol !== "openai";
+                  return (
+                    <label
+                      key={ep}
+                      className={cn(
+                        "flex items-center gap-2 text-sm",
+                        fixed && "opacity-70",
+                      )}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        disabled={fixed}
+                        onChange={() => !fixed && toggleEndpoint(ep)}
+                        className="h-4 w-4 accent-primary"
+                      />
+                      <span className="font-medium">{ENDPOINT_LABELS[ep]}</span>
+                      <span className="font-mono text-xs text-muted-foreground">
+                        {ENDPOINT_PATHS[ep]}
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Anthropic 固定为 Messages、Ollama 固定为 /api/chat；OpenAI 可同时启用 Chat Completions 与 Responses。
+              </p>
+            </div>
+
+            {/* Base URL（由提供商带出，可覆盖） */}
+            <div className="grid gap-2">
+              <Label htmlFor="ch-base">Base URL</Label>
+              <Input
+                id="ch-base"
+                placeholder="https://api.example.com"
+                value={form.native_base_url}
+                onChange={(e) => setForm({ ...form, native_base_url: e.target.value })}
+                className="font-mono"
+              />
+              <p className="text-xs text-muted-foreground">
+                选自提供商后自动带出，可按实际部署修改。
+              </p>
+            </div>
+
+            {/* API 负载均衡（多 key + 权重） */}
+            <div className="grid gap-2">
+              <Label>
+                API 负载均衡
+                <span className="ml-1 text-xs text-muted-foreground">（多 key + 权重）</span>
+              </Label>
+              <div className="grid gap-2">
+                {form.keys.map((k, i) => (
+                  <div key={i} className="flex items-center gap-2">
+                    <Input
+                      placeholder={keyRequired ? "sk-..." : "可留空（本地/自管 Ollama）"}
+                      type="password"
+                      value={k.key}
+                      onChange={(e) => updateKey(i, "key", e.target.value)}
+                      className="flex-1"
+                    />
+                    <Input
+                      type="number"
+                      min={1}
+                      value={k.weight}
+                      onChange={(e) => updateKey(i, "weight", Number(e.target.value) || 1)}
+                      className="w-20"
+                    />
+                    <span className="text-xs text-muted-foreground">权重</span>
+                    {form.keys.length > 1 && (
+                      <Button variant="ghost" size="sm" onClick={() => removeKey(i)}>
+                        <Trash2 />
+                      </Button>
+                    )}
+                  </div>
+                ))}
+                <Button variant="ghost" size="sm" onClick={addKey} className="w-fit">
+                  <Plus />
+                  添加 key
+                </Button>
+              </div>
+            </div>
+
+            {/* 模型列表 */}
+            <div className="grid gap-2">
+              <Label>
+                模型列表
+                <span className="ml-1 text-xs text-muted-foreground">（逗号分隔）</span>
+              </Label>
+              <div className="flex gap-2">
+                <Input
+                  placeholder="gpt-4o, gpt-4o-mini, o3"
+                  value={form.modelsText}
+                  onChange={(e) => setForm({ ...form, modelsText: e.target.value })}
+                  className="flex-1"
+                />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleFetchModels}
+                  disabled={fetchingModels}
+                >
+                  <RefreshCw className={fetchingModels ? "animate-spin" : ""} />
+                  拉取模型
+                </Button>
+              </div>
+            </div>
+
+            {/* 模型映射（本地 → 上游，多对多） */}
+            <div className="grid gap-2">
+              <Label>
+                模型映射
+                <span className="ml-1 text-xs text-muted-foreground">
+                  （本地模型 → 上游模型，多对多）
+                </span>
+              </Label>
+              <div className="grid gap-2">
+                {form.mappings.map((m, i) => (
+                  <div key={i} className="flex items-center gap-2">
+                    <Input
+                      placeholder="本地模型名"
+                      value={m.from}
+                      onChange={(e) => updateMapping(i, "from", e.target.value)}
+                      className="flex-1"
+                    />
+                    <span className="text-muted-foreground">→</span>
+                    <select
+                      value={m.to}
+                      onChange={(e) => updateMapping(i, "to", e.target.value)}
+                      disabled={!modelsList.length}
+                      className="flex-1 rounded-lg border border-border bg-background px-3 py-2 text-sm outline-none focus:border-primary disabled:opacity-50"
+                    >
+                      <option value="">
+                        {modelsList.length ? "选择上游模型" : "先填写模型列表"}
+                      </option>
+                      {modelsList.map((md) => (
+                        <option key={md} value={md}>
+                          {md}
+                        </option>
+                      ))}
+                    </select>
+                    {form.mappings.length > 1 && (
+                      <Button variant="ghost" size="sm" onClick={() => removeMapping(i)}>
+                        <Trash2 />
+                      </Button>
+                    )}
+                  </div>
+                ))}
+                <Button variant="ghost" size="sm" onClick={addMapping} className="w-fit">
+                  <Plus />
+                  添加映射
+                </Button>
+              </div>
+            </div>
+
+            {/* 优先级 / 权重 / 超时 */}
+            <div className="grid grid-cols-3 gap-4">
+              <div className="grid gap-2">
+                <Label htmlFor="ch-priority">优先级</Label>
+                <Input
+                  id="ch-priority"
+                  type="number"
+                  value={form.priority}
+                  onChange={(e) =>
+                    setForm({ ...form, priority: Number(e.target.value) || 0 })
+                  }
+                />
               </div>
               <div className="grid gap-2">
-                <Label htmlFor="ch-name">渠道名称</Label>
-                <Input
-                  id="ch-name"
-                  placeholder="如：OpenAI 官方"
-                  value={form.name}
-                  onChange={(e) => setForm({ ...form, name: e.target.value })}
-                />
-              </div>
-            </div>
-
-            <div className="grid gap-2">
-              <Label htmlFor="ch-url">Base URL</Label>
-              <Input
-                id="ch-url"
-                placeholder="https://api.openai.com/v1"
-                value={form.base_url}
-                onChange={(e) => setForm({ ...form, base_url: e.target.value })}
-              />
-            </div>
-
-            <div className="grid gap-2">
-              <Label htmlFor="ch-key">
-                API Key{editingId && <span className="text-xs text-muted-foreground">（留空保持不变）</span>}
-              </Label>
-              <Input
-                id="ch-key"
-                type="password"
-                placeholder={editingId ? "••••••••" : "sk-..."}
-                value={form.api_key}
-                onChange={(e) => setForm({ ...form, api_key: e.target.value })}
-              />
-            </div>
-
-            <div className="grid gap-2">
-              <Label htmlFor="ch-models">
-                模型列表<span className="text-xs text-muted-foreground">（逗号或换行分隔）</span>
-              </Label>
-              <Input
-                id="ch-models"
-                placeholder="gpt-4o, gpt-4o-mini, o3"
-                value={modelsText}
-                onChange={(e) => setModelsText(e.target.value)}
-              />
-            </div>
-
-            <div className="grid grid-cols-2 gap-4">
-              <div className="grid gap-2">
-                <Label htmlFor="ch-weight">
-                  权重<span className="text-xs text-muted-foreground">（同优先级负载均衡）</span>
-                </Label>
+                <Label htmlFor="ch-weight">权重</Label>
                 <Input
                   id="ch-weight"
                   type="number"
                   min={1}
-                  max={100}
                   value={form.weight}
                   onChange={(e) =>
                     setForm({ ...form, weight: Number(e.target.value) || 1 })
@@ -372,15 +854,14 @@ export function ChannelsPage() {
                 />
               </div>
               <div className="grid gap-2">
-                <Label htmlFor="ch-priority">
-                  优先级<span className="text-xs text-muted-foreground">（越大越优先）</span>
-                </Label>
+                <Label htmlFor="ch-timeout">超时（秒）</Label>
                 <Input
-                  id="ch-priority"
+                  id="ch-timeout"
                   type="number"
-                  value={form.priority}
+                  min={1}
+                  value={form.timeout_secs}
                   onChange={(e) =>
-                    setForm({ ...form, priority: Number(e.target.value) || 0 })
+                    setForm({ ...form, timeout_secs: Number(e.target.value) || 30 })
                   }
                 />
               </div>
@@ -393,7 +874,7 @@ export function ChannelsPage() {
             </Button>
             <Button
               onClick={handleSave}
-              disabled={saving || !form.name.trim() || !form.base_url.trim()}
+              disabled={saving || !form.name.trim() || !form.native_base_url.trim()}
             >
               {saving ? "保存中..." : "保存"}
             </Button>
@@ -427,46 +908,6 @@ export function ChannelsPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </div>
-  );
-}
-
-/** 渠道类型选择：用带品牌感的按钮组代替原生下拉 */
-function SelectType({
-  value,
-  presets,
-  onChange,
-}: {
-  value: string;
-  presets: ProviderPreset[];
-  onChange: (v: string) => void;
-}) {
-  const list = presets.length
-    ? presets
-    : [
-        { type: "openai", label: "OpenAI" },
-        { type: "deepseek", label: "DeepSeek" },
-        { type: "claude", label: "Claude" },
-        { type: "gemini", label: "Gemini" },
-        { type: "custom", label: "自定义" },
-      ];
-  return (
-    <div className="flex flex-wrap gap-1.5">
-      {list.map((p) => (
-        <button
-          key={p.type}
-          type="button"
-          onClick={() => onChange(p.type)}
-          className={
-            "rounded-md border px-2.5 py-1 text-xs transition-colors " +
-            (value === p.type
-              ? "border-primary bg-primary/10 text-primary"
-              : "text-muted-foreground hover:bg-accent/50")
-          }
-        >
-          {p.label}
-        </button>
-      ))}
     </div>
   );
 }

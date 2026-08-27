@@ -2,7 +2,7 @@ pub mod router;
 pub mod handler;
 pub mod auth;
 
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 use crate::error::{AppError, AppResult};
 
 /// Start the Axum HTTP server (data plane)

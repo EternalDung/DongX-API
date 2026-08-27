@@ -1,5 +1,6 @@
 use crate::adapter::openai::OpenAIAdaptor;
 use crate::adapter::{Adaptor, ChannelConfig, ProxyRequest, TestResult};
+use async_trait::async_trait;
 
 /// DeepSeek adaptor — the API is fully OpenAI-compatible, so delegate
 /// everything to the OpenAI adaptor and only override metadata.
@@ -7,6 +8,13 @@ use crate::adapter::{Adaptor, ChannelConfig, ProxyRequest, TestResult};
 /// Java mental model: like subclassing a default strategy because the
 /// vendor happens to implement the same contract.
 pub struct DeepSeekAdaptor(OpenAIAdaptor);
+
+impl DeepSeekAdaptor {
+    /// Public constructor used by the adaptor factory in `adapter/mod.rs`.
+    pub fn new() -> Self {
+        Self(OpenAIAdaptor)
+    }
+}
 
 #[async_trait]
 impl Adaptor for DeepSeekAdaptor {

@@ -7,6 +7,7 @@ import {
   KeyRound,
   RefreshCw,
   CheckCircle2,
+  Ban,
   AlertTriangle,
 } from "lucide-react";
 import {
@@ -127,6 +128,26 @@ export function ApiKeysPage() {
     }
   };
 
+  const handleCopyKey = async (key: string) => {
+    try {
+      await navigator.clipboard.writeText(key);
+      toast.success("已复制密钥");
+    } catch {
+      toast.error("复制失败");
+    }
+  };
+
+  const handleSetStatus = async (k: ApiKey, status: number) => {
+    try {
+      await keyApi.setStatus(k.id, status);
+      toast.success(status === 1 ? `已启用「${k.name}」` : `已禁用「${k.name}」`);
+      await load();
+    } catch (e) {
+      console.error("Failed to set api key status:", e);
+      toast.error("操作失败");
+    }
+  };
+
   return (
     <div>
       <div className="flex items-center justify-between">
@@ -209,6 +230,36 @@ export function ApiKeysPage() {
                       <Button
                         variant="ghost"
                         size="sm"
+                        onClick={() => handleCopyKey(k.key)}
+                        title="复制密钥明文"
+                      >
+                        <Copy />
+                        复制
+                      </Button>
+                      {k.status === 1 ? (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleSetStatus(k, 0)}
+                          title="禁用该密钥"
+                        >
+                          <Ban />
+                          禁用
+                        </Button>
+                      ) : (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleSetStatus(k, 1)}
+                          title="启用该密钥"
+                        >
+                          <CheckCircle2 />
+                          启用
+                        </Button>
+                      )}
+                      <Button
+                        variant="ghost"
+                        size="sm"
                         className="text-destructive hover:bg-destructive/10 hover:text-destructive"
                         onClick={() => setDeleteTarget(k)}
                       >
@@ -230,7 +281,7 @@ export function ApiKeysPage() {
           <DialogHeader>
             <DialogTitle>创建密钥</DialogTitle>
             <DialogDescription>
-              生成 sk-dongapi-* 格式密钥，明文仅展示一次，请妥善保存。
+              生成 sk-dongapi-* 格式密钥。本地以明文存储（对齐 waliapi），创建后可在列表中随时复制。
             </DialogDescription>
           </DialogHeader>
 
@@ -282,7 +333,7 @@ export function ApiKeysPage() {
               密钥创建成功
             </DialogTitle>
             <DialogDescription>
-              请立即复制保存，关闭后无法再次查看明文。
+              请立即复制保存。密钥以明文存储在本地，也可稍后在列表中复制。
             </DialogDescription>
           </DialogHeader>
 

@@ -1,7 +1,13 @@
-use serde::{Deserialize, Serialize};
-use crate::error::AppResult;
+use std::sync::Arc;
 
-/// Settings update payload (partial update)
+use serde::{Deserialize, Serialize};
+use tauri::State;
+
+use crate::db::repository::{settings as settings_repo, stats};
+use crate::error::AppResult;
+use crate::AppState;
+
+/// Settings partial update payload (mirrors frontend SettingsUpdate).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct SettingsUpdate {
@@ -20,47 +26,78 @@ pub struct SettingsUpdate {
     pub security_mode: Option<String>,
 }
 
-/// Get all settings
+/// Built-in defaults merged under stored values.
+const DEFAULTS: &str = r#"{
+    "server_port": 9842,
+    "server_host": "127.0.0.1",
+    "ui_theme": "system",
+    "ui_language": "zh-CN",
+    "minimize_to_tray": true,
+    "close_to_tray": true,
+    "auto_start": false,
+    "retry_enabled": true,
+    "retry_times": 3,
+    "log_retention_days": 30,
+    "log_raw_body": false,
+    "security_enabled": true,
+    "security_mode": "balanced"
+}"#;
+
+/// Get all settings (stored values override built-in defaults).
 #[tauri::command]
-pub async fn get_settings() -> AppResult<serde_json::Value> {
-    // TODO: Query from database
-    Ok(serde_json::json!({
-        "server_port": 9842,
-        "server_host": "127.0.0.1",
-        "ui_theme": "system",
-        "ui_language": "zh-CN",
-        "minimize_to_tray": true,
-        "close_to_tray": true,
-        "auto_start": false,
-        "retry_enabled": true,
-        "retry_times": 3,
-        "log_retention_days": 30,
-        "log_raw_body": false,
-        "security_enabled": true,
-        "security_mode": "balanced"
-    }))
+pub async fn get_settings(state: State<'_, Arc<AppState>>) -> AppResult<serde_json::Value> {
+    let mut obj: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(DEFAULTS).unwrap_or_default();
+
+    let rows = settings_repo::get_all(&state.db).await?;
+    for row in rows {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&row.value) {
+            obj.insert(row.key, v);
+        }
+    }
+
+    Ok(serde_json::Value::Object(obj))
 }
 
-/// Update settings (partial update)
+/// Update settings (partial update — only provided fields are written).
 #[tauri::command]
-pub async fn update_settings(update: SettingsUpdate) -> AppResult<serde_json::Value> {
-    let _ = update;
-    // TODO: Update database
+pub async fn update_settings(
+    update: SettingsUpdate,
+    state: State<'_, Arc<AppState>>,
+) -> AppResult<serde_json::Value> {
+    let mut entries: Vec<(String, String)> = Vec::new();
+
+    macro_rules! push {
+        ($field:ident, $key:literal) => {
+            if let Some(v) = update.$field {
+                entries.push(($key.to_string(), serde_json::to_string(&v)?));
+            }
+        };
+    }
+    push!(server_port, "server_port");
+    push!(server_host, "server_host");
+    push!(ui_theme, "ui_theme");
+    push!(ui_language, "ui_language");
+    push!(minimize_to_tray, "minimize_to_tray");
+    push!(close_to_tray, "close_to_tray");
+    push!(auto_start, "auto_start");
+    push!(retry_enabled, "retry_enabled");
+    push!(retry_times, "retry_times");
+    push!(log_retention_days, "log_retention_days");
+    push!(log_raw_body, "log_raw_body");
+    push!(security_enabled, "security_enabled");
+    push!(security_mode, "security_mode");
+
+    if !entries.is_empty() {
+        settings_repo::upsert_many(&state.db, &entries).await?;
+    }
+
     Ok(serde_json::json!({ "status": "updated" }))
 }
 
-/// Get dashboard statistics
+/// Get dashboard statistics (aggregated from request_logs + channels + gateway_keys).
 #[tauri::command]
-pub async fn get_dashboard_stats() -> AppResult<serde_json::Value> {
-    // TODO: Aggregate from request_logs and channels
-    Ok(serde_json::json!({
-        "today_requests": 0,
-        "today_total_tokens": 0,
-        "active_channels": 0,
-        "avg_latency_ms": 0,
-        "total_channels": 0,
-        "total_api_keys": 0,
-        "total_requests": 0,
-        "total_tokens": 0
-    }))
+pub async fn get_dashboard_stats(state: State<'_, Arc<AppState>>) -> AppResult<serde_json::Value> {
+    let s = stats::dashboard(&state.db).await?;
+    Ok(serde_json::to_value(&s)?)
 }

@@ -10,12 +10,14 @@ import {
   Monitor,
   Sun,
   Moon,
+  BookOpen,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { applyTheme, getStoredTheme, type ThemeMode } from "@/lib/theme";
 
 const NAV_ITEMS = [
   { to: "/", label: "仪表盘", icon: LayoutDashboard, end: true },
+  { to: "/usage", label: "使用", icon: BookOpen },
   { to: "/channels", label: "渠道管理", icon: Network },
   { to: "/api-keys", label: "密钥管理", icon: KeyRound },
   { to: "/logs", label: "请求日志", icon: ScrollText },
@@ -74,7 +76,7 @@ export default function Layout() {
         </div>
 
         {/* Nav */}
-        <nav className="flex-1 space-y-1 overflow-y-auto p-3">
+        <nav className="flex-1 space-y-2 overflow-y-auto p-3">
           {NAV_ITEMS.map((item) => {
             const Icon = item.icon;
             return (
@@ -84,25 +86,33 @@ export default function Layout() {
                 end={item.end}
                 className={({ isActive }) =>
                   cn(
-                    "group relative flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition-all duration-200",
-                    isActive
-                      ? "bg-accent font-medium text-accent-foreground"
-                      : "text-muted-foreground hover:bg-accent/50 hover:text-foreground",
+                    "group flex items-center gap-3 rounded-xl px-3 py-2.5 transition-all duration-200",
+                    isActive ? "bg-accent" : "hover:bg-accent/50",
                   )
                 }
               >
                 {({ isActive }) => (
                   <>
-                    {isActive && (
-                      <span className="absolute left-0 top-1/2 h-5 w-1 -translate-y-1/2 rounded-r-full bg-primary" />
-                    )}
-                    <Icon
+                    <span
                       className={cn(
-                        "h-4 w-4 shrink-0 transition-colors",
-                        isActive ? "text-primary" : "text-muted-foreground group-hover:text-foreground",
+                        "flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition-colors",
+                        isActive
+                          ? "bg-primary text-primary-foreground"
+                          : "bg-muted text-muted-foreground group-hover:bg-accent group-hover:text-foreground",
                       )}
-                    />
-                    {item.label}
+                    >
+                      <Icon className="h-[18px] w-[18px]" />
+                    </span>
+                    <span
+                      className={cn(
+                        "text-[15px] transition-colors",
+                        isActive
+                          ? "font-medium text-foreground"
+                          : "text-muted-foreground group-hover:text-foreground",
+                      )}
+                    >
+                      {item.label}
+                    </span>
                   </>
                 )}
               </NavLink>

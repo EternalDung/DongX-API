@@ -41,8 +41,8 @@ pub struct ChannelRow {
 pub struct GatewayKeyRow {
     pub id: String,
     pub name: String,
-    pub key: String,            // masked display: sk-dongapi-****a1b2
-    pub key_hash: String,       // SHA-256 hex for lookup
+    pub key: String,            // plaintext gateway key (local single-user, stored as-is)
+    pub key_hash: String,       // DEPRECATED: unused since plaintext storage; always ""
     pub status: i32,            // 0=disabled 1=active 2=expired
     pub allowed_models: String,   // JSON array string
     pub allowed_channels: String, // JSON array string

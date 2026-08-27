@@ -1,12 +1,150 @@
-use crate::adapter::openai::OpenAIAdaptor;
-use crate::adapter::{Adaptor, ChannelConfig, ProxyRequest, TestResult};
+use crate::adapter::{
+    build_client, extract_usage, map_model, Adaptor, ChannelConfig, ProxyRequest, TestResult,
+    TokenUsage,
+};
 use async_trait::async_trait;
-/// Google Gemini adaptor — uses Google's official OpenAI-compatible endpoint
-/// (`/v1beta/openai/chat/completions`), so it delegates to the OpenAI adaptor.
+use serde_json::{json, Value};
+
+/// Google Gemini adaptor — uses the NATIVE Gemini API
+/// (`/v1beta/models/{model}:generateContent` and `:streamGenerateContent`),
+/// so it performs full OpenAI <-> Gemini protocol conversion here.
 ///
-/// If native Gemini API conversion is ever needed (non-OpenAI-compatible
-/// endpoint), this is the place to implement `to_gemini_request`.
-pub struct GeminiAdaptor(OpenAIAdaptor);
+/// This is deliberately NOT the OpenAI-compatible `/v1beta/openai` endpoint:
+/// going native is the whole point of having a separate `gemini` channel type
+/// — it lets us map the wire format exactly and use Gemini-specific features.
+pub struct GeminiAdaptor;
+
+impl GeminiAdaptor {
+    /// Build the native Gemini endpoint URL. Auth is carried via the `?key=`
+    /// query param (see `AuthScheme::QueryKey`), not an HTTP header.
+    fn request_url(&self, config: &ChannelConfig, model: &str, stream: bool) -> String {
+        let base = config.base_url.trim_end_matches('/');
+        if stream {
+            format!(
+                "{}/v1beta/models/{}:streamGenerateContent?key={}&alt=sse",
+                base, model, config.api_key
+            )
+        } else {
+            format!(
+                "{}/v1beta/models/{}:generateContent?key={}",
+                base, model, config.api_key
+            )
+        }
+    }
+
+    /// OpenAI chat request -> Gemini `generateContent` body.
+    fn to_gemini_request(&self, request: &ProxyRequest) -> Value {
+        let messages = request
+            .body
+            .get("messages")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let mut system_instruction = None;
+        let mut contents: Vec<Value> = Vec::new();
+
+        for msg in &messages {
+            let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("user");
+            let content = msg.get("content");
+            match role {
+                "system" => {
+                    if let Some(text) = content.and_then(|c| c.as_str()) {
+                        system_instruction = Some(json!({ "parts": [{ "text": text }] }));
+                    }
+                }
+                "assistant" | "user" => {
+                    // Skip empty assistant messages unless they carry tool calls.
+                    if role == "assistant" {
+                        let empty = content
+                            .and_then(|c| c.as_str())
+                            .map(|s| s.is_empty())
+                            .unwrap_or(true);
+                        let has_tools = msg
+                            .get("tool_calls")
+                            .and_then(|t| t.as_array())
+                            .map(|a| !a.is_empty())
+                            .unwrap_or(false);
+                        if empty && !has_tools {
+                            continue;
+                        }
+                    }
+                    let text = content.and_then(|c| c.as_str()).unwrap_or("");
+                    contents.push(json!({
+                        "role": if role == "assistant" { "model" } else { "user" },
+                        "parts": [{ "text": text }],
+                    }));
+                }
+                _ => {}
+            }
+        }
+
+        let mut gemini_body = json!({ "contents": contents });
+        if let Some(si) = system_instruction {
+            gemini_body["systemInstruction"] = si;
+        }
+        if let Some(t) = request.body.get("temperature") {
+            gemini_body["generationConfig"]["temperature"] = t.clone();
+        }
+        if let Some(m) = request.body.get("max_tokens") {
+            gemini_body["generationConfig"]["maxOutputTokens"] = m.clone();
+        }
+        if let Some(p) = request.body.get("top_p") {
+            gemini_body["generationConfig"]["topP"] = p.clone();
+        }
+        gemini_body
+    }
+
+    /// Gemini `generateContent` response -> OpenAI chat completion response.
+    fn to_openai_response(&self, model: &str, gemini: &Value) -> Value {
+        let text = gemini
+            .get("candidates")
+            .and_then(|c| c.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|cand| cand.get("content"))
+            .and_then(|c| c.get("parts"))
+            .and_then(|p| p.as_array())
+            .map(|parts| {
+                parts
+                    .iter()
+                    .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+            .unwrap_or_default();
+
+        let usage_meta = gemini.get("usageMetadata");
+        let prompt_tokens = usage_meta
+            .and_then(|u| u.get("promptTokenCount"))
+            .and_then(|t| t.as_u64())
+            .unwrap_or(0);
+        let completion_tokens = usage_meta
+            .and_then(|u| u.get("candidatesTokenCount"))
+            .and_then(|t| t.as_u64())
+            .unwrap_or(0);
+        let total_tokens = usage_meta
+            .and_then(|u| u.get("totalTokenCount"))
+            .and_then(|t| t.as_u64())
+            .unwrap_or(prompt_tokens + completion_tokens);
+
+        json!({
+            "id": format!("chatcmpl-{}", uuid::Uuid::new_v4().simple()),
+            "object": "chat.completion",
+            "created": chrono::Utc::now().timestamp(),
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": text },
+                "finish_reason": "stop",
+            }],
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": total_tokens,
+            },
+        })
+    }
+}
 
 #[async_trait]
 impl Adaptor for GeminiAdaptor {
@@ -15,23 +153,100 @@ impl Adaptor for GeminiAdaptor {
     }
 
     fn default_models(&self) -> Vec<&'static str> {
-        vec!["gemini-2.0-flash", "gemini-2.5-pro", "gemini-2.5-flash"]
+        vec!["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"]
     }
 
     fn default_base_url(&self) -> &str {
-        "https://generativelanguage.googleapis.com/v1beta/openai"
+        "https://generativelanguage.googleapis.com"
     }
 
     async fn test(&self, config: &ChannelConfig) -> Result<TestResult, anyhow::Error> {
-        self.0.test(config).await
+        let model = config
+            .models
+            .first()
+            .map(String::as_str)
+            .unwrap_or_else(|| {
+                self.default_models()
+                    .first()
+                    .copied()
+                    .unwrap_or("gemini-2.0-flash")
+            });
+        let url = format!(
+            "{}/v1beta/models/{}?key={}",
+            config.base_url.trim_end_matches('/'),
+            model,
+            config.api_key
+        );
+
+        let client = build_client(config)?;
+        let start = std::time::Instant::now();
+        let resp = client.get(&url).send().await;
+        let latency = start.elapsed().as_millis() as u64;
+
+        match resp {
+            Ok(r) => {
+                let status = r.status();
+                if status.is_success() {
+                    Ok(TestResult {
+                        success: true,
+                        message: "OK".into(),
+                        latency_ms: latency,
+                    })
+                } else {
+                    let text = r.text().await.unwrap_or_default();
+                    Ok(TestResult {
+                        success: false,
+                        message: format!(
+                            "HTTP {}: {}",
+                            status.as_u16(),
+                            crate::adapter::openai::truncate(&text, 200)
+                        ),
+                        latency_ms: latency,
+                    })
+                }
+            }
+            Err(e) => Ok(TestResult {
+                success: false,
+                message: e.to_string(),
+                latency_ms: latency,
+            }),
+        }
     }
 
     async fn forward(
         &self,
         request: &ProxyRequest,
         config: &ChannelConfig,
-    ) -> Result<(u16, serde_json::Value, Option<crate::adapter::TokenUsage>), anyhow::Error> {
-        self.0.forward(request, config).await
+    ) -> Result<(u16, Value, Option<TokenUsage>), anyhow::Error> {
+        let model = map_model(request, config);
+        let url = self.request_url(config, &model, false);
+        let gemini_body = self.to_gemini_request(request);
+
+        let client = build_client(config)?;
+        let resp = client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .json(&gemini_body)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        let status_code = status.as_u16();
+        let gemini_json: Value = resp.json().await?;
+
+        // Surface upstream errors in OpenAI error shape instead of 502-ing.
+        if !status.is_success() {
+            let msg = gemini_json
+                .pointer("/error/message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("Gemini 上游返回错误");
+            let err_body = json!({ "error": { "message": msg, "type": "upstream_error" } });
+            return Ok((status_code, err_body, None));
+        }
+
+        let openai_response = self.to_openai_response(&model, &gemini_json);
+        let usage = extract_usage(&openai_response);
+        Ok((status_code, openai_response, usage))
     }
 
     async fn forward_stream(
@@ -39,6 +254,19 @@ impl Adaptor for GeminiAdaptor {
         request: &ProxyRequest,
         config: &ChannelConfig,
     ) -> Result<reqwest::Response, anyhow::Error> {
-        self.0.forward_stream(request, config).await
+        let model = map_model(request, config);
+        let url = self.request_url(config, &model, true);
+        let gemini_body = self.to_gemini_request(request);
+
+        let client = build_client(config)?;
+        let resp = client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .json(&gemini_body)
+            .send()
+            .await?;
+        // NOTE: the returned SSE is Gemini-native (`alt=sse`), NOT OpenAI SSE.
+        // Per-chunk conversion to OpenAI SSE is a follow-up (same gap as Claude).
+        Ok(resp)
     }
 }

@@ -15,7 +15,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   Channel,
-  ProviderPreset,
+  ChannelProtocolPresetGroup,
   ApiKey,
   RequestLog,
   AuditEvent,
@@ -27,19 +27,26 @@ import type {
 // 输入类型定义（与 Rust command struct 一一对应）
 // ============================================================
 
+/** 单个上游 key + 权重（负载均衡） */
+export interface KeyEntry {
+  key: string;
+  weight: number;
+}
+
 /** 渠道创建/更新参数 — 对应 Rust ChannelInput */
 export interface ChannelInput {
   name: string;
   protocol: string;
   type: string;
   base_url: string;
-  api_key: string;
+  keys: KeyEntry[];
   models: string[];
   priority: number;
   weight: number;
   config: Record<string, unknown>;
   model_mapping: Record<string, string>;
   endpoints: string[];
+  timeout_secs: number;
 }
 
 /** 密钥创建/更新参数 — 对应 Rust ApiKeyInput */
@@ -53,6 +60,7 @@ export interface ApiKeyInput {
 
 /** 日志查询过滤 — 对应 Rust LogQuery */
 export interface LogQuery {
+  keyword?: string;
   channel_name?: string;
   model?: string;
   status_code?: number;
@@ -114,9 +122,13 @@ export const channelApi = {
   test: (id: string): Promise<boolean> =>
     invoke<boolean>("test_channel", { id }),
 
-  /** 获取供应商预设列表（用于新建渠道时选择类型） */
-  presets: (): Promise<ProviderPreset[]> =>
-    invoke<ProviderPreset[]>("list_provider_presets"),
+  /** 获取按协议分组的供应商预设（渠道类型选择器的唯一数据来源） */
+  presets: (): Promise<ChannelProtocolPresetGroup[]> =>
+    invoke<ChannelProtocolPresetGroup[]>("list_provider_presets"),
+
+  /** 获取某供应商适配器的默认模型列表（用于"拉取模型"按钮） */
+  fetchModels: (type: string): Promise<string[]> =>
+    invoke<string[]>("list_provider_models", { type }),
 };
 
 // ============================================================
@@ -139,6 +151,10 @@ export const keyApi = {
   /** 删除密钥 */
   remove: (id: string): Promise<void> =>
     invoke<void>("delete_api_key", { id }),
+
+  /** 启用 / 禁用密钥（status: 0=禁用 1=启用） */
+  setStatus: (id: string, status: number): Promise<void> =>
+    invoke<void>("set_api_key_status", { id, status }),
 };
 
 // ============================================================
@@ -158,6 +174,10 @@ export const logApi = {
   /** 清空日志，可选只清理 N 天前的记录 */
   clear: (olderThanDays?: number): Promise<void> =>
     invoke<void>("clear_logs", { olderThanDays }),
+
+  /** 删除单条日志 */
+  delete: (id: string): Promise<number> =>
+    invoke<number>("delete_log", { id }),
 };
 
 // ============================================================

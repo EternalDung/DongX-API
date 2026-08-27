@@ -38,11 +38,68 @@ export interface Channel {
   last_test_ok: number | null; // 0 | 1 | null
 }
 
-export interface ProviderPreset {
-  type: ChannelType;
-  label: string;
-  default_base_url: string;
-  requires_api_key: boolean;
+// ---- Channel preset registry (mirrors backend channel_presets) ----
+export type ChannelProvider =
+  | "openai"
+  | "google"
+  | "deepseek"
+  | "qwen"
+  | "zhipu"
+  | "doubao"
+  | "doubao_coding_plan"
+  | "moonshot"
+  | "anthropic"
+  | "ollama"
+  | "custom";
+
+export type ChannelRegionGroup = "custom" | "international" | "domestic" | "local";
+
+export type ChannelEndpoint =
+  | "chat_completions"
+  | "responses"
+  | "messages"
+  | "count_tokens"
+  | "embeddings"
+  | "api_chat";
+
+export type ChannelAuthScheme =
+  | "bearer"
+  | "x_api_key"
+  | "query_key"
+  | "optional_bearer";
+
+export type ChannelModelEnumStrategy = "static_only" | "static_plus_sync" | "sync_only";
+export type ChannelEndpointTestStrategy = "probe_first_model" | "list_models";
+
+export interface ModelSuggestion {
+  id: string;
+  verified_at: string;
+  source_url: string;
+}
+
+export interface ChannelPreset {
+  id: string;
+  protocol: ChannelProtocol;
+  provider: ChannelProvider;
+  display_name: string;
+  region: ChannelRegionGroup;
+  description: string;
+  icon_key: string;
+  native_base_url: string;
+  legacy_base_url: string;
+  legacy_type: string;
+  native_endpoints: ChannelEndpoint[];
+  default_checked_endpoints: ChannelEndpoint[];
+  auth_scheme: ChannelAuthScheme;
+  model_suggestions: ModelSuggestion[];
+  model_enum_strategy: ChannelModelEnumStrategy;
+  endpoint_test_strategy: ChannelEndpointTestStrategy;
+  preset_revision: string;
+}
+
+export interface ChannelProtocolPresetGroup {
+  protocol: ChannelProtocol;
+  presets: ChannelPreset[];
 }
 
 // ============================================================
@@ -54,7 +111,7 @@ export type ApiKeyStatus = 0 | 1 | 2; // disabled | active | expired
 export interface ApiKey {
   id: string;
   name: string;
-  key: string; // masked: sk-dong-****a1b2
+  key: string; // plaintext gateway key (本地明文存储，对齐 waliapi)
   status: ApiKeyStatus;
   allowed_models: string[];
   allowed_channels: string[];

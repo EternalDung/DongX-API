@@ -1,7 +1,13 @@
-use crate::error::AppResult;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
+use sqlx::SqlitePool;
 
-/// Request dispatch context
+use crate::crypto;
+use crate::db::repository::channels;
+use crate::error::{AppError, AppResult};
+use crate::models::ChannelRow;
+
+/// Request dispatch context — what the data plane knows about an incoming call.
 #[derive(Debug, Clone)]
 pub struct DispatchContext {
     pub model: String,
@@ -10,28 +16,165 @@ pub struct DispatchContext {
     pub request_body: serde_json::Value,
 }
 
-/// Selected channel for forwarding
+/// A selected upstream channel ready for forwarding.
+///
+/// Carries everything `adapter::ChannelConfig` needs, plus the decrypted
+/// upstream API key (weighted-picked from the channel's key set).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct SelectedChannel {
     pub id: String,
     pub name: String,
+    pub channel_type: String,
     pub base_url: String,
-    pub endpoint: String,
-    pub upstream_model: String,
-    pub protocol: String,
+    pub upstream_api_key: String,
+    pub models: Vec<String>,
+    pub model_mapping: serde_json::Value,
+    pub extra: serde_json::Value,
+    pub timeout_secs: u64,
 }
 
-/// Select the best channel for a given request
-/// Algorithm: filter enabled + model match → sort by priority → weighted random in top priority group
-pub async fn select_channel(ctx: &DispatchContext) -> AppResult<SelectedChannel> {
-    // TODO: Implement full selection logic
-    // 1. Query enabled channels (status=1) that support the requested model
-    // 2. Apply model_mapping to find matching channels
-    // 3. Sort by priority (ascending)
-    // 4. Take top priority group
-    // 5. Weighted random selection within group
-    // 6. Check circuit breaker status
-    let _ = ctx;
-    Err(crate::error::AppError::NotFound("No available channel".into()))
+/// Select the best channel for a request.
+///
+/// Algorithm (MVP, no circuit breaker yet):
+/// 1. Load enabled channels (status=1), ordered by priority.
+/// 2. Keep only channels that serve the requested model — either listed in
+///    `models` or mapped via `model_mapping`.
+/// 3. Take the top-priority group.
+/// 4. Weighted-random pick by channel `weight`.
+/// 5. Decrypt the channel's upstream key set and weighted-pick one key.
+///
+/// Java mental model: like a Spring @Service routing bean that queries
+/// routing rules (channels) and picks a backend via priority + weight.
+pub async fn select_channel(
+    pool: &SqlitePool,
+    ctx: &DispatchContext,
+) -> AppResult<SelectedChannel> {
+    let enabled = channels::list_enabled(pool).await?;
+    if enabled.is_empty() {
+        return Err(AppError::NotFound("没有已启用的渠道".into()));
+    }
+
+    // Channels that serve this model (listed or mapped).
+    let candidates: Vec<&ChannelRow> = enabled
+        .iter()
+        .filter(|c| channel_serves_model(c, &ctx.model))
+        .collect();
+
+    if candidates.is_empty() {
+        return Err(AppError::NotFound(format!(
+            "没有渠道支持模型 '{}'",
+            ctx.model
+        )));
+    }
+
+    // Top-priority group (higher priority wins).
+    let top_priority = candidates.iter().map(|c| c.priority).max().unwrap_or(0);
+    let top: Vec<&ChannelRow> = candidates
+        .iter()
+        .copied()
+        .filter(|c| c.priority == top_priority)
+        .collect();
+
+    // Weighted-random pick a channel by its `weight`.
+    let pairs: Vec<(String, i32)> = top.iter().map(|c| (c.id.clone(), c.weight)).collect();
+    let chosen_id = weighted_pick(&pairs)
+        .ok_or_else(|| AppError::Internal("渠道加权选择失败".into()))?;
+    let row = top
+        .iter()
+        .find(|c| c.id == chosen_id)
+        .expect("加权选中的渠道必然存在");
+
+    // Decrypt upstream keys; weighted-pick one.
+    let upstream_api_key = pick_upstream_key(&row.cred_encrypted)?;
+
+    let models: Vec<String> = serde_json::from_str(&row.models).unwrap_or_default();
+    let model_mapping: serde_json::Value =
+        serde_json::from_str(&row.model_mapping).unwrap_or_else(|_| serde_json::json!({}));
+    let config: serde_json::Value =
+        serde_json::from_str(&row.config).unwrap_or_else(|_| serde_json::json!({}));
+    let timeout_secs = config
+        .get("timeout_secs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(60);
+
+    Ok(SelectedChannel {
+        id: row.id.clone(),
+        name: row.name.clone(),
+        channel_type: row.channel_type.clone(),
+        base_url: row.base_url.clone(),
+        upstream_api_key,
+        models,
+        model_mapping,
+        extra: config,
+        timeout_secs,
+    })
+}
+
+/// Whether a channel serves the given model — listed in `models` or mapped
+/// in `model_mapping`.
+fn channel_serves_model(c: &ChannelRow, model: &str) -> bool {
+    let models: Vec<String> = serde_json::from_str(&c.models).unwrap_or_default();
+    if models.iter().any(|m| m == model) {
+        return true;
+    }
+    let mapping: serde_json::Value =
+        serde_json::from_str(&c.model_mapping).unwrap_or_else(|_| serde_json::json!({}));
+    mapping.get(model).is_some()
+}
+
+/// Weighted-random selection. `weight` clamped to >=1 so every entry has a chance.
+fn weighted_pick(pairs: &[(String, i32)]) -> Option<String> {
+    if pairs.is_empty() {
+        return None;
+    }
+    let total: i32 = pairs.iter().map(|(_, w)| (*w).max(1)).sum();
+    if total <= 0 {
+        return Some(pairs[0].0.clone());
+    }
+    let mut rng = rand::thread_rng();
+    let mut r = rng.gen_range(0..total);
+    for (id, w) in pairs {
+        r -= (*w).max(1);
+        if r < 0 {
+            return Some(id.clone());
+        }
+    }
+    Some(pairs[0].0.clone())
+}
+
+/// Decrypt the channel credential and weighted-pick one upstream key.
+///
+/// Supports two storage shapes:
+/// - Multi-key JSON array: `[{"key":"sk-...","weight":7}, ...]`
+/// - Legacy single key: the plaintext is the key itself.
+fn pick_upstream_key(cred_encrypted: &str) -> AppResult<String> {
+    let plaintext = crypto::decrypt(cred_encrypted).map_err(AppError::Crypto)?;
+
+    // Multi-key JSON array.
+    if let Ok(keys) = serde_json::from_str::<Vec<serde_json::Value>>(&plaintext) {
+        if !keys.is_empty() {
+            let pairs: Vec<(String, i32)> = keys
+                .iter()
+                .filter_map(|k| {
+                    let key = k.get("key")?.as_str()?.to_string();
+                    if key.is_empty() {
+                        return None;
+                    }
+                    let weight = k.get("weight").and_then(|v| v.as_i64()).unwrap_or(1) as i32;
+                    Some((key, weight))
+                })
+                .collect();
+            if !pairs.is_empty() {
+                return Ok(weighted_pick(&pairs)
+                    .ok_or_else(|| AppError::Crypto("无可用上游密钥".into()))?);
+            }
+        }
+    }
+
+    // Legacy single key.
+    if plaintext.is_empty() {
+        return Err(AppError::Crypto("上游密钥为空".into()));
+    }
+    Ok(plaintext)
 }

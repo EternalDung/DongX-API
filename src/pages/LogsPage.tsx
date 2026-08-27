@@ -1,18 +1,22 @@
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import {
   Search,
   RefreshCw,
   ScrollText,
   Trash2,
   AlertTriangle,
+  ChevronDown,
+  ChevronRight,
+  ChevronUp,
+  Copy,
+  Check,
+  User as UserIcon,
+  Bot,
+  Lightbulb,
 } from "lucide-react";
-import {
-  Card,
-  CardContent,
-} from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
 import { Select } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -37,15 +41,12 @@ import {
 import { logApi, channelApi } from "@/lib/api";
 import type { RequestLog, Channel } from "@/types";
 
+const PAGE_SIZE = 20;
+
 function statusTone(code: number): StatusTone {
   if (code >= 500) return "destructive";
   if (code >= 400) return "warning";
   return "success";
-}
-function statusLabel(code: number): string {
-  if (code >= 500) return "服务端错误";
-  if (code >= 400) return "客户端错误";
-  return "成功";
 }
 
 function formatTime(iso: string): string {
@@ -55,11 +56,18 @@ function formatTime(iso: string): string {
   return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  return `${(ms / 1000).toFixed(2)}s`;
+}
+
 export function LogsPage() {
   const toast = useToast();
   const [logs, setLogs] = useState<RequestLog[]>([]);
   const [channels, setChannels] = useState<Channel[]>([]);
   const [loading, setLoading] = useState(true);
+  const [page, setPage] = useState(0); // 0-indexed
+  const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const [keyword, setKeyword] = useState("");
   const [channelFilter, setChannelFilter] = useState("all");
@@ -69,12 +77,39 @@ export function LogsPage() {
   const [clearOpen, setClearOpen] = useState(false);
   const [clearing, setClearing] = useState(false);
 
-  const load = async () => {
+  const [deleteTarget, setDeleteTarget] = useState<RequestLog | null>(null);
+  const [deleting, setDeleting] = useState(false);
+
+  const handleDelete = async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    try {
+      await logApi.delete(deleteTarget.id);
+      toast.success("日志已删除");
+      setDeleteTarget(null);
+      setExpandedId(null);
+      await load(page);
+    } catch (e) {
+      console.error("Failed to delete log:", e);
+      toast.error("删除失败");
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  // Load one page from the backend with current filters.
+  const load = async (p: number) => {
     setLoading(true);
     try {
-      const [logList, chList] = await Promise.all([logApi.list(), channelApi.list()]);
-      setLogs(logList);
-      setChannels(chList);
+      const list = await logApi.list({
+        keyword: keyword.trim() || undefined,
+        channel_name: channelFilter !== "all" ? channelFilter : undefined,
+        model: modelFilter !== "all" ? modelFilter : undefined,
+        page: p + 1, // backend is 1-indexed
+        page_size: PAGE_SIZE,
+      });
+      setLogs(list);
+      setExpandedId(null);
     } catch (e) {
       console.error("Failed to load logs:", e);
       toast.error("日志加载失败");
@@ -83,36 +118,32 @@ export function LogsPage() {
     }
   };
 
+  // Load channels once (for the filter dropdown).
   useEffect(() => {
-    load();
+    channelApi.list().then(setChannels).catch(() => {});
   }, []);
 
-  const modelOptions = useMemo(() => {
-    const set = new Set(logs.map((l) => l.model));
-    return Array.from(set).sort();
-  }, [logs]);
+  // Reload (reset to page 0) when keyword / channel / model filters change.
+  // Debounced so typing in the keyword box doesn't spam the backend.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setPage(0);
+      load(0);
+    }, 300);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [keyword, channelFilter, modelFilter]);
 
+  const modelOptions = useMemo(
+    () => Array.from(new Set(channels.flatMap((c) => c.models))).sort(),
+    [channels],
+  );
+
+  // status filter is applied client-side on the current page.
   const filtered = useMemo(() => {
-    const kw = keyword.trim().toLowerCase();
-    return logs.filter((l) => {
-      if (channelFilter !== "all" && l.channel_name !== channelFilter) return false;
-      if (modelFilter !== "all" && l.model !== modelFilter) return false;
-      if (statusFilter !== "all" && !String(l.status_code).startsWith(statusFilter)) return false;
-      if (kw) {
-        const haystack = [
-          l.model,
-          l.channel_name ?? "",
-          l.api_key_name ?? "",
-          l.error_message ?? "",
-          l.upstream_model ?? "",
-        ]
-          .join(" ")
-          .toLowerCase();
-        if (!haystack.includes(kw)) return false;
-      }
-      return true;
-    });
-  }, [logs, keyword, channelFilter, modelFilter, statusFilter]);
+    if (statusFilter === "all") return logs;
+    return logs.filter((l) => String(l.status_code).startsWith(statusFilter));
+  }, [logs, statusFilter]);
 
   const handleClear = async () => {
     setClearing(true);
@@ -120,7 +151,8 @@ export function LogsPage() {
       await logApi.clear();
       toast.success("日志已清空");
       setClearOpen(false);
-      await load();
+      setPage(0);
+      await load(0);
     } catch (e) {
       console.error("Failed to clear logs:", e);
       toast.error("清空失败");
@@ -142,13 +174,24 @@ export function LogsPage() {
     modelFilter !== "all" ||
     statusFilter !== "all";
 
+  const goPrev = () => {
+    const p = Math.max(0, page - 1);
+    setPage(p);
+    load(p);
+  };
+  const goNext = () => {
+    const p = page + 1;
+    setPage(p);
+    load(p);
+  };
+
   return (
     <div>
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">请求日志</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            逐条请求明细：状态、Token、延迟
+            逐条请求明细：状态、Token、耗时
             {filtered.length !== logs.length && (
               <span className="ml-1 font-mono text-xs">
                 （{filtered.length}/{logs.length}）
@@ -157,7 +200,7 @@ export function LogsPage() {
           </p>
         </div>
         <div className="flex gap-2">
-          <Button variant="outline" size="sm" onClick={load} disabled={loading}>
+          <Button variant="outline" size="sm" onClick={() => load(page)} disabled={loading}>
             <RefreshCw className={loading ? "animate-spin" : ""} />
             刷新
           </Button>
@@ -210,10 +253,10 @@ export function LogsPage() {
 
       {/* 日志表格 */}
       <Card className="mt-4 overflow-hidden">
-        <CardContent className="pt-2">
+        <CardContent className="p-0">
           {loading ? (
-            <div className="space-y-2 py-4">
-              {Array.from({ length: 6 }).map((_, i) => (
+            <div className="space-y-2 p-4">
+              {Array.from({ length: 8 }).map((_, i) => (
                 <Skeleton key={i} className="h-10 w-full" />
               ))}
             </div>
@@ -235,58 +278,114 @@ export function LogsPage() {
               }
             />
           ) : (
-            <Table>
-              <TableHeader>
-                <TableRow className="hover:bg-transparent">
-                  <TableHead>时间</TableHead>
-                  <TableHead>渠道</TableHead>
-                  <TableHead>模型</TableHead>
-                  <TableHead>状态</TableHead>
-                  <TableHead className="text-right">Tokens</TableHead>
-                  <TableHead className="text-right">延迟</TableHead>
-                  <TableHead>标记</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {filtered.map((l) => (
-                  <TableRow key={l.id}>
-                    <TableCell className="whitespace-nowrap text-muted-foreground">
-                      {formatTime(l.created_at)}
-                    </TableCell>
-                    <TableCell>{l.channel_name ?? "-"}</TableCell>
-                    <TableCell>
-                      <span className="font-mono text-xs">{l.model}</span>
-                    </TableCell>
-                    <TableCell>
-                      <StatusBadge tone={statusTone(l.status_code)}>
-                        {l.status_code} {statusLabel(l.status_code)}
-                      </StatusBadge>
-                    </TableCell>
-                    <TableCell className="text-right font-mono text-xs tabular-nums">
-                      {l.total_tokens > 0 ? (
-                        <span title={`P:${l.prompt_tokens} / C:${l.completion_tokens}`}>
-                          {l.total_tokens.toLocaleString()}
-                        </span>
-                      ) : (
-                        "-"
-                      )}
-                    </TableCell>
-                    <TableCell className="text-right font-mono text-xs tabular-nums">
-                      {l.duration_ms}ms
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex gap-1">
-                        {l.is_stream && <Badge variant="outline">流式</Badge>}
-                        {l.is_retry && <Badge variant="warning">重试</Badge>}
-                        {l.security_action === "block" && (
-                          <Badge variant="destructive">拦截</Badge>
-                        )}
-                      </div>
-                    </TableCell>
+            <>
+              <Table>
+                <TableHeader>
+                  <TableRow className="hover:bg-transparent">
+                    <TableHead className="w-8" />
+                    <TableHead className="w-12 text-center">序号</TableHead>
+                    <TableHead>时间</TableHead>
+                    <TableHead>密钥</TableHead>
+                    <TableHead>上游</TableHead>
+                    <TableHead>模型</TableHead>
+                    <TableHead>状态</TableHead>
+                    <TableHead className="text-right">Tokens</TableHead>
+                    <TableHead className="text-right">耗时</TableHead>
+                    <TableHead className="w-10 text-center">操作</TableHead>
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+                </TableHeader>
+                <TableBody>
+                  {filtered.map((l) => {
+                    const expanded = expandedId === l.id;
+                    return (
+                      <Fragment key={l.id}>
+                        <TableRow
+                          className="cursor-pointer"
+                          onClick={() => setExpandedId(expanded ? null : l.id)}
+                        >
+                          <TableCell className="w-8">
+                            {expanded ? (
+                              <ChevronDown className="h-4 w-4 text-muted-foreground" />
+                            ) : (
+                              <ChevronRight className="h-4 w-4 text-muted-foreground" />
+                            )}
+                          </TableCell>
+                          <TableCell className="w-12 text-center font-mono text-xs text-muted-foreground tabular-nums">
+                            {l.seq ?? "-"}
+                          </TableCell>
+                          <TableCell className="whitespace-nowrap text-muted-foreground">
+                            {formatTime(l.created_at)}
+                          </TableCell>
+                          <TableCell>{l.api_key_name ?? "-"}</TableCell>
+                          <TableCell>{l.channel_name ?? "-"}</TableCell>
+                          <TableCell>
+                            <span className="font-mono text-xs">{l.model}</span>
+                          </TableCell>
+                          <TableCell>
+                            <StatusBadge tone={statusTone(l.status_code)}>
+                              {l.status_code}
+                            </StatusBadge>
+                          </TableCell>
+                          <TableCell className="text-right font-mono text-xs tabular-nums">
+                            {l.total_tokens > 0 ? (
+                              <span title={`P:${l.prompt_tokens} / C:${l.completion_tokens}`}>
+                                {l.total_tokens.toLocaleString()}
+                              </span>
+                            ) : (
+                              "-"
+                            )}
+                          </TableCell>
+                          <TableCell className="text-right font-mono text-xs tabular-nums">
+                            {formatDuration(l.duration_ms)}
+                          </TableCell>
+                          <TableCell className="w-10 text-center">
+                            <button
+                              type="button"
+                              title="删除此日志"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setDeleteTarget(l);
+                              }}
+                              className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </button>
+                          </TableCell>
+                        </TableRow>
+                        {expanded && (
+                          <TableRow className="hover:bg-transparent">
+                            <TableCell colSpan={10} className="bg-muted/30 p-4">
+                              <LogDetail id={l.id} />
+                            </TableCell>
+                          </TableRow>
+                        )}
+                      </Fragment>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+
+              {/* 分页 */}
+              <div className="flex items-center justify-between border-t px-4 py-2.5">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={goPrev}
+                  disabled={page === 0 || loading}
+                >
+                  上一页
+                </Button>
+                <span className="text-sm text-muted-foreground">第 {page + 1} 页</span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={goNext}
+                  disabled={logs.length < PAGE_SIZE || loading}
+                >
+                  下一页
+                </Button>
+              </div>
+            </>
           )}
         </CardContent>
       </Card>
@@ -313,6 +412,485 @@ export function LogsPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* 删除单条日志确认 Dialog */}
+      <Dialog
+        open={deleteTarget !== null}
+        onOpenChange={(o) => {
+          if (!o) setDeleteTarget(null);
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="h-5 w-5 text-destructive" />
+              删除日志
+            </DialogTitle>
+            <DialogDescription>
+              确认删除序号 {deleteTarget?.seq ?? ""} 的这条请求日志？此操作不可恢复。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteTarget(null)}>
+              取消
+            </Button>
+            <Button variant="destructive" onClick={handleDelete} disabled={deleting}>
+              {deleting ? "删除中..." : "确认删除"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+// ─── 展开明细卡片 ────────────────────────────────────────────────────────────
+// 点击列表行后展开，调用 logApi.detail(id) 取完整行（含 request/response body）。
+
+function LogDetail({ id }: { id: string }) {
+  const [detail, setDetail] = useState<RequestLog | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    logApi
+      .detail(id)
+      .then((d) => {
+        if (!cancelled) setDetail(d);
+      })
+      .catch(() => {
+        if (!cancelled) setDetail(null);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
+
+  if (loading) {
+    return <Skeleton className="h-32 w-full" />;
+  }
+  if (!detail) {
+    return <div className="text-sm text-muted-foreground">加载详情失败</div>;
+  }
+
+  const modelMapping =
+    detail.upstream_model && detail.upstream_model !== detail.model
+      ? `${detail.model} → ${detail.upstream_model}`
+      : null;
+
+  return (
+    <div className="space-y-4">
+      {/* 基本信息：卡片网格，每行多个；列表已展示的字段不再重复 */}
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+        <StatCard label="模式" value={modeLabel(detail.mode)} />
+        <StatCard label="状态">
+          <StatusBadge tone={statusTone(detail.status_code)}>
+            {detail.status_code}
+          </StatusBadge>
+        </StatCard>
+        <StatCard label="耗时" value={formatDuration(detail.duration_ms)} />
+        <StatCard label="模型映射" mono>
+          {modelMapping ?? detail.model}
+        </StatCard>
+        <StatCard label="输入 (Prompt)" value={String(detail.prompt_tokens)} />
+        <StatCard label="输出 (Completion)" value={String(detail.completion_tokens)} />
+        <StatCard label="总计 (Total)" value={String(detail.total_tokens)} />
+        <StatCard label="流式" value={detail.is_stream ? "是" : "否"} />
+        <StatCard label="重试" value={detail.is_retry ? "是" : "否"} />
+      </div>
+
+      {/* 错误信息 */}
+      {detail.error_message && (
+        <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
+          <span className="font-medium">错误：</span> {detail.error_message}
+        </div>
+      )}
+
+      {/* 请求/响应 tab + 缩略/JSON 双视图 */}
+      <BodySection requestBody={detail.request_body} responseBody={detail.response_body} />
+    </div>
+  );
+}
+
+// 参数卡片（详情卡用，网格每行多个；列表已展示的字段不再重复）
+function StatCard({
+  label,
+  value,
+  mono,
+  children,
+}: {
+  label: string;
+  value?: string;
+  mono?: boolean;
+  children?: React.ReactNode;
+}) {
+  return (
+    <div className="rounded-lg border bg-background px-3 py-2">
+      <div className="text-[11px] uppercase tracking-wide text-muted-foreground">
+        {label}
+      </div>
+      <div className={`mt-0.5 text-sm ${mono ? "font-mono" : ""}`}>
+        {children ?? value ?? "-"}
+      </div>
+    </div>
+  );
+}
+
+function modeLabel(mode: string): string {
+  switch (mode) {
+    case "chat":
+      return "对话 (chat)";
+    case "completion":
+      return "补全 (completion)";
+    case "embedding":
+      return "向量 (embedding)";
+    default:
+      return mode || "-";
+  }
+}
+
+// ─── 请求/响应 Tab + 双视图 ──────────────────────────────────────────────────
+
+type BodyTab = "request" | "response";
+type ViewMode = "preview" | "json";
+
+function BodySection({
+  requestBody,
+  responseBody,
+}: {
+  requestBody: string | null;
+  responseBody: string | null;
+}) {
+  const [tab, setTab] = useState<BodyTab>("response");
+  const [view, setView] = useState<ViewMode>("preview");
+  const reqMessages = useMemo(() => parseRequestMessages(requestBody), [requestBody]);
+  const respChoices = useMemo(() => parseResponseChoices(responseBody), [responseBody]);
+
+  const currentBody = tab === "request" ? requestBody : responseBody;
+  const currentList = tab === "request" ? reqMessages : respChoices;
+  const currentCount = currentList.length;
+
+  return (
+    <div className="overflow-hidden rounded-md border bg-background">
+      {/* Tab bar */}
+      <div className="flex items-center justify-between border-b bg-muted/30">
+        <div className="flex">
+          <TabButton
+            active={tab === "request"}
+            onClick={() => {
+              setTab("request");
+              setView("preview");
+            }}
+            color="blue"
+          >
+            请求
+            {reqMessages.length > 0 && (
+              <span className="ml-1 rounded-full bg-blue-500/15 px-1.5 font-mono text-[10px] text-blue-600">
+                {reqMessages.length}
+              </span>
+            )}
+          </TabButton>
+          <TabButton
+            active={tab === "response"}
+            onClick={() => {
+              setTab("response");
+              setView("preview");
+            }}
+            color="emerald"
+          >
+            响应
+            {respChoices.length > 0 && (
+              <span className="ml-1 rounded-full bg-emerald-500/15 px-1.5 font-mono text-[10px] text-emerald-600">
+                {respChoices.length}
+              </span>
+            )}
+          </TabButton>
+        </div>
+        {currentCount > 0 && (
+          <button
+            type="button"
+            onClick={() => setView(view === "preview" ? "json" : "preview")}
+            className="mr-3 text-xs font-medium text-primary hover:underline"
+          >
+            {view === "preview" ? "查看原始 JSON" : "返回对话视图"}
+          </button>
+        )}
+      </div>
+
+      {/* Body */}
+      <div className="p-3">
+        {!currentBody ? (
+          <div className="rounded-md border border-dashed p-3 text-xs italic text-muted-foreground">
+            未记录原始报文（在「设置 → 通用」开启"记录原始报文"后生效）
+          </div>
+        ) : view === "preview" ? (
+          currentList.length > 0 ? (
+            tab === "request" ? (
+              <MessageList messages={currentList as ParsedMessage[]} />
+            ) : (
+              <ChoiceList choices={currentList as ParsedChoice[]} />
+            )
+          ) : (
+            <div className="rounded-md border border-dashed p-3 text-xs italic text-muted-foreground">
+              无法解析对话结构，自动回退 JSON 视图
+            </div>
+          )
+        ) : (
+          <JsonBlock body={currentBody} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function TabButton({
+  active,
+  onClick,
+  color,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  color: "blue" | "emerald";
+  children: React.ReactNode;
+}) {
+  const activeCls =
+    color === "blue"
+      ? "text-blue-600 border-blue-500"
+      : "text-emerald-600 border-emerald-500";
+  const inactiveCls = "text-muted-foreground hover:text-foreground border-transparent";
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`relative flex items-center px-4 py-2 text-sm font-medium transition-colors ${active ? activeCls : inactiveCls}`}
+    >
+      {children}
+      {active && (
+        <span
+          className={`absolute right-0 bottom-0 left-0 h-0.5 ${color === "blue" ? "bg-blue-500" : "bg-emerald-500"}`}
+        />
+      )}
+    </button>
+  );
+}
+
+// ─── 解析器 ─────────────────────────────────────────────────────────────────
+
+interface ParsedMessage {
+  role: string;
+  content: string;
+}
+
+interface ParsedChoice {
+  role: string;
+  content: string;
+  reasoning: string;
+}
+
+function parseRequestMessages(body: string | null): ParsedMessage[] {
+  if (!body) return [];
+  try {
+    const parsed = JSON.parse(body);
+    const arr = Array.isArray(parsed?.messages) ? parsed.messages : null;
+    if (!arr) return [];
+    return arr.map((m: Record<string, unknown>) => ({
+      role: (m.role as string) ?? "user",
+      content:
+        typeof m.content === "string"
+          ? m.content
+          : m.content
+            ? JSON.stringify(m.content)
+            : "",
+    }));
+  } catch {
+    return [];
+  }
+}
+
+function parseResponseChoices(body: string | null): ParsedChoice[] {
+  if (!body) return [];
+  try {
+    const parsed = JSON.parse(body);
+    const arr = Array.isArray(parsed?.choices) ? parsed.choices : null;
+    if (!arr) return [];
+    return arr.map((c: Record<string, unknown>) => {
+      const message = (c.message ?? c.delta ?? {}) as Record<string, unknown>;
+      return {
+        role: (message.role as string) ?? "assistant",
+        content: typeof message.content === "string" ? (message.content as string) : "",
+        reasoning:
+          typeof message.reasoning_content === "string"
+            ? (message.reasoning_content as string)
+            : "",
+      };
+    });
+  } catch {
+    return [];
+  }
+}
+
+// ─── 对话视图（请求） ────────────────────────────────────────────────────────
+
+function MessageList({ messages }: { messages: ParsedMessage[] }) {
+  return (
+    <div className="space-y-3">
+      {messages.map((m, i) => (
+        <MessageBubble key={i} index={i} role={m.role} content={m.content} />
+      ))}
+    </div>
+  );
+}
+
+function MessageBubble({
+  index,
+  role,
+  content,
+  reasoning,
+}: {
+  index: number;
+  role: string;
+  content: string;
+  reasoning?: string;
+}) {
+  const isUser = role === "user";
+  const Icon = isUser ? UserIcon : Bot;
+  const roleLabel = isUser ? "User" : role === "system" ? "System" : role === "assistant" ? "AI" : role;
+  const bubbleCls = isUser
+    ? "border-blue-200 bg-blue-50 dark:border-blue-900 dark:bg-blue-950/30"
+    : role === "system"
+      ? "border-amber-200 bg-amber-50 dark:border-amber-900 dark:bg-amber-950/30"
+      : "border-emerald-200 bg-emerald-50 dark:border-emerald-900 dark:bg-emerald-950/30";
+
+  return (
+    <div className="flex gap-2">
+      <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
+        <Icon className="h-3.5 w-3.5" />
+      </div>
+      <div className="flex-1 space-y-1.5">
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          <span className="font-medium">{roleLabel}</span>
+          <span className="font-mono text-[10px]">#{index + 1}</span>
+        </div>
+        {reasoning !== undefined && <ReasoningBlock reasoning={reasoning} />}
+        <div className={`rounded-md border p-3 text-sm whitespace-pre-wrap break-words ${bubbleCls}`}>
+          {content || <span className="italic text-muted-foreground">（空内容）</span>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── 对话视图（响应） ────────────────────────────────────────────────────────
+
+function ChoiceList({ choices }: { choices: ParsedChoice[] }) {
+  return (
+    <div className="space-y-3">
+      {choices.map((c, i) => (
+        <MessageBubble
+          key={i}
+          index={i}
+          role={c.role}
+          content={c.content}
+          reasoning={c.reasoning}
+        />
+      ))}
+    </div>
+  );
+}
+
+function ReasoningBlock({ reasoning }: { reasoning: string }) {
+  const [expanded, setExpanded] = useState(false);
+  if (!reasoning) return null;
+  const preview = reasoning.replace(/\n+/g, " ").trim();
+  const truncated = preview.length > 200 ? `${preview.slice(0, 200)}…` : preview;
+  const shouldFold = preview.length > 200;
+
+  return (
+    <div className="rounded-md border border-purple-200 bg-purple-50 dark:border-purple-900 dark:bg-purple-950/30">
+      <div className="flex items-center justify-between border-b border-purple-200/60 px-3 py-1.5">
+        <div className="flex items-center gap-1.5 text-xs font-medium text-purple-700 dark:text-purple-300">
+          <Lightbulb className="h-3.5 w-3.5" />
+          推理内容
+        </div>
+        <div className="flex items-center gap-1">
+          <CopyButton value={reasoning} />
+          {shouldFold && (
+            <button
+              type="button"
+              onClick={() => setExpanded(!expanded)}
+              className="flex items-center gap-0.5 rounded-full px-2 py-0.5 text-[10px] font-medium text-purple-700 hover:bg-purple-100 dark:hover:bg-purple-900/40"
+            >
+              {expanded ? (
+                <>
+                  <ChevronUp className="h-3 w-3" />
+                  收起
+                </>
+              ) : (
+                <>
+                  <ChevronDown className="h-3 w-3" />
+                  展开
+                </>
+              )}
+            </button>
+          )}
+        </div>
+      </div>
+      <div className="px-3 py-2 text-xs whitespace-pre-wrap break-words text-purple-900 dark:text-purple-200">
+        {shouldFold && !expanded ? truncated : reasoning}
+      </div>
+    </div>
+  );
+}
+
+// ─── 通用：复制按钮 / JSON 块 ────────────────────────────────────────────────
+
+function CopyButton({ value }: { value: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={async () => {
+        try {
+          await navigator.clipboard.writeText(value);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1200);
+        } catch {
+          /* clipboard unavailable */
+        }
+      }}
+      className={`flex items-center gap-0.5 rounded-full px-2 py-0.5 text-[10px] font-medium transition-colors ${
+        copied
+          ? "bg-emerald-100 text-emerald-700"
+          : "text-muted-foreground hover:bg-muted hover:text-foreground"
+      }`}
+    >
+      {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+      {copied ? "已复制" : "复制"}
+    </button>
+  );
+}
+
+function JsonBlock({ body }: { body: string }) {
+  const pretty = useMemo(() => {
+    try {
+      return JSON.stringify(JSON.parse(body), null, 2);
+    } catch {
+      return body;
+    }
+  }, [body]);
+  return (
+    <div className="relative">
+      <pre className="max-h-96 overflow-auto rounded-md bg-muted/40 p-3 font-mono text-xs whitespace-pre-wrap break-words">
+        {pretty}
+      </pre>
+      <div className="absolute top-2 right-2">
+        <CopyButton value={pretty} />
+      </div>
     </div>
   );
 }
