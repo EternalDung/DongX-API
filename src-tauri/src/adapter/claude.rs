@@ -1,6 +1,6 @@
 use crate::adapter::{
-    build_client, extract_usage, map_model, Adaptor, ChannelConfig, ProxyRequest, TestResult,
-    TokenUsage,
+    build_client, extract_usage, map_model, Adaptor, ChannelConfig, ProxyRequest, SseRecord,
+    StreamUsage, TestResult, TokenUsage,
 };
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -203,5 +203,149 @@ impl Adaptor for ClaudeAdaptor {
             .send()
             .await?;
         Ok(resp)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Streaming: Anthropic SSE -> OpenAI SSE (chunk-by-chunk)
+// ---------------------------------------------------------------------------
+
+/// Stateful converter: turns Anthropic `/v1/messages` SSE events into OpenAI
+/// `chat.completion.chunk` `data:` frames. One instance lives for the whole
+/// upstream stream, because it needs to emit the `role` exactly once and to
+/// know when the stream is finished.
+pub struct AnthropicSseConverter {
+    model: String,
+    id: String,
+    role_emitted: bool,
+    finished: bool,
+}
+
+impl AnthropicSseConverter {
+    pub fn new(model: String) -> Self {
+        Self {
+            model,
+            id: format!("chatcmpl-{}", uuid::Uuid::new_v4().simple()),
+            role_emitted: false,
+            finished: false,
+        }
+    }
+
+    /// Convert one Anthropic SSE record. Returns zero or more OpenAI `data:`
+    /// frames (each terminated with `\n\n`). `acc` accumulates token usage.
+    pub fn convert(&mut self, record: &SseRecord, acc: &mut StreamUsage) -> Vec<String> {
+        if self.finished {
+            return Vec::new();
+        }
+        let data = &record.data;
+        if data.is_empty() || data == "[DONE]" {
+            return Vec::new();
+        }
+        let Ok(json) = serde_json::from_str::<Value>(data) else {
+            return Vec::new();
+        };
+        let typ = json.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        let mut frames: Vec<String> = Vec::new();
+
+        match typ {
+            "message_start" => {
+                // Capture input tokens early; output tokens come at message_delta.
+                if let Some(u) = json.pointer("/message/usage") {
+                    acc.prompt_tokens = u
+                        .get("input_tokens")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                }
+            }
+            "content_block_delta" => {
+                let delta = json.get("delta");
+                let kind = delta
+                    .and_then(|d| d.get("type"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("");
+                // Map the two text-bearing Anthropic deltas to OpenAI deltas.
+                // `thinking_delta` -> `reasoning_content` (OpenAI-compatible
+                // extended field; DongX's log viewer already renders it).
+                let field_and_text = match kind {
+                    "text_delta" => delta
+                        .and_then(|d| d.get("text"))
+                        .and_then(|t| t.as_str())
+                        .map(|t| ("content", t)),
+                    "thinking_delta" => delta
+                        .and_then(|d| d.get("thinking"))
+                        .and_then(|t| t.as_str())
+                        .map(|t| ("reasoning_content", t)),
+                    _ => None, // input_json_delta (tools) — unsupported yet, skip
+                };
+                if let Some((field, text)) = field_and_text {
+                    if !self.role_emitted {
+                        frames.push(self.role_frame());
+                    }
+                    frames.push(self.delta_frame(serde_json::json!({ field: text })));
+                }
+            }
+            "message_delta" => {
+                if let Some(u) = json.get("usage") {
+                    acc.completion_tokens = u
+                        .get("output_tokens")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                }
+                let stop = json
+                    .pointer("/delta/stop_reason")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("end_turn");
+                frames.push(self.finish_frame(map_anthropic_stop(stop)));
+                self.finished = true;
+            }
+            "message_stop" => {
+                if !self.finished {
+                    frames.push(self.finish_frame("stop"));
+                    self.finished = true;
+                }
+            }
+            _ => {} // ping, errors, etc. ignored
+        }
+        frames
+    }
+
+    fn role_frame(&mut self) -> String {
+        self.role_emitted = true;
+        self.chunk(json!({ "role": "assistant" }), None)
+    }
+
+    fn delta_frame(&self, delta: Value) -> String {
+        self.chunk(delta, None)
+    }
+
+    fn finish_frame(&self, finish_reason: &str) -> String {
+        self.chunk(json!({}), Some(finish_reason))
+    }
+
+    fn chunk(&self, delta: Value, finish_reason: Option<&str>) -> String {
+        let mut choice = json!({ "index": 0, "delta": delta });
+        if let Some(fr) = finish_reason {
+            choice["finish_reason"] = json!(fr);
+        }
+        format!(
+            "data: {}\n\n",
+            json!({
+                "id": self.id,
+                "object": "chat.completion.chunk",
+                "created": chrono::Utc::now().timestamp(),
+                "model": self.model,
+                "choices": [choice]
+            })
+        )
+    }
+}
+
+fn map_anthropic_stop(reason: &str) -> &'static str {
+    match reason {
+        "end_turn" | "stop_sequence" => "stop",
+        "max_tokens" => "length",
+        "tool_use" => "tool_calls",
+        "refusal" => "content_filter",
+        _ => "stop",
     }
 }

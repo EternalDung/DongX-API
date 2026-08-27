@@ -145,3 +145,104 @@ pub(crate) fn map_model(request: &ProxyRequest, config: &ChannelConfig) -> Strin
         .map(str::to_string)
         .unwrap_or_else(|| request.model.clone())
 }
+
+// ---------------------------------------------------------------------------
+// Streaming SSE helpers (shared by the proxy layer)
+// ---------------------------------------------------------------------------
+
+/// One SSE record: an `event:` type (optional) plus its `data:` payload.
+/// Records are delimited by a blank line on the wire.
+#[derive(Debug, Clone, Default)]
+pub struct SseRecord {
+    pub event: Option<String>,
+    pub data: String,
+}
+
+/// Token usage accumulated while scanning a stream of SSE frames.
+#[derive(Debug, Clone, Default)]
+pub struct StreamUsage {
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub total_tokens: i64,
+}
+
+/// Which transform a streaming attempt needs. `None` = native OpenAI SSE
+/// passthrough (OpenAI / DeepSeek / OpenAI-compatible providers); the others
+/// convert the upstream's native SSE into OpenAI `chat.completion.chunk` SSE.
+#[derive(Debug, Clone, Copy)]
+pub enum StreamConverter {
+    None,
+    Claude,
+    Gemini,
+}
+
+/// Split a raw SSE buffer into complete records. Returns the complete records
+/// and the trailing partial record (kept by the caller for the next chunk).
+pub fn split_sse_records(buf: &str) -> (Vec<SseRecord>, String) {
+    let normalized = buf.replace("\r\n", "\n");
+    let parts: Vec<&str> = normalized.split("\n\n").collect();
+    let n = parts.len();
+    let mut records = Vec::new();
+    // Every part except the last is a complete record; the last part is the
+    // remainder — it may be empty, or an incomplete record the caller buffers.
+    for part in &parts[..n.saturating_sub(1)] {
+        if part.trim().is_empty() {
+            continue;
+        }
+        records.push(parse_sse_record(part));
+    }
+    let remainder = if n == 0 {
+        String::new()
+    } else {
+        parts[n - 1].to_string()
+    };
+    (records, remainder)
+}
+
+fn parse_sse_record(block: &str) -> SseRecord {
+    let mut event = None;
+    let mut data_lines: Vec<String> = Vec::new();
+    for line in block.lines() {
+        if let Some(rest) = line.strip_prefix("event:") {
+            event = Some(rest.trim().to_string());
+        } else if let Some(rest) = line.strip_prefix("data:") {
+            data_lines.push(rest.strip_prefix(' ').unwrap_or(rest).to_string());
+        }
+        // other fields (id:, retry:) and comments are ignored
+    }
+    SseRecord {
+        event,
+        data: data_lines.join("\n"),
+    }
+}
+
+/// Scan OpenAI-shaped SSE text for the last `usage` object (streaming usage
+/// arrives on a dedicated frame or the final choice frame). Last wins.
+pub fn scan_openai_usage(text: &str, acc: &mut StreamUsage) {
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("data:") {
+            continue;
+        }
+        let payload = trimmed.trim_start_matches("data:").trim();
+        if payload.is_empty() || payload == "[DONE]" {
+            continue;
+        }
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(payload) {
+            if let Some(u) = json.get("usage") {
+                acc.prompt_tokens = u
+                    .get("prompt_tokens")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(acc.prompt_tokens);
+                acc.completion_tokens = u
+                    .get("completion_tokens")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(acc.completion_tokens);
+                acc.total_tokens = u
+                    .get("total_tokens")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(acc.total_tokens);
+            }
+        }
+    }
+}

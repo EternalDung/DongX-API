@@ -692,46 +692,183 @@ interface ParsedChoice {
   reasoning: string;
 }
 
+// 把 `data: {...}\n\n` 形式的 SSE 报文拆成 JSON 对象数组（跳过 [DONE] 与非 JSON 行）。
+// 非 SSE 的单条 JSON 返回空数组，由调用方走单对象解析分支。
+function extractSsePayloads(body: string): Record<string, unknown>[] {
+  const out: Record<string, unknown>[] = [];
+  for (const line of body.split("\n")) {
+    const t = line.trim();
+    if (!t.startsWith("data:")) continue;
+    const data = t.slice(5).trim();
+    if (!data || data === "[DONE]") continue;
+    try {
+      out.push(JSON.parse(data) as Record<string, unknown>);
+    } catch {
+      // 忽略无法解析的 data 行
+    }
+  }
+  return out;
+}
+
+// 从 Responses 的 content 数组（[{type:"output_text",text}]）拼接纯文本
+function extractResponsesText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return (content as Record<string, unknown>[])
+      .filter((p) => p && (p.type === "output_text" || p.type === "input_text" || "text" in p))
+      .map((p) => (typeof p.text === "string" ? p.text : ""))
+      .join("");
+  }
+  return "";
+}
+
+// 请求体：同时支持 Chat 的 messages 与 Responses 的 input
 function parseRequestMessages(body: string | null): ParsedMessage[] {
   if (!body) return [];
   try {
     const parsed = JSON.parse(body);
-    const arr = Array.isArray(parsed?.messages) ? parsed.messages : null;
-    if (!arr) return [];
-    return arr.map((m: Record<string, unknown>) => ({
-      role: (m.role as string) ?? "user",
-      content:
-        typeof m.content === "string"
-          ? m.content
-          : m.content
-            ? JSON.stringify(m.content)
-            : "",
-    }));
+    // Chat 格式
+    if (Array.isArray(parsed?.messages)) {
+      return (parsed.messages as Record<string, unknown>[]).map((m) => ({
+        role: (m.role as string) ?? "user",
+        content:
+          typeof m.content === "string"
+            ? m.content
+            : m.content
+              ? JSON.stringify(m.content)
+              : "",
+      }));
+    }
+    // Responses 格式：input 可以是字符串或条目数组
+    const input = parsed?.input;
+    if (typeof input === "string") {
+      return [{ role: "user", content: input }];
+    }
+    if (Array.isArray(input)) {
+      return (input as Record<string, unknown>[]).map((it) => {
+        const role = (it.role as string) ?? "user";
+        let content = "";
+        if (typeof it.content === "string") content = it.content;
+        else if (Array.isArray(it.content)) content = extractResponsesText(it.content);
+        else if (it.content) content = JSON.stringify(it.content);
+        return { role, content };
+      });
+    }
+    return [];
   } catch {
     return [];
   }
 }
 
+// 响应体：同时支持 Chat 与 Responses，流式 SSE 与单条 JSON
 function parseResponseChoices(body: string | null): ParsedChoice[] {
   if (!body) return [];
+
+  // 1) 先尝试按 SSE 流式帧解析（Chat 与 Responses 流式都走这里）
+  const frames = extractSsePayloads(body);
+  if (frames.length > 0) {
+    const choice = aggregateFrames(frames);
+    return choice ? [choice] : [];
+  }
+
+  // 2) 单条 JSON
   try {
     const parsed = JSON.parse(body);
-    const arr = Array.isArray(parsed?.choices) ? parsed.choices : null;
-    if (!arr) return [];
-    return arr.map((c: Record<string, unknown>) => {
-      const message = (c.message ?? c.delta ?? {}) as Record<string, unknown>;
-      return {
-        role: (message.role as string) ?? "assistant",
-        content: typeof message.content === "string" ? (message.content as string) : "",
-        reasoning:
-          typeof message.reasoning_content === "string"
-            ? (message.reasoning_content as string)
-            : "",
-      };
-    });
+    // Chat 格式
+    if (Array.isArray(parsed?.choices)) {
+      return (parsed.choices as Record<string, unknown>[]).map((c) => {
+        const message = (c.message ?? c.delta ?? {}) as Record<string, unknown>;
+        return {
+          role: (message.role as string) ?? "assistant",
+          content: typeof message.content === "string" ? (message.content as string) : "",
+          reasoning:
+            typeof message.reasoning_content === "string"
+              ? (message.reasoning_content as string)
+              : "",
+        };
+      });
+    }
+    // Responses 非流式格式：output 数组
+    if (Array.isArray(parsed?.output)) {
+      return parseResponsesOutput(parsed.output as Record<string, unknown>[]);
+    }
   } catch {
     return [];
   }
+  return [];
+}
+
+// 把解析出的 Responses output 数组转成对话视图（支持 text / reasoning）
+function parseResponsesOutput(output: Record<string, unknown>[]): ParsedChoice[] {
+  let content = "";
+  let reasoning = "";
+  for (const item of output) {
+    if (item.type === "message") {
+      const txt = extractResponsesText(item.content);
+      if (txt) content = txt;
+    } else if (item.type === "reasoning") {
+      const summary = (item.summary as Record<string, unknown>[] | undefined)?.[0];
+      const txt = typeof summary?.text === "string" ? (summary.text as string) : "";
+      if (txt) reasoning = txt;
+    }
+  }
+  if (!content && !reasoning) return [];
+  return [{ role: "assistant", content, reasoning }];
+}
+
+// 聚合一组合并的 SSE 帧（Chat chunk 或 Responses 事件）成单条选择
+function aggregateFrames(frames: Record<string, unknown>[]): ParsedChoice | null {
+  let content = "";
+  let reasoning = "";
+  for (const f of frames) {
+    const type = f.type as string | undefined;
+    if (!type) {
+      // Chat chunk：choices[].delta
+      const choices = f.choices as Record<string, unknown>[] | undefined;
+      if (Array.isArray(choices)) {
+        for (const c of choices) {
+          const d = (c.delta ?? {}) as Record<string, unknown>;
+          if (typeof d.content === "string") content += d.content;
+          if (typeof d.reasoning_content === "string") reasoning += d.reasoning_content;
+        }
+      }
+      continue;
+    }
+    // Responses 事件
+    if (type === "response.output_text.delta") {
+      if (typeof f.delta === "string") content += f.delta as string;
+    } else if (type === "response.reasoning_summary_text.delta") {
+      if (typeof f.delta === "string") reasoning += f.delta as string;
+    } else if (type === "response.output_item.done") {
+      const item = f.item as Record<string, unknown> | undefined;
+      if (item?.type === "message") {
+        const txt = extractResponsesText(item.content);
+        if (txt) content = content || txt;
+      } else if (item?.type === "reasoning") {
+        const summary = (item.summary as Record<string, unknown>[] | undefined)?.[0];
+        const txt = typeof summary?.text === "string" ? (summary.text as string) : "";
+        if (txt) reasoning = reasoning || txt;
+      }
+    } else if (type === "response.completed") {
+      const out = (f.response as Record<string, unknown> | undefined)?.output as
+        | Record<string, unknown>[]
+        | undefined;
+      if (Array.isArray(out)) {
+        for (const item of out) {
+          if (item?.type === "message") {
+            const txt = extractResponsesText(item.content);
+            if (txt) content = content || txt;
+          } else if (item?.type === "reasoning") {
+            const summary = (item.summary as Record<string, unknown>[] | undefined)?.[0];
+            const txt = typeof summary?.text === "string" ? (summary.text as string) : "";
+            if (txt) reasoning = reasoning || txt;
+          }
+        }
+      }
+    }
+  }
+  if (!content && !reasoning) return null;
+  return { role: "assistant", content, reasoning };
 }
 
 // ─── 对话视图（请求） ────────────────────────────────────────────────────────

@@ -1,6 +1,6 @@
 use crate::adapter::{
-    build_client, extract_usage, map_model, Adaptor, ChannelConfig, ProxyRequest, TestResult,
-    TokenUsage,
+    build_client, extract_usage, map_model, Adaptor, ChannelConfig, ProxyRequest, SseRecord,
+    StreamUsage, TestResult, TokenUsage,
 };
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -266,7 +266,133 @@ impl Adaptor for GeminiAdaptor {
             .send()
             .await?;
         // NOTE: the returned SSE is Gemini-native (`alt=sse`), NOT OpenAI SSE.
-        // Per-chunk conversion to OpenAI SSE is a follow-up (same gap as Claude).
+        // Per-chunk conversion to OpenAI SSE is handled by `GeminiSseConverter`
+        // in the proxy layer (handler::build_stream_response).
         Ok(resp)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Streaming: Gemini SSE (alt=sse) -> OpenAI SSE
+// ---------------------------------------------------------------------------
+
+/// Stateful converter: turns Gemini `streamGenerateContent?alt=sse` chunks
+/// into OpenAI `chat.completion.chunk` `data:` frames.
+pub struct GeminiSseConverter {
+    model: String,
+    id: String,
+    role_emitted: bool,
+    finished: bool,
+}
+
+impl GeminiSseConverter {
+    pub fn new(model: String) -> Self {
+        Self {
+            model,
+            id: format!("chatcmpl-{}", uuid::Uuid::new_v4().simple()),
+            role_emitted: false,
+            finished: false,
+        }
+    }
+
+    /// Convert one Gemini SSE record. Returns zero or more OpenAI `data:`
+    /// frames (each terminated with `\n\n`). `acc` accumulates token usage.
+    pub fn convert(&mut self, record: &SseRecord, acc: &mut StreamUsage) -> Vec<String> {
+        if self.finished {
+            return Vec::new();
+        }
+        let data = &record.data;
+        if data.is_empty() || data == "[DONE]" {
+            return Vec::new();
+        }
+        let Ok(json) = serde_json::from_str::<Value>(data) else {
+            return Vec::new();
+        };
+        let mut frames: Vec<String> = Vec::new();
+
+        if let Some(u) = json.get("usageMetadata") {
+            acc.prompt_tokens = u
+                .get("promptTokenCount")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(acc.prompt_tokens);
+            acc.completion_tokens = u
+                .get("candidatesTokenCount")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(acc.completion_tokens);
+            acc.total_tokens = u
+                .get("totalTokenCount")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(acc.total_tokens);
+        }
+
+        let text = json
+            .pointer("/candidates/0/content/parts")
+            .and_then(|p| p.as_array())
+            .map(|parts| {
+                parts
+                    .iter()
+                    .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+            .unwrap_or_default();
+
+        if !text.is_empty() {
+            if !self.role_emitted {
+                frames.push(self.role_frame());
+            }
+            frames.push(self.delta_frame(serde_json::json!({ "content": text })));
+        }
+
+        if let Some(fr) = json
+            .pointer("/candidates/0/finishReason")
+            .and_then(|v| v.as_str())
+            .map(map_gemini_finish)
+        {
+            if !fr.is_empty() {
+                frames.push(self.finish_frame(fr));
+                self.finished = true;
+            }
+        }
+        frames
+    }
+
+    fn role_frame(&mut self) -> String {
+        self.role_emitted = true;
+        self.chunk(json!({ "role": "assistant" }), None)
+    }
+
+    fn delta_frame(&self, delta: Value) -> String {
+        self.chunk(delta, None)
+    }
+
+    fn finish_frame(&self, finish_reason: &str) -> String {
+        self.chunk(json!({}), Some(finish_reason))
+    }
+
+    fn chunk(&self, delta: Value, finish_reason: Option<&str>) -> String {
+        let mut choice = json!({ "index": 0, "delta": delta });
+        if let Some(fr) = finish_reason {
+            choice["finish_reason"] = json!(fr);
+        }
+        format!(
+            "data: {}\n\n",
+            json!({
+                "id": self.id,
+                "object": "chat.completion.chunk",
+                "created": chrono::Utc::now().timestamp(),
+                "model": self.model,
+                "choices": [choice]
+            })
+        )
+    }
+}
+
+fn map_gemini_finish(reason: &str) -> &'static str {
+    match reason {
+        "STOP" => "stop",
+        "MAX_TOKENS" => "length",
+        "SAFETY" | "RECITATION" | "OTHER" => "content_filter",
+        _ => "stop",
     }
 }

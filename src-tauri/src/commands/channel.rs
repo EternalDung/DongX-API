@@ -39,8 +39,10 @@ pub struct ChannelInput {
 
 /// Serialize a `channels` row into the frontend `Channel` wire shape.
 ///
-/// `api_key` is intentionally empty — the upstream keys are encrypted at rest
-/// (cred_encrypted) and never sent back to the UI.
+/// `api_key` is intentionally empty (the upstream key string is shown via
+/// `keys`). The upstream keys are stored encrypted at rest, but this is a
+/// local single-user gateway so they are decrypted and returned for display
+/// (so the edit dialog can echo them back).
 fn row_to_value(row: ChannelRow) -> serde_json::Value {
     let models: Vec<String> = serde_json::from_str(&row.models).unwrap_or_default();
     let config: serde_json::Value =
@@ -48,6 +50,16 @@ fn row_to_value(row: ChannelRow) -> serde_json::Value {
     let model_mapping: serde_json::Value =
         serde_json::from_str(&row.model_mapping).unwrap_or_else(|_| serde_json::json!({}));
     let endpoints: Vec<String> = serde_json::from_str(&row.endpoints).unwrap_or_default();
+    // Decrypt the upstream keys (local gateway: not treated as secrets) so the
+    // UI can echo them when editing. Any failure falls back to an empty list.
+    let keys: Vec<KeyEntry> = if row.cred_encrypted.is_empty() {
+        Vec::new()
+    } else {
+        crypto::decrypt(&row.cred_encrypted)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Vec<KeyEntry>>(&raw).ok())
+            .unwrap_or_default()
+    };
 
     serde_json::json!({
         "id": row.id,
@@ -56,6 +68,7 @@ fn row_to_value(row: ChannelRow) -> serde_json::Value {
         "type": row.channel_type,
         "base_url": row.base_url,
         "api_key": "",
+        "keys": keys,
         "models": models,
         "status": row.status,
         "priority": row.priority,

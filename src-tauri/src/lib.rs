@@ -1,5 +1,10 @@
+// `async_stream::stream!` in server/handler.rs expands into a deep macro
+// recursion; raise the limit so it compiles (default 128 is too low).
+#![recursion_limit = "1024"]
+
 mod adapter;
 mod channel_presets;
+mod responses_stream;
 mod commands;
 mod config;
 mod core;

@@ -59,7 +59,7 @@ pub async fn create_api_key(
     }
 
     // Generate a plaintext gateway key. DongX is a local single-user gateway,
-    // so keys are stored in plaintext (no hashing) — aligned with waliapi.
+    // so keys are stored in plaintext (no hashing).
     let plaintext = crypto::generate_api_key();
 
     let allowed_models = serde_json::to_string(&input.allowed_models)?;

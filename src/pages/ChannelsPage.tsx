@@ -198,7 +198,11 @@ export function ChannelsPage() {
       legacyType: ch.type,
       native_base_url: ch.base_url,
       name: ch.name,
-      keys: [{ key: "", weight: 1 }], // keys are encrypted at rest, never prefilled
+      // Echo the decrypted upstream keys back (local gateway: not secrets).
+      keys:
+        ch.keys && ch.keys.length > 0
+          ? ch.keys.map((k) => ({ key: k.key, weight: k.weight || 1 }))
+          : [{ key: "", weight: 1 }],
       native_endpoints: (ch.endpoints?.length
         ? ch.endpoints
         : defaultEndpointsFor(protocol)) as ChannelEndpoint[],
@@ -264,7 +268,11 @@ export function ChannelsPage() {
     }));
   const addKey = () => setForm((f) => ({ ...f, keys: [...f.keys, { key: "", weight: 1 }] }));
   const removeKey = (i: number) =>
-    setForm((f) => ({ ...f, keys: f.keys.filter((_, idx) => idx !== i) }));
+    setForm((f) => {
+      const next = f.keys.filter((_, idx) => idx !== i);
+      // Always keep at least one (possibly empty) key row so the form stays valid.
+      return { ...f, keys: next.length ? next : [{ key: "", weight: 1 }] };
+    });
 
   const updateMapping = (i: number, field: keyof MappingRow, val: string) =>
     setForm((f) => ({
@@ -399,7 +407,11 @@ export function ChannelsPage() {
             <RefreshCw className={loading ? "animate-spin" : ""} />
             刷新
           </Button>
-          <Button size="sm" onClick={openCreate}>
+          <Button
+            size="sm"
+            onClick={openCreate}
+            className="border border-primary/30 font-semibold shadow-sm"
+          >
             <Plus />
             添加渠道
           </Button>
@@ -493,12 +505,12 @@ export function ChannelsPage() {
                         </Button>
                         <Button
                           variant="ghost"
-                          size="sm"
+                          size="icon"
+                          title="删除渠道"
                           className="text-destructive hover:bg-destructive/10 hover:text-destructive"
                           onClick={() => setDeleteTarget(ch)}
                         >
                           <Trash2 />
-                          删除
                         </Button>
                       </div>
                     </div>
@@ -729,7 +741,7 @@ export function ChannelsPage() {
                   <div key={i} className="flex items-center gap-2">
                     <Input
                       placeholder={keyRequired ? "sk-..." : "可留空（本地/自管 Ollama）"}
-                      type="password"
+                      type="text"
                       value={k.key}
                       onChange={(e) => updateKey(i, "key", e.target.value)}
                       className="flex-1"
@@ -742,11 +754,15 @@ export function ChannelsPage() {
                       className="w-20"
                     />
                     <span className="text-xs text-muted-foreground">权重</span>
-                    {form.keys.length > 1 && (
-                      <Button variant="ghost" size="sm" onClick={() => removeKey(i)}>
-                        <Trash2 />
-                      </Button>
-                    )}
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => removeKey(i)}
+                      title="删除此密钥"
+                      className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                    >
+                      <Trash2 />
+                    </Button>
                   </div>
                 ))}
                 <Button variant="ghost" size="sm" onClick={addKey} className="w-fit">

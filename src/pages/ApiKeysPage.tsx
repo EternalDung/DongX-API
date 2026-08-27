@@ -281,7 +281,7 @@ export function ApiKeysPage() {
           <DialogHeader>
             <DialogTitle>创建密钥</DialogTitle>
             <DialogDescription>
-              生成 sk-dongapi-* 格式密钥。本地以明文存储（对齐 waliapi），创建后可在列表中随时复制。
+              生成 sk-dongapi-* 格式密钥。本地以明文存储，创建后可在列表中随时复制。
             </DialogDescription>
           </DialogHeader>
 

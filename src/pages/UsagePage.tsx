@@ -31,7 +31,11 @@ import { cn } from "@/lib/utils";
 import type { ApiKey, Channel, Settings } from "@/types";
 
 // ============================================================
-// 协议卡片数据（参考 waliapi 的 3 协议设计；MVP 仅 OpenAI Chat 可用）
+// 协议卡片数据（OpenAI / Anthropic / 本地 3 协议设计）
+// 前端：chat / responses 可选；anthropic 暂未开放。
+// 注意：当前后端数据面仅注册了 /v1/chat/completions 等路由，
+// 尚未实现 /v1/responses，故 Responses 选项可选中但实测会 404，
+// 需后端补桥接（Responses ↔ Chat 格式互转）后才真正可用。
 // ============================================================
 interface ProtocolDef {
   id: "chat" | "responses" | "anthropic";
@@ -56,7 +60,7 @@ const PROTOCOLS: ProtocolDef[] = [
     label: "OpenAI Responses",
     desc: "Responses API，input/output 格式",
     endpoint: "/responses",
-    enabled: false,
+    enabled: true,
     icon: Sparkles,
   },
   {
@@ -104,61 +108,116 @@ function buildCodeSamples(
   baseUrl: string,
   model: string,
   apiKey: string,
+  stream: boolean,
+  protocolId: ProtocolDef["id"],
 ): Record<CodeLang, string> {
-  const url = `${baseUrl}/chat/completions`;
-  // 自动填入当前下拉选中的密钥；未选择时回退占位符（代码仍可直接复制，
-  // 仅需在 API_KEY 处补上真实密钥即可运行）
+  const isResponses = protocolId === "responses";
+  const url = `${baseUrl}${isResponses ? "/responses" : "/chat/completions"}`;
+  // 直接把当前下拉选中的密钥内联进示例代码（本地网关，密钥即明文），
+  // 这样复制后即可直接运行，无需再手动替换占位符。
   const keyLiteral = apiKey.trim() || "sk-dongapi-你的密钥";
+  const reqField = isResponses ? "input" : "messages";
   const sampleBody = {
     model: model || "MODEL_NAME",
-    messages: [{ role: "user", content: "Say hello in one sentence" }],
-    stream: false,
+    [reqField]: [{ role: "user", content: "Say hello in one sentence" }],
+    stream: !!stream,
   };
+  const bodyLiteral = JSON.stringify(sampleBody, null, 2);
+  const bodyLiteralPy = JSON.stringify(sampleBody, null, 4).replace(/\n/g, "\n    ");
+  const streamFlag = stream ? "True" : "False";
+
+  // 回复提取：chat 取 choices[0].message.content；responses 取 output[0].content[0].text
+  const jsContent = isResponses
+    ? "data.output[0].content[0].text"
+    : "data.choices[0].message.content";
+  const pyContent = isResponses
+    ? 'resp.json()["output"][0]["content"][0]["text"]'
+    : 'resp.json()["choices"][0]["message"]["content"]';
+
+  const jsBody = stream
+    ? `const res = await fetch("${url}", {
+  method: "POST",
+  headers: {
+    "Authorization": "Bearer ${keyLiteral}",
+    "Content-Type": "application/json",
+  },
+  body: JSON.stringify(${bodyLiteral}),
+});
+// 流式：逐帧读取 SSE（网关按所选协议输出 Chat / Responses 事件，此处自动适配）
+const reader = res.body.getReader();
+const decoder = new TextDecoder();
+let text = "";
+while (true) {
+  const { done, value } = await reader.read();
+  if (done) break;
+  const chunk = decoder.decode(value, { stream: true });
+  for (const frame of chunk.split("\\n\\n")) {
+    const m = frame.match(/^data: (.+)$/m);
+    if (!m || m[1] === "[DONE]") continue;
+    try {
+      const j = JSON.parse(m[1]);
+      const d = j?.choices?.[0]?.delta?.content ?? (j?.type === "response.output_text.delta" ? j.delta : "");
+      text += d || "";
+    } catch {}
+  }
+}
+console.log(text);`
+    : `const res = await fetch("${url}", {
+  method: "POST",
+  headers: {
+    "Authorization": "Bearer ${keyLiteral}",
+    "Content-Type": "application/json",
+  },
+  body: JSON.stringify(${bodyLiteral}),
+});
+const data = await res.json();
+console.log(${jsContent});`;
+
+  const pythonBody = stream
+    ? `text = ""
+for line in resp.iter_lines():
+    if not line or not line.startswith(b"data:"):
+        continue
+    payload = line[5:].strip()
+    if payload == b"[DONE]":
+        continue
+    try:
+        j = json.loads(payload)
+        if "choices" in j:
+            d = j["choices"][0]["delta"].get("content") or ""
+        elif j.get("type") == "response.output_text.delta":
+            d = j.get("delta") or ""
+        else:
+            d = ""
+        text += d
+    except Exception:
+        pass
+print(text)`
+    : `print(${pyContent})`;
+
   return {
-    curl: `# 网关监听 127.0.0.1，仅本机可达
-API_KEY="${keyLiteral}"
+    curl: `# 网关监听 127.0.0.1，仅本机可达${stream ? "（stream 模式下 curl 会逐帧打印 SSE）" : ""}
 curl -X POST "${url}" \\
-  -H "Authorization: Bearer \${API_KEY}" \\
+  -H "Authorization: Bearer ${keyLiteral}" \\
   -H "Content-Type: application/json" \\
   -d '${JSON.stringify(sampleBody)}'`,
     javascript: `// 浏览器 fetch — 网关监听 127.0.0.1，仅本机可达
-const API_KEY = "${keyLiteral}";
-
-const res = await fetch("${url}", {
-  method: "POST",
-  headers: {
-    "Authorization": \`Bearer \${API_KEY}\`,
-    "Content-Type": "application/json",
-  },
-  body: JSON.stringify(${JSON.stringify(sampleBody, null, 2)}),
-});
-const data = await res.json();
-console.log(data.choices[0].message.content);`,
-    typescript: `import type { ChatCompletion } from "./types";
-
-const API_KEY = "${keyLiteral}";
-
-const res = await fetch<ChatCompletion>("${url}", {
-  method: "POST",
-  headers: {
-    "Authorization": \`Bearer \${API_KEY}\`,
-    "Content-Type": "application/json",
-  },
-  body: JSON.stringify(${JSON.stringify(sampleBody, null, 2)}),
-});`,
-    python: `import requests
-
-API_KEY = "${keyLiteral}"
+${jsBody}`,
+    typescript: `// 网关监听 127.0.0.1，仅本机可达
+${jsBody}`,
+    python: `import json
+import requests
 
 resp = requests.post(
     "${url}",
     headers={
-        "Authorization": f"Bearer {API_KEY}",
+        "Authorization": "Bearer ${keyLiteral}",
         "Content-Type": "application/json",
     },
-    json=${JSON.stringify(sampleBody, null, 4).replace(/\n/g, "\n    ")},
+    json=${bodyLiteralPy},
+    stream=${streamFlag},
 )
-print(resp.json()["choices"][0]["message"]["content"])`,
+${pythonBody}`,
   };
 }
 
@@ -178,19 +237,21 @@ interface TestResult {
 
 const TEST_PROMPT = "用一句话打个招呼";
 
-function buildRequestBody(protocol: ProtocolDef["id"], model: string): unknown {
+function buildRequestBody(
+  protocol: ProtocolDef["id"],
+  model: string,
+  stream: boolean,
+): unknown {
+  const msg = { role: "user", content: TEST_PROMPT };
+  let base: Record<string, unknown>;
   if (protocol === "anthropic") {
-    return {
-      model,
-      max_tokens: 256,
-      messages: [{ role: "user", content: TEST_PROMPT }],
-    };
+    base = { model, max_tokens: 256, messages: [msg] };
+  } else if (protocol === "responses") {
+    base = { model, input: [msg] };
+  } else {
+    base = { model, messages: [msg] };
   }
-  // OpenAI Chat + OpenAI Responses 共用 messages 结构（MVP 简化）
-  return {
-    model,
-    messages: [{ role: "user", content: TEST_PROMPT }],
-  };
+  return { ...base, stream: !!stream };
 }
 
 function extractContent(protocol: ProtocolDef["id"], data: unknown): string | undefined {
@@ -227,12 +288,17 @@ export function UsagePage() {
   const [testResult, setTestResult] = useState<TestResult | null>(null);
   const [testState, setTestState] = useState<TestState>("idle");
 
+  // 流式模式开关（后端数据面已支持 OpenAI 兼容 SSE 转换）
+  const [streamMode, setStreamMode] = useState(false);
+
   // 代码示例
   const [codeLang, setCodeLang] = useState<CodeLang>("curl");
   const [codeExpanded, setCodeExpanded] = useState(true);
 
   // 派生
   const protocol = PROTOCOLS.find((p) => p.id === activeProtocol)!;
+  // Responses 模式后端尚不支持流式：强制关闭实际流式，避免发 stream 到 /v1/responses 触发 400
+  const effectiveStream = streamMode;
   const baseUrl = settings
     ? `http://${settings.server_host}:${settings.server_port}/v1`
     : "http://127.0.0.1:9842/v1";
@@ -329,8 +395,74 @@ export function UsagePage() {
       const resp = await fetch(fullEndpoint, {
         method: "POST",
         headers,
-        body: JSON.stringify(buildRequestBody(protocol.id, model)),
+        body: JSON.stringify(buildRequestBody(protocol.id, model, effectiveStream)),
       });
+
+      if (!resp.ok) {
+        const text = await resp.text();
+        const elapsed = Math.round(performance.now() - start);
+        setTestResult({
+          state: "error",
+          status: resp.status,
+          statusText: resp.statusText,
+          latencyMs: elapsed,
+          body: text,
+        });
+        setTestState("error");
+        toast.error(`测试失败 · HTTP ${resp.status}`);
+        return;
+      }
+
+      // 流式模式：逐帧读取 SSE（网关已统一转换为 OpenAI 兼容格式）
+      if (effectiveStream && !isAnthropic && resp.body) {
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let content = "";
+        let raw = "";
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const chunk = decoder.decode(value, { stream: true });
+          raw += chunk;
+          buffer += chunk;
+          let idx: number;
+          while ((idx = buffer.indexOf("\n\n")) !== -1) {
+            const frame = buffer.slice(0, idx);
+            buffer = buffer.slice(idx + 2);
+            const dataLine = frame.split("\n").find((l) => l.startsWith("data:"));
+            if (!dataLine) continue;
+            const payload = dataLine.slice(5).trim();
+            if (payload === "[DONE]") continue;
+            try {
+              const json = JSON.parse(payload);
+              // 兼容两种 SSE 形状：
+              //  - Chat: choices[0].delta.content
+              //  - Responses: event=response.output_text.delta 的 delta 字段
+              const d =
+                json?.choices?.[0]?.delta?.content ??
+                (json?.type === "response.output_text.delta" ? json.delta : "");
+              if (typeof d === "string") content += d;
+            } catch {
+              /* 跳过非 JSON 帧 */
+            }
+          }
+        }
+        const elapsed = Math.round(performance.now() - start);
+        setTestResult({
+          state: "success",
+          status: resp.status,
+          statusText: resp.statusText,
+          latencyMs: elapsed,
+          body: raw,
+          content,
+        });
+        setTestState("success");
+        toast.success(`流式测试成功 · ${elapsed}ms`);
+        return;
+      }
+
+      // 非流式模式
       const text = await resp.text();
       let data: unknown = null;
       try {
@@ -339,19 +471,17 @@ export function UsagePage() {
         /* non-JSON */
       }
       const elapsed = Math.round(performance.now() - start);
-      const ok = resp.ok;
-      const content = ok ? extractContent(protocol.id, data) : undefined;
+      const content = extractContent(protocol.id, data);
       setTestResult({
-        state: ok ? "success" : "error",
+        state: "success",
         status: resp.status,
         statusText: resp.statusText,
         latencyMs: elapsed,
         body: data ? JSON.stringify(data, null, 2) : text,
         content,
       });
-      setTestState(ok ? "success" : "error");
-      if (ok) toast.success(`测试成功 · ${elapsed}ms`);
-      else toast.error(`测试失败 · HTTP ${resp.status}`);
+      setTestState("success");
+      toast.success(`测试成功 · ${elapsed}ms`);
     } catch (e: any) {
       const elapsed = Math.round(performance.now() - start);
       const msg = e?.message || String(e);
@@ -365,10 +495,10 @@ export function UsagePage() {
     }
   };
 
-  // 代码示例派生（依赖 baseUrl + model + 当前选中的密钥）
+  // 代码示例派生（依赖 baseUrl + model + 当前选中的密钥 + 流式开关 + 协议）
   const codeSamples = useMemo(
-    () => buildCodeSamples(baseUrl, model, apiKey),
-    [baseUrl, model, apiKey],
+    () => buildCodeSamples(baseUrl, model, apiKey, streamMode, activeProtocol),
+    [baseUrl, model, apiKey, streamMode, activeProtocol],
   );
 
   return (
@@ -423,7 +553,11 @@ export function UsagePage() {
           return (
             <button
               key={p.id}
-              onClick={() => p.enabled && setActiveProtocol(p.id)}
+              onClick={() => {
+                if (!p.enabled) return;
+                setActiveProtocol(p.id);
+                if (p.id === "responses") setStreamMode(false);
+              }}
               disabled={!p.enabled}
               className={cn(
                 "group relative flex flex-col items-start gap-2 rounded-xl border bg-card p-5 text-left shadow-sm transition-all",
@@ -465,9 +599,9 @@ export function UsagePage() {
       </div>
 
       {/* ── 接入信息 + 连接测试（双栏） ───────────────────── */}
-      <div className="grid gap-4 lg:grid-cols-[1.05fr_0.95fr]">
+      <div className="grid items-start gap-4 lg:grid-cols-[1.05fr_0.95fr]">
         {/* 左：接入信息 */}
-        <Card>
+        <Card className="min-w-0">
           <CardHeader className="pb-3">
             <div className="flex items-center justify-between">
               <CardTitle className="text-base">接入信息</CardTitle>
@@ -560,23 +694,44 @@ export function UsagePage() {
         </Card>
 
         {/* 右：连接测试 */}
-        <Card>
+        <Card className="min-w-0">
           <CardHeader className="pb-3">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <CardTitle className="text-base">连接测试</CardTitle>
-              <Button
-                onClick={handleTest}
-                disabled={!canTest}
-                size="sm"
-                className="gap-1.5"
-              >
-                {testState === "running" ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <Send className="h-3.5 w-3.5" />
-                )}
-                发送测试请求
-              </Button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setStreamMode((v) => !v)}
+                  className={cn(
+                    "flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium transition-colors",
+                    streamMode
+                      ? "border-primary bg-primary/10 text-primary"
+                      : "border-border bg-background text-muted-foreground hover:bg-accent",
+                  )}
+                  title="开启后按 SSE 流式逐帧接收，验证网关流式转换"
+                >
+                  <span
+                    className={cn(
+                      "h-1.5 w-1.5 rounded-full",
+                      streamMode ? "bg-primary" : "bg-muted-foreground/40",
+                    )}
+                  />
+                  流式 Stream
+                </button>
+                <Button
+                  onClick={handleTest}
+                  disabled={!canTest}
+                  size="sm"
+                  className="gap-1.5"
+                >
+                  {testState === "running" ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Send className="h-3.5 w-3.5" />
+                  )}
+                  发送测试请求
+                </Button>
+              </div>
             </div>
           </CardHeader>
           <CardContent>
@@ -590,6 +745,14 @@ export function UsagePage() {
               <code className="flex-1 truncate font-mono text-[11px] text-foreground/80">
                 {protocol.endpoint}
               </code>
+              {effectiveStream && (
+                <Badge
+                  variant="secondary"
+                  className="shrink-0 bg-primary/10 text-primary"
+                >
+                  Stream
+                </Badge>
+              )}
             </div>
 
             {/* 结果区 */}

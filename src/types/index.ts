@@ -25,6 +25,7 @@ export interface Channel {
   type: ChannelType;
   base_url: string;
   api_key: string; // masked display
+  keys?: { key: string; weight: number }[]; // decrypted upstream keys (local gateway)
   models: string[];
   status: ChannelStatus;
   priority: number;
@@ -111,7 +112,7 @@ export type ApiKeyStatus = 0 | 1 | 2; // disabled | active | expired
 export interface ApiKey {
   id: string;
   name: string;
-  key: string; // plaintext gateway key (本地明文存储，对齐 waliapi)
+  key: string; // plaintext gateway key（本地明文存储）
   status: ApiKeyStatus;
   allowed_models: string[];
   allowed_channels: string[];
