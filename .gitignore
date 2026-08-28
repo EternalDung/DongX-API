@@ -28,3 +28,6 @@ Thumbs.db
 
 # SQLx offline data (regenerate with `cargo sqlx prepare`)
 # .sqlx/ — uncomment to ignore, but keep for CI builds
+
+# Vite build-artifact backups (workaround for safe-delete shim)
+dist_bak*/

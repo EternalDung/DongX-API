@@ -20,6 +20,10 @@ pub struct ChannelConfig {
     pub model_mapping: serde_json::Value,
     pub extra: serde_json::Value,
     pub timeout_secs: u64,
+    /// Whether this request is a streaming (SSE) request. Used to pick the
+    /// right timeout semantics in `build_client`.
+    #[serde(default)]
+    pub stream: bool,
 }
 
 /// A normalized (OpenAI-format) request to be forwarded upstream.
@@ -58,6 +62,16 @@ pub trait Adaptor: Send + Sync {
     fn channel_type(&self) -> &'static str;
     fn default_models(&self) -> Vec<&'static str>;
     fn default_base_url(&self) -> &str;
+
+    /// List models from the upstream provider and return their ids.
+    ///
+    /// The default implementation targets the OpenAI-compatible `/v1/models`
+    /// shape (Bearer auth, `data[].id`). Providers with different auth or
+    /// paths override this (e.g. Gemini uses a `?key=` query on the native
+    /// `/v1beta/models` path; Claude uses the `x-api-key` header).
+    async fn list_models(&self, config: &ChannelConfig) -> Result<Vec<String>, anyhow::Error> {
+        fetch_openai_models(config).await
+    }
 
     /// Test channel connectivity with a minimal request; measure latency.
     async fn test(&self, config: &ChannelConfig) -> Result<TestResult, anyhow::Error>;
@@ -99,10 +113,86 @@ pub fn get_adaptor(channel_type: &str) -> Box<dyn Adaptor> {
 // ---------------------------------------------------------------------------
 
 /// Build an HTTP client honouring the channel's timeout config.
+///
+/// - Non-streaming: `timeout()` bounds the *whole* request — the full response
+///   must arrive within `timeout_secs`.
+/// - Streaming (SSE): only `connect_timeout()` bounds the *connection-establishment*
+///   phase (TCP/TLS handshake). The stream body itself may run as long as the
+///   upstream keeps sending; long dialogues must not be cut off mid-stream.
 pub(crate) fn build_client(config: &ChannelConfig) -> Result<reqwest::Client, anyhow::Error> {
-    Ok(reqwest::Client::builder()
-        .timeout(Duration::from_secs(config.timeout_secs.max(1)))
-        .build()?)
+    let secs = Duration::from_secs(config.timeout_secs.max(1));
+    let builder = reqwest::Client::builder();
+    let builder = if config.stream {
+        builder.connect_timeout(secs)
+    } else {
+        builder.timeout(secs)
+    };
+    Ok(builder.build()?)
+}
+
+/// Join a base URL and a path, tolerating stray slashes on either side.
+pub(crate) fn join_url(base: &str, path: &str) -> String {
+    let base = base.trim_end_matches('/');
+    let path = path.trim_start_matches('/');
+    format!("{}/{}", base, path)
+}
+
+/// reqwest requires a scheme; users often type only a host (e.g.
+/// `127.0.0.1:11434`), so default a missing scheme to `http://`.
+pub(crate) fn ensure_scheme(url: &str) -> String {
+    if url.starts_with("http://") || url.starts_with("https://") {
+        url.to_string()
+    } else {
+        format!("http://{url}")
+    }
+}
+
+/// Fetch the model list from an OpenAI-compatible `/models` endpoint.
+///
+/// DongX's channel base_url already carries the version segment (the chat
+/// endpoint is `{base}/chat/completions`), so the models path is `/models`,
+/// not `/v1/models`. Returns the upstream `data[].id` values. Used as the
+/// default `Adaptor::list_models` implementation for OpenAI-compatible
+/// providers (openai / deepseek / zhipu / qwen / ollama / moonshot / ...).
+pub(crate) async fn fetch_openai_models(
+    config: &ChannelConfig,
+) -> Result<Vec<String>, anyhow::Error> {
+    let client = build_client(config)?;
+    let url = ensure_scheme(&join_url(&config.base_url, "/models"));
+    let resp = client
+        .get(&url)
+        .bearer_auth(&config.api_key)
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("list models failed: upstream status {}", resp.status());
+    }
+    let json: serde_json::Value = resp.json().await?;
+    Ok(parse_model_ids(&json, "data", "id"))
+}
+
+/// Extract model ids from a provider's model-list payload.
+///
+/// `array_key` is the JSON array field (`data` for OpenAI/Claude, `models`
+/// for Gemini); `id_key` is the field holding the id (`id`, or `name` for
+/// Gemini where it arrives as `models/<id>` and is stripped to the short id).
+pub(crate) fn parse_model_ids(
+    json: &serde_json::Value,
+    array_key: &str,
+    id_key: &str,
+) -> Vec<String> {
+    json.get(array_key)
+        .and_then(|d| d.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| {
+                    let raw = m.get(id_key).and_then(|v| v.as_str())?;
+                    let short = raw.strip_prefix("models/").unwrap_or(raw);
+                    Some(short.to_string())
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Extract token usage from an OpenAI-shaped or Anthropic-shaped body.

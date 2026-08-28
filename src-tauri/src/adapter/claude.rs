@@ -1,6 +1,6 @@
 use crate::adapter::{
-    build_client, extract_usage, map_model, Adaptor, ChannelConfig, ProxyRequest, SseRecord,
-    StreamUsage, TestResult, TokenUsage,
+    build_client, ensure_scheme, extract_usage, map_model, parse_model_ids, Adaptor, ChannelConfig,
+    ProxyRequest, SseRecord, StreamUsage, TestResult, TokenUsage,
 };
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -120,6 +120,27 @@ impl Adaptor for ClaudeAdaptor {
 
     fn default_base_url(&self) -> &str {
         "https://api.anthropic.com"
+    }
+
+    /// Anthropic lists models at `GET /v1/models` using the `x-api-key` header
+    /// (not Bearer), so override the default OpenAI-compatible implementation.
+    async fn list_models(&self, config: &ChannelConfig) -> Result<Vec<String>, anyhow::Error> {
+        let client = build_client(config)?;
+        let url = ensure_scheme(&format!(
+            "{}/v1/models",
+            config.base_url.trim_end_matches('/')
+        ));
+        let resp = client
+            .get(&url)
+            .header("x-api-key", &config.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            anyhow::bail!("list models failed: upstream status {}", resp.status());
+        }
+        let json: serde_json::Value = resp.json().await?;
+        Ok(parse_model_ids(&json, "data", "id"))
     }
 
     async fn test(&self, config: &ChannelConfig) -> Result<TestResult, anyhow::Error> {

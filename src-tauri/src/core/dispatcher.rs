@@ -1,9 +1,10 @@
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use sqlx::SqlitePool;
 
 use crate::crypto;
-use crate::db::repository::channels;
+use crate::db::repository::{channel_health, channels};
 use crate::error::{AppError, AppResult};
 use crate::models::ChannelRow;
 
@@ -34,45 +35,73 @@ pub struct SelectedChannel {
     pub timeout_secs: u64,
 }
 
-/// Select the best channel for a request.
+/// Select a single channel for a request (priority + weight + one upstream key).
 ///
-/// Algorithm (MVP, no circuit breaker yet):
-/// 1. Load enabled channels (status=1), ordered by priority.
-/// 2. Keep only channels that serve the requested model — either listed in
-///    `models` or mapped via `model_mapping`.
-/// 3. Take the top-priority group.
-/// 4. Weighted-random pick by channel `weight`.
-/// 5. Decrypt the channel's upstream key set and weighted-pick one key.
-///
-/// Java mental model: like a Spring @Service routing bean that queries
-/// routing rules (channels) and picks a backend via priority + weight.
+/// This is the single-attempt convenience form. The data-plane
+/// `run_chat_pipeline` instead drives a `Failover` (core/failover.rs) which
+/// loops over `candidate_channels` + `pick_one` to provide automatic channel
+/// switching on failure — so a momentary bad channel does not fail the request.
 pub async fn select_channel(
     pool: &SqlitePool,
     ctx: &DispatchContext,
 ) -> AppResult<SelectedChannel> {
+    let cands = candidate_channels(pool, ctx, &HashSet::new()).await?;
+    pick_one(&cands)
+}
+
+/// Return the candidate channels for `ctx.model`: those that serve the model,
+/// are not currently in circuit-breaker cooldown, and are not in `exclude`.
+///
+/// Any empty step returns `Err` — the caller (`Failover`) distinguishes
+/// "no channel from the start" (exclude empty) from "all tried / cooling down"
+/// (exclude non-empty) to decide between a 503 and a retry-exhausted error.
+pub async fn candidate_channels(
+    pool: &SqlitePool,
+    ctx: &DispatchContext,
+    exclude: &HashSet<String>,
+) -> AppResult<Vec<ChannelRow>> {
     let enabled = channels::list_enabled(pool).await?;
     if enabled.is_empty() {
         return Err(AppError::NotFound("没有已启用的渠道".into()));
     }
-
     // Channels that serve this model (listed or mapped).
-    let candidates: Vec<&ChannelRow> = enabled
+    let serving: Vec<&ChannelRow> = enabled
         .iter()
         .filter(|c| channel_serves_model(c, &ctx.model))
         .collect();
-
-    if candidates.is_empty() {
+    if serving.is_empty() {
         return Err(AppError::NotFound(format!(
             "没有渠道支持模型 '{}'",
             ctx.model
         )));
     }
+    // Drop channels excluded this request (already tried) and those whose
+    // circuit breaker is currently open (cooling down).
+    let mut candidates: Vec<ChannelRow> = Vec::with_capacity(serving.len());
+    for c in &serving {
+        if exclude.contains(&c.id) {
+            continue;
+        }
+        if channel_health::is_open(pool, &c.id).await {
+            continue; // 熔断冷却中
+        }
+        candidates.push((*c).clone());
+    }
+    if candidates.is_empty() {
+        return Err(AppError::NotFound(
+            "所有候选渠道均处于熔断冷却中或已尝试，请稍后重试".into(),
+        ));
+    }
+    Ok(candidates)
+}
 
+/// Pick one channel from candidates: take the top-priority group, weighted-random
+/// select within it by `weight`, then decrypt + weighted-random pick one upstream key.
+pub fn pick_one(candidates: &[ChannelRow]) -> AppResult<SelectedChannel> {
     // Top-priority group (higher priority wins).
     let top_priority = candidates.iter().map(|c| c.priority).max().unwrap_or(0);
     let top: Vec<&ChannelRow> = candidates
         .iter()
-        .copied()
         .filter(|c| c.priority == top_priority)
         .collect();
 

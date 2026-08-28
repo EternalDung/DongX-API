@@ -259,6 +259,7 @@ pub async fn test_channel(
         model_mapping,
         extra: config,
         timeout_secs: timeout_secs.max(1) as u64,
+        stream: false,
     };
 
     let adaptor = adapter::get_adaptor(&row.channel_type);
@@ -269,16 +270,46 @@ pub async fn test_channel(
     Ok(result.success)
 }
 
-/// Return the adaptor's default model list for a provider type.
-/// Used by the UI "拉取模型" button to prefill the model list without network.
+/// Fetch the live model list from a provider.
+///
+/// The UI "拉取模型" button passes the channel's `base_url` and the first
+/// upstream `api_key`; we hit the provider's model-list endpoint (per-adaptor
+/// auth/path) and return the upstream model ids. A brand-new, unsaved channel
+/// with no base URL yet falls back to the adaptor's local preset list (nothing
+/// to fetch). Any network failure or empty upstream result is surfaced as an
+/// error rather than silently returning presets, so the UI can show why the
+/// pull failed instead of looking like it succeeded with stale data.
 #[tauri::command]
-pub async fn list_provider_models(r#type: String) -> AppResult<Vec<String>> {
+pub async fn list_provider_models(
+    r#type: String,
+    base_url: String,
+    api_key: String,
+) -> AppResult<Vec<String>> {
     let adaptor = adapter::get_adaptor(&r#type);
-    Ok(adaptor
-        .default_models()
-        .into_iter()
-        .map(|s| s.to_string())
-        .collect())
+
+    if base_url.trim().is_empty() {
+        return Ok(adaptor
+            .default_models()
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect());
+    }
+
+    let config = adapter::ChannelConfig {
+        base_url,
+        api_key,
+        models: vec![],
+        model_mapping: serde_json::json!({}),
+        extra: serde_json::json!({}),
+        timeout_secs: 15,
+        stream: false,
+    };
+
+    match adaptor.list_models(&config).await {
+        Ok(models) if !models.is_empty() => Ok(models),
+        Ok(_) => Err(AppError::Proxy("上游返回的模型列表为空".into())),
+        Err(e) => Err(AppError::Proxy(format!("拉取模型失败：{e}"))),
+    }
 }
 
 /// List provider presets grouped by protocol — the single source of truth for

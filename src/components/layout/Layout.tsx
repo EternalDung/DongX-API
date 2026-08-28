@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { NavLink, Outlet } from "react-router-dom";
 import {
   LayoutDashboard,
@@ -32,7 +33,9 @@ const THEME_ICONS: Record<ThemeMode, typeof Sun> = {
 };
 
 function ThemeToggle() {
-  const current = getStoredTheme();
+  // 用 state 跟踪当前主题：applyTheme 只改 localStorage/DOM，不会触发重渲染，
+  // 否则高亮会永远停在首次渲染读到的值。
+  const [current, setCurrent] = useState<ThemeMode>(() => getStoredTheme());
   const modes: ThemeMode[] = ["light", "dark", "system"];
   return (
     <div className="flex items-center gap-0.5 rounded-lg border bg-card p-0.5">
@@ -42,7 +45,10 @@ function ThemeToggle() {
         return (
           <button
             key={m}
-            onClick={() => applyTheme(m)}
+            onClick={() => {
+              applyTheme(m);
+              setCurrent(m);
+            }}
             title={`主题：${m}`}
             className={cn(
               "flex h-7 w-7 items-center justify-center rounded-md transition-colors",

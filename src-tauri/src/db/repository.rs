@@ -650,3 +650,108 @@ pub mod stats {
         .await
     }
 }
+
+// ============================================================
+// channel_health: 熔断器的持久化健康状态
+// ============================================================
+pub mod channel_health {
+    use super::*;
+    use chrono::{DateTime, Duration, Utc};
+
+    /// 连续失败达到此阈值后，熔断器打开（进入冷却）。
+    pub const FAILURE_THRESHOLD: u32 = 3;
+    /// 熔断器打开后保持冷却的秒数。
+    pub const COOLDOWN_SECS: i64 = 60;
+
+    #[derive(Debug, Clone, sqlx::FromRow)]
+    pub struct ChannelHealthRow {
+        pub channel_id: String,
+        pub consecutive_failures: i64,
+        pub cooldown_until: Option<String>,
+        pub last_failure_at: Option<String>,
+        pub last_failure_reason: Option<String>,
+    }
+
+    pub async fn get(
+        pool: &SqlitePool,
+        channel_id: &str,
+    ) -> Result<Option<ChannelHealthRow>, sqlx::Error> {
+        sqlx::query_as::<_, ChannelHealthRow>(
+            "SELECT channel_id, consecutive_failures, cooldown_until, \
+             last_failure_at, last_failure_reason \
+             FROM channel_health WHERE channel_id = ?",
+        )
+        .bind(channel_id)
+        .fetch_optional(pool)
+        .await
+    }
+
+    /// 熔断器是否处于打开状态（cooldown_until 仍指向未来）。
+    pub async fn is_open(pool: &SqlitePool, channel_id: &str) -> bool {
+        match get(pool, channel_id).await {
+            Ok(Some(row)) => match &row.cooldown_until {
+                Some(s) => DateTime::parse_from_rfc3339(s)
+                    .map(|t| t.timestamp() > Utc::now().timestamp())
+                    .unwrap_or(false),
+                None => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// 记录一次「可重试」的上游失败；连续失败达到阈值后打开熔断器
+    /// （设置 cooldown_until = now + COOLDOWN_SECS）。
+    pub async fn record_failure(
+        pool: &SqlitePool,
+        channel_id: &str,
+        reason: &str,
+    ) -> Result<(), sqlx::Error> {
+        let failures = get(pool, channel_id).await?.map(|r| r.consecutive_failures).unwrap_or(0)
+            + 1;
+        let (cooldown, last_at, last_reason) = if failures >= FAILURE_THRESHOLD as i64 {
+            (
+                Some((Utc::now() + Duration::seconds(COOLDOWN_SECS)).to_rfc3339()),
+                Some(now()),
+                Some(reason.to_string()),
+            )
+        } else {
+            (None, Some(now()), Some(reason.to_string()))
+        };
+        sqlx::query(
+            "INSERT INTO channel_health \
+             (channel_id, consecutive_failures, cooldown_until, last_failure_at, last_failure_reason) \
+             VALUES (?1,?2,?3,?4,?5) \
+             ON CONFLICT(channel_id) DO UPDATE SET \
+                consecutive_failures = ?2, \
+                cooldown_until = ?3, \
+                last_failure_at = ?4, \
+                last_failure_reason = ?5",
+        )
+        .bind(channel_id)
+        .bind(failures)
+        .bind(cooldown)
+        .bind(last_at)
+        .bind(last_reason)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    /// 记录一次成功：重置熔断器。
+    pub async fn record_success(pool: &SqlitePool, channel_id: &str) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "INSERT INTO channel_health \
+             (channel_id, consecutive_failures, cooldown_until, last_failure_at, last_failure_reason) \
+             VALUES (?1, 0, NULL, NULL, NULL) \
+             ON CONFLICT(channel_id) DO UPDATE SET \
+                consecutive_failures = 0, \
+                cooldown_until = NULL, \
+                last_failure_at = NULL, \
+                last_failure_reason = NULL",
+        )
+        .bind(channel_id)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+}

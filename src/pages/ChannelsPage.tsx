@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, Fragment } from "react";
-import { Plus, Pencil, Trash2, Zap, RefreshCw, Network, AlertTriangle, ChevronDown, ChevronRight } from "lucide-react";
+import { Plus, Pencil, Trash2, Zap, RefreshCw, Network, AlertTriangle, ChevronDown, ChevronRight, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -141,7 +141,12 @@ export function ChannelsPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<ChannelForm>(emptyForm());
   const [saving, setSaving] = useState(false);
-  const [fetchingModels, setFetchingModels] = useState(false);
+  const [modelInput, setModelInput] = useState("");
+  const [syncOpen, setSyncOpen] = useState(false);
+  const [syncLoading, setSyncLoading] = useState(false);
+  const [syncList, setSyncList] = useState<string[]>([]);
+  const [syncChecked, setSyncChecked] = useState<Set<string>>(new Set());
+  const [syncQuery, setSyncQuery] = useState("");
 
   const [testingId, setTestingId] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<Record<string, boolean>>({});
@@ -297,18 +302,83 @@ export function ChannelsPage() {
     .map((s) => s.trim())
     .filter(Boolean);
 
-  const handleFetchModels = async () => {
-    setFetchingModels(true);
+  const filteredSync = syncList.filter((m) =>
+    m.toLowerCase().includes(syncQuery.trim().toLowerCase()),
+  );
+
+  const addModelFromInput = () => {
+    const parts = modelInput
+      .split(/[,\n]/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (parts.length === 0) return;
+    setForm((f) => {
+      const existing = new Set(
+        f.modelsText
+          .split(/[,\n]/)
+          .map((s) => s.trim())
+          .filter(Boolean),
+      );
+      const next = f.modelsText
+        ? f.modelsText.split(/[,\n]/).map((s) => s.trim()).filter(Boolean)
+        : [];
+      for (const p of parts) if (!existing.has(p)) next.push(p);
+      return { ...f, modelsText: next.join(", ") };
+    });
+    setModelInput("");
+  };
+
+  const removeModel = (m: string) =>
+    setForm((f) => {
+      const next = f.modelsText
+        .split(/[,\n]/)
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .filter((x) => x !== m);
+      return { ...f, modelsText: next.join(", ") };
+    });
+
+  const openSyncDialog = async () => {
+    setSyncOpen(true);
+    setSyncLoading(true);
     try {
-      const list = await channelApi.fetchModels(form.legacyType || form.protocol);
-      const merged = Array.from(new Set([...modelsList, ...list])).join(", ");
-      setForm((f) => ({ ...f, modelsText: merged }));
-      toast.success("已拉取模型列表");
-    } catch {
-      toast.error("拉取模型失败");
+      const firstKey = form.keys.find((k) => k.key.trim())?.key ?? "";
+      const list = await channelApi.fetchModels({
+        type: form.legacyType || form.protocol,
+        base_url: form.native_base_url,
+        api_key: firstKey,
+      });
+      setSyncList(list);
+      const current = new Set(
+        form.modelsText
+          .split(/[,\n]/)
+          .map((s) => s.trim())
+          .filter(Boolean),
+      );
+      setSyncChecked(new Set(list.filter((m) => current.has(m))));
+      setSyncQuery("");
+    } catch (e) {
+      const msg =
+        (e && typeof e === "object" && "message" in e
+          ? String((e as { message: unknown }).message)
+          : String(e)) || "拉取模型失败";
+      toast.error(msg);
     } finally {
-      setFetchingModels(false);
+      setSyncLoading(false);
     }
+  };
+
+  const confirmSync = () => {
+    setForm((f) => {
+      const manual = f.modelsText
+        .split(/[,\n]/)
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .filter((m) => !syncList.includes(m));
+      const next = [...manual, ...syncChecked];
+      return { ...f, modelsText: next.join(", ") };
+    });
+    setSyncOpen(false);
   };
 
   const handleSave = async () => {
@@ -739,6 +809,23 @@ export function ChannelsPage() {
               <div className="grid gap-2">
                 {form.keys.map((k, i) => (
                   <div key={i} className="flex items-center gap-2">
+                    <div className="flex shrink-0 items-center gap-1.5">
+                      <span
+                        className={cn(
+                          "flex h-6 w-6 items-center justify-center rounded-full text-xs font-semibold",
+                          i === 0
+                            ? "bg-primary/15 text-primary"
+                            : "bg-muted text-muted-foreground",
+                        )}
+                      >
+                        {i + 1}
+                      </span>
+                      {i === 0 && (
+                        <Badge className="bg-primary/15 text-primary hover:bg-primary/15">
+                          主
+                        </Badge>
+                      )}
+                    </div>
                     <Input
                       placeholder={keyRequired ? "sk-..." : "可留空（本地/自管 Ollama）"}
                       type="text"
@@ -749,6 +836,7 @@ export function ChannelsPage() {
                     <Input
                       type="number"
                       min={1}
+                      step={1}
                       value={k.weight}
                       onChange={(e) => updateKey(i, "weight", Number(e.target.value) || 1)}
                       className="w-20"
@@ -776,24 +864,52 @@ export function ChannelsPage() {
             <div className="grid gap-2">
               <Label>
                 模型列表
-                <span className="ml-1 text-xs text-muted-foreground">（逗号分隔）</span>
+                <span className="ml-1 text-xs text-muted-foreground">（回车新增 / 可删除）</span>
               </Label>
               <div className="flex gap-2">
                 <Input
-                  placeholder="gpt-4o, gpt-4o-mini, o3"
-                  value={form.modelsText}
-                  onChange={(e) => setForm({ ...form, modelsText: e.target.value })}
+                  placeholder="输入模型名后回车新增，如 gpt-4o"
+                  value={modelInput}
+                  onChange={(e) => setModelInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === ",") {
+                      e.preventDefault();
+                      addModelFromInput();
+                    }
+                  }}
                   className="flex-1"
                 />
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={handleFetchModels}
-                  disabled={fetchingModels}
+                  onClick={openSyncDialog}
+                  disabled={syncLoading}
                 >
-                  <RefreshCw className={fetchingModels ? "animate-spin" : ""} />
-                  拉取模型
+                  <RefreshCw className={syncLoading ? "animate-spin" : ""} />
+                  同步上游模型
                 </Button>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {modelsList.length === 0 ? (
+                  <span className="text-xs text-muted-foreground">尚未添加模型</span>
+                ) : (
+                  modelsList.map((m) => (
+                    <span
+                      key={m}
+                      className="flex items-center gap-1 rounded-md border bg-background px-2 py-1 font-mono text-[11px]"
+                    >
+                      {m}
+                      <button
+                        type="button"
+                        onClick={() => removeModel(m)}
+                        className="text-muted-foreground transition-colors hover:text-destructive"
+                        aria-label={`删除 ${m}`}
+                      >
+                        <X size={12} />
+                      </button>
+                    </span>
+                  ))
+                )}
               </div>
             </div>
 
@@ -882,6 +998,12 @@ export function ChannelsPage() {
                 />
               </div>
             </div>
+
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              优先级高的渠道优先被选中；同优先级内按权重加权随机分发（权重越大命中概率越高）。
+              超时仅对<span className="font-medium text-foreground">非流式（一次性）</span>请求生效，限制完整响应返回的总时长；
+              流式请求仅限制<span className="font-medium text-foreground">连接建立时间</span>（TCP/TLS 握手），不限制整条流时长，长对话可放心调大。
+            </p>
           </div>
 
           <DialogFooter>
@@ -893,6 +1015,99 @@ export function ChannelsPage() {
               disabled={saving || !form.name.trim() || !form.native_base_url.trim()}
             >
               {saving ? "保存中..." : "保存"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 同步上游模型 Dialog */}
+      <Dialog open={syncOpen} onOpenChange={setSyncOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>同步上游模型</DialogTitle>
+            <DialogDescription>
+              勾选要加入模型列表的上游模型，已添加的项默认选中。确认后将与手动输入的模型合并。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-3">
+            <Input
+              placeholder="搜索模型…"
+              value={syncQuery}
+              onChange={(e) => setSyncQuery(e.target.value)}
+            />
+            <label className="flex items-center gap-2 text-sm font-medium">
+              <input
+                type="checkbox"
+                checked={
+                  syncList.length > 0 &&
+                  filteredSync.length > 0 &&
+                  filteredSync.every((m) => syncChecked.has(m))
+                }
+                onChange={(e) => {
+                  const next = new Set(syncChecked);
+                  if (e.target.checked) {
+                    for (const m of filteredSync) next.add(m);
+                  } else {
+                    for (const m of filteredSync) next.delete(m);
+                  }
+                  setSyncChecked(next);
+                }}
+                className="h-4 w-4 accent-primary"
+              />
+              全选（当前匹配 {filteredSync.length} 项）
+            </label>
+            <div className="max-h-64 overflow-y-auto rounded-lg border">
+              {syncLoading ? (
+                <div className="flex items-center gap-2 px-3 py-6 text-sm text-muted-foreground">
+                  <RefreshCw size={14} className="animate-spin" /> 正在拉取模型…
+                </div>
+              ) : syncList.length === 0 ? (
+                <div className="px-3 py-6 text-center text-sm text-muted-foreground">
+                  无可用模型，请检查 Base URL 与密钥。
+                </div>
+              ) : (
+                <div className="divide-y">
+                  {filteredSync.map((m) => {
+                    const checked = syncChecked.has(m);
+                    const already = modelsList.includes(m);
+                    return (
+                      <label
+                        key={m}
+                        className="flex items-center gap-2 px-3 py-2 text-sm"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => {
+                            const next = new Set(syncChecked);
+                            if (checked) next.delete(m);
+                            else next.add(m);
+                            setSyncChecked(next);
+                          }}
+                          className="h-4 w-4 accent-primary"
+                        />
+                        <span className="flex-1 font-mono text-[12px]">{m}</span>
+                        {already && (
+                          <Badge variant="outline" className="text-[10px]">
+                            已添加
+                          </Badge>
+                        )}
+                      </label>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              已选 {syncChecked.size} / {syncList.length}
+            </p>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setSyncOpen(false)}>
+              取消
+            </Button>
+            <Button onClick={confirmSync} disabled={syncLoading}>
+              确认同步
             </Button>
           </DialogFooter>
         </DialogContent>

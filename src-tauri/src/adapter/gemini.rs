@@ -1,6 +1,6 @@
 use crate::adapter::{
-    build_client, extract_usage, map_model, Adaptor, ChannelConfig, ProxyRequest, SseRecord,
-    StreamUsage, TestResult, TokenUsage,
+    build_client, ensure_scheme, extract_usage, map_model, parse_model_ids, Adaptor, ChannelConfig,
+    ProxyRequest, SseRecord, StreamUsage, TestResult, TokenUsage,
 };
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -158,6 +158,21 @@ impl Adaptor for GeminiAdaptor {
 
     fn default_base_url(&self) -> &str {
         "https://generativelanguage.googleapis.com"
+    }
+
+    /// Gemini lists models at `GET /v1beta/models?key=<api_key>` (native API,
+    /// query-string auth, ids under `models[].name` as `models/<id>`). Override
+    /// the default OpenAI-compatible implementation.
+    async fn list_models(&self, config: &ChannelConfig) -> Result<Vec<String>, anyhow::Error> {
+        let client = build_client(config)?;
+        let base = config.base_url.trim_end_matches('/');
+        let url = ensure_scheme(&format!("{}/v1beta/models?key={}", base, config.api_key));
+        let resp = client.get(&url).send().await?;
+        if !resp.status().is_success() {
+            anyhow::bail!("list models failed: upstream status {}", resp.status());
+        }
+        let json: serde_json::Value = resp.json().await?;
+        Ok(parse_model_ids(&json, "models", "name"))
     }
 
     async fn test(&self, config: &ChannelConfig) -> Result<TestResult, anyhow::Error> {

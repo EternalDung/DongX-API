@@ -126,9 +126,20 @@ export const channelApi = {
   presets: (): Promise<ChannelProtocolPresetGroup[]> =>
     invoke<ChannelProtocolPresetGroup[]>("list_provider_presets"),
 
-  /** 获取某供应商适配器的默认模型列表（用于"拉取模型"按钮） */
-  fetchModels: (type: string): Promise<string[]> =>
-    invoke<string[]>("list_provider_models", { type }),
+  /** 从上游供应商实时拉取模型列表（用于"拉取模型"按钮）。
+   *  传入渠道的 base_url 与上游 key；网络失败返回明确错误（不静默回退）。
+   *  Tauri v2 约定：Rust 命令的 snake_case 参数在 JS 端必须用 camelCase，
+   *  故这里把 base_url/api_key 映射为 baseUrl/apiKey 再 invoke。 */
+  fetchModels: (params: {
+    type: string;
+    base_url: string;
+    api_key: string;
+  }): Promise<string[]> =>
+    invoke<string[]>("list_provider_models", {
+      type: params.type,
+      baseUrl: params.base_url,
+      apiKey: params.api_key,
+    }),
 };
 
 // ============================================================

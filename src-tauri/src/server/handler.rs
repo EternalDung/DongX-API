@@ -14,8 +14,8 @@ use crate::adapter::{
     self, Adaptor, ChannelConfig, ProxyRequest, StreamConverter, StreamUsage, scan_openai_usage,
     split_sse_records,
 };
-use crate::core::dispatcher;
-use crate::db::repository::{channels, gateway_keys, request_logs, settings};
+use crate::core::{dispatcher, failover};
+use crate::db::repository::{channel_health, channels, gateway_keys, request_logs, settings};
 use crate::server::auth;
 use crate::AppState;
 
@@ -117,136 +117,272 @@ async fn run_chat_pipeline(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    // 3. Select channel
+    // 3. Load retry settings (defaults: enabled, 3 retries).
+    //    retry_times = 「额外重试次数」; max_attempts = retry_times + 1（含首次）。
+    let retry_enabled: bool = match settings::get(&state.db, "retry_enabled").await {
+        Ok(Some(s)) => serde_json::from_str::<bool>(&s).unwrap_or(true),
+        _ => true,
+    };
+    let retry_times: usize = match settings::get(&state.db, "retry_times").await {
+        Ok(Some(s)) => serde_json::from_str::<i32>(&s).unwrap_or(3).max(0) as usize,
+        _ => 3,
+    };
+    let max_attempts = if retry_enabled { retry_times + 1 } else { 1 };
+
+    // 4. Dispatch + forward, wrapped in an automatic channel-failover state
+    //    machine (core/failover.rs, modelled after waliapi's AttemptFlow):
+    //    pick a candidate channel -> forward -> on a *retryable* failure, record
+    //    it against the circuit breaker and try the next candidate channel.
     let ctx = dispatcher::DispatchContext {
         model: model.clone(),
         api_key_id: gw_key.id.clone(),
         is_stream,
         request_body: body_json.clone(),
     };
-    let selected = match dispatcher::select_channel(&state.db, &ctx).await {
-        Ok(s) => s,
-        Err(e) => {
+    let mut fo = failover::Failover::new(state.db.clone(), ctx, max_attempts);
+
+    /// 一次成功尝试的产出（流 / 非流分两种形态）。
+    enum Success {
+        NonStream {
+            selected: dispatcher::SelectedChannel,
+            status: u16,
+            resp_body: serde_json::Value,
+            usage: Option<adapter::TokenUsage>,
+            upstream_model: String,
+        },
+        Stream {
+            selected: dispatcher::SelectedChannel,
+            upstream_model: String,
+            resp: reqwest::Response,
+        },
+    }
+    let mut success: Option<Success> = None;
+
+    loop {
+        let step = match fo.next().await {
+            Ok(s) => s,
+            Err(e) => {
+                return error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal", &e.to_string());
+            }
+        };
+        let selected = match step {
+            failover::Step::Try(c) => c,
+            failover::Step::NoChannel(msg) => {
+                return error_response(StatusCode::SERVICE_UNAVAILABLE, "no_channel", &msg);
+            }
+            failover::Step::Exhausted => break,
+        };
+
+        // Build the per-attempt adapter config + request + mapped upstream name.
+        let config = ChannelConfig {
+            base_url: selected.base_url.clone(),
+            api_key: selected.upstream_api_key.clone(),
+            models: selected.models.clone(),
+            model_mapping: selected.model_mapping.clone(),
+            extra: selected.extra.clone(),
+            timeout_secs: selected.timeout_secs,
+            stream: is_stream,
+        };
+        let proxy_req = ProxyRequest {
+            model: model.clone(),
+            body: body_json.clone(),
+            stream: is_stream,
+        };
+        let upstream_model = adapter::map_model(&proxy_req, &config);
+        let adaptor = adapter::get_adaptor(&selected.channel_type);
+        let is_retry = fo.is_retry();
+
+        if is_stream {
+            // 流式：只在「连接成功且拿到 2xx」之后才把连接交给 SSE 构建；
+            // 连接/超时/非 2xx 均发生在向客户端写入任何字节之前，可安全重试。
+            match acquire_stream_response(&*adaptor, &proxy_req, &config).await {
+                Ok(resp) => {
+                    // 2xx 流已建立 → 成功，跳出循环交给 serve_stream。
+                    record_upstream_outcome(&state, &selected.id, true, false, "").await;
+                    success = Some(Success::Stream {
+                        selected,
+                        upstream_model,
+                        resp,
+                    });
+                    break;
+                }
+                Err(outcome) => {
+                    let duration_ms = start.elapsed().as_millis() as i64;
+                    spawn_log(
+                        state.clone(),
+                        Some(gw_key.name.clone()),
+                        Some(selected.name.clone()),
+                        model.clone(),
+                        Some(upstream_model.clone()),
+                        outcome.status as i32,
+                        0,
+                        0,
+                        0,
+                        duration_ms,
+                        Some(outcome.message.clone()),
+                        is_stream,
+                        is_retry,
+                        raw_request.clone(),
+                        None,
+                        mode,
+                    );
+                    // 按上游状态分类：5xx/429/408/409 计入熔断，其余 4xx 不计。
+                    record_upstream_outcome(
+                        &state,
+                        &selected.id,
+                        false,
+                        outcome.retryable,
+                        &outcome.message,
+                    )
+                    .await;
+                    fo.observe(outcome);
+                    if fo.should_retry() {
+                        continue;
+                    }
+                    break;
+                }
+            }
+        } else {
+            match adaptor.forward(&proxy_req, &config).await {
+                Ok((status, resp_body, usage)) => {
+                    record_upstream_outcome(&state, &selected.id, true, false, "").await;
+                    success = Some(Success::NonStream {
+                        selected,
+                        status,
+                        resp_body,
+                        usage,
+                        upstream_model,
+                    });
+                    break;
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    let duration_ms = start.elapsed().as_millis() as i64;
+                    spawn_log(
+                        state.clone(),
+                        Some(gw_key.name.clone()),
+                        Some(selected.name.clone()),
+                        model.clone(),
+                        Some(upstream_model.clone()),
+                        502,
+                        0,
+                        0,
+                        0,
+                        duration_ms,
+                        Some(msg.clone()),
+                        is_stream,
+                        is_retry,
+                        raw_request.clone(),
+                        None,
+                        mode,
+                    );
+                    // 上游连接/超时失败 → 可重试，计入熔断。
+                    record_upstream_outcome(&state, &selected.id, false, true, &msg).await;
+                    fo.observe(failover::Outcome::connection(msg));
+                    if fo.should_retry() {
+                        continue;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    // 所有候选耗尽（且最后一次失败）→ 回退最后一个上游错误给客户端。
+    let success = match success {
+        Some(s) => s,
+        None => {
+            let outcome = fo
+                .last_outcome()
+                .cloned()
+                .unwrap_or_else(|| failover::Outcome::no_channel("没有可用的候选渠道".into()));
             return error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "no_channel",
-                &e.to_string(),
-            )
+                StatusCode::from_u16(outcome.status).unwrap_or(StatusCode::BAD_GATEWAY),
+                &outcome.code,
+                &outcome.message,
+            );
         }
     };
 
-    // 4. Build adapter config + request, then forward.
-    let config = ChannelConfig {
-        base_url: selected.base_url.clone(),
-        api_key: selected.upstream_api_key.clone(),
-        models: selected.models.clone(),
-        model_mapping: selected.model_mapping.clone(),
-        extra: selected.extra.clone(),
-        timeout_secs: selected.timeout_secs,
-    };
-    let proxy_req = ProxyRequest {
-        model: model.clone(),
-        body: body_json,
-        stream: is_stream,
-    };
-    // Apply model mapping for the log's `upstream_model` field.
-    let upstream_model = adapter::map_model(&proxy_req, &config);
-    let adaptor = adapter::get_adaptor(&selected.channel_type);
+    // 5. Success path — stream and non-stream diverge here.
+    match success {
+        Success::Stream {
+            selected,
+            upstream_model,
+            resp,
+        } => {
+            // 流式：交由 serve_stream 建立 SSE（循环内已确认 2xx）。
+            return serve_stream(
+                state.clone(),
+                gw_key.name.clone(),
+                selected.name.clone(),
+                selected.id.clone(),
+                model.clone(),
+                upstream_model.clone(),
+                is_stream,
+                start,
+                raw_request.clone(),
+                log_raw_body,
+                &selected.channel_type,
+                resp,
+                fo.is_retry(),
+                mode,
+            )
+            .await;
+        }
+        Success::NonStream {
+            selected,
+            status,
+            resp_body,
+            usage,
+            upstream_model,
+        } => {
+            let (pt, ct, tt) = usage
+                .as_ref()
+                .map(|u| {
+                    (
+                        u.prompt_tokens as i64,
+                        u.completion_tokens as i64,
+                        u.total_tokens as i64,
+                    )
+                })
+                .unwrap_or((0, 0, 0));
 
-    // 4b. Streaming branch (SSE). OpenAI/DeepSeek pass through untouched;
-    // Claude/Gemini native SSE is converted to OpenAI SSE in the proxy layer.
-    if is_stream {
-        return handle_stream(
-            state.clone(),
-            gw_key.name.clone(),
-            selected.name.clone(),
-            model.clone(),
-            upstream_model.clone(),
-            is_stream,
-            start,
-            raw_request.clone(),
-            log_raw_body,
-            &selected.channel_type,
-            &*adaptor,
-            &proxy_req,
-            &config,
-            mode,
-        )
-        .await;
-    }
+            // Debit gateway key quota.
+            if tt > 0 {
+                let _ = gateway_keys::add_quota_used(&state.db, &gw_key.id, tt).await;
+            }
 
-    // 5. Forward (non-streaming).
-    let forward_result = adaptor.forward(&proxy_req, &config).await;
-    // Measure after forward so duration includes the upstream round-trip.
-    let duration_ms = start.elapsed().as_millis() as i64;
-    let (status, resp_body, usage) = match forward_result {
-        Ok(r) => r,
-        Err(e) => {
-            let msg = e.to_string();
+            let duration_ms = start.elapsed().as_millis() as i64;
+            let raw_response = if log_raw_body {
+                serde_json::to_string(&resp_body).ok()
+            } else {
+                None
+            };
             spawn_log(
                 state.clone(),
                 Some(gw_key.name.clone()),
                 Some(selected.name.clone()),
-                model,
-                Some(upstream_model),
-                502,
-                0,
-                0,
-                0,
+                model.clone(),
+                Some(upstream_model.clone()),
+                status as i32,
+                pt,
+                ct,
+                tt,
                 duration_ms,
-                Some(msg.clone()),
-                is_stream,
-                raw_request.clone(),
                 None,
+                is_stream,
+                fo.is_retry(),
+                raw_request.clone(),
+                raw_response,
                 mode,
             );
-            return error_response(StatusCode::BAD_GATEWAY, "upstream_error", &msg);
+
+            // Return upstream body + status.
+            let st = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
+            (st, Json(resp_body)).into_response()
         }
-    };
-
-    let (pt, ct, tt) = usage
-        .as_ref()
-        .map(|u| {
-            (
-                u.prompt_tokens as i64,
-                u.completion_tokens as i64,
-                u.total_tokens as i64,
-            )
-        })
-        .unwrap_or((0, 0, 0));
-
-    // 6. Debit gateway key quota.
-    if tt > 0 {
-        let _ = gateway_keys::add_quota_used(&state.db, &gw_key.id, tt).await;
     }
-
-    // 7. Async log.
-    let raw_response = if log_raw_body {
-        serde_json::to_string(&resp_body).ok()
-    } else {
-        None
-    };
-    spawn_log(
-        state.clone(),
-        Some(gw_key.name.clone()),
-        Some(selected.name.clone()),
-        model,
-        Some(upstream_model),
-        status as i32,
-        pt,
-        ct,
-        tt,
-        duration_ms,
-        None,
-        is_stream,
-        raw_request.clone(),
-        raw_response,
-        mode,
-    );
-
-    // 8. Return upstream body + status.
-    let st = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
-    (st, Json(resp_body)).into_response()
 }
 
 /// GET /v1/models — list distinct models across all enabled channels.
@@ -394,7 +530,7 @@ pub async fn responses(
         return (StatusCode::OK, Json(resp_json)).into_response();
     }
 
-    // 5b. Streaming: the chat pipeline (via `handle_stream`) already converted
+    // 5b. Streaming: the chat pipeline (via `serve_stream`) already converted
     //     the upstream Chat SSE into Responses SSE events AND wrote the request
     //     log (with the full Response-shaped body). Just pass it through.
     chat_resp
@@ -525,6 +661,7 @@ fn spawn_log(
     duration_ms: i64,
     error_message: Option<String>,
     is_stream: bool,
+    is_retry: bool,
     request_body: Option<String>,
     response_body: Option<String>,
     mode: &'static str,
@@ -544,7 +681,7 @@ fn spawn_log(
             duration_ms,
             error_message.as_deref(),
             is_stream,
-            false,
+            is_retry,
             request_body.as_deref(),
             response_body.as_deref(),
             "none",
@@ -558,65 +695,52 @@ fn spawn_log(
     });
 }
 
+/// 上游 HTTP 状态是否应计入熔断器（参考 waliapi 的错误分类思想）：
+/// 5xx / 429 / 408 / 409 = 可重试的上游故障 → 计入熔断；
+/// 其余（401/403 鉴权、400/422 客户端错误）不是渠道本身的问题 → 不计入。
+fn is_retryable_status(status: Option<u16>) -> bool {
+    matches!(
+        status,
+        Some(408) | Some(409) | Some(429) | Some(500..=599)
+    )
+}
+
+/// 把一次上游调用结果写回渠道健康表，驱动熔断器：
+/// - 成功 → 重置熔断器；
+/// - 失败且可重试 → 累加失败，达阈值后打开熔断器；
+/// - 失败但不可重试（鉴权/客户端错误）→ 不动熔断器。
+///
+/// 必须忽略错误：健康统计不能影响响应路径（与配额扣减同理）。
+async fn record_upstream_outcome(
+    state: &Arc<AppState>,
+    channel_id: &str,
+    success: bool,
+    retryable: bool,
+    reason: &str,
+) {
+    if success {
+        let _ = channel_health::record_success(&state.db, channel_id).await;
+    } else if retryable {
+        let _ = channel_health::record_failure(&state.db, channel_id, reason).await;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Streaming (SSE)
 // ---------------------------------------------------------------------------
 
-/// Forward a streaming request and return an SSE `Response`.
-///
-/// OpenAI-compatible upstreams (OpenAI / DeepSeek / OpenAI-compatible custom
-/// channels) are passed through byte-for-byte. Claude and Gemini return their
-/// native SSE, which is converted chunk-by-chunk into OpenAI
-/// `chat.completion.chunk` frames by the per-provider converter.
-///
-/// The upstream `model` name is preserved in the converted frames (it is NOT
-/// rewritten to the client's alias) — keeping
-/// "which model actually generated this" truthful.
-async fn handle_stream(
-    state: Arc<AppState>,
-    gw_key_name: String,
-    channel_name: String,
-    model: String,
-    upstream_model: String,
-    is_stream: bool,
-    start: std::time::Instant,
-    raw_request: Option<String>,
-    log_raw_body: bool,
-    channel_type: &str,
+/// 流式「尝试」单元（可被故障转移循环包裹）：发起上游 SSE 请求并校验状态码，
+/// 仅在返回 2xx 时才把 `reqwest::Response` 交给调用方建立 SSE；
+/// 连接失败 / 超时 / 非 2xx 均发生在向客户端写入任何字节之前，因此可安全重试。
+async fn acquire_stream_response(
     adaptor: &dyn Adaptor,
     proxy_req: &ProxyRequest,
     config: &ChannelConfig,
-    mode: &'static str,
-) -> Response {
+) -> Result<reqwest::Response, failover::Outcome> {
     let resp = match adaptor.forward_stream(proxy_req, config).await {
         Ok(r) => r,
-        Err(e) => {
-            let msg = e.to_string();
-            let duration_ms = start.elapsed().as_millis() as i64;
-            spawn_log(
-                state.clone(),
-                Some(gw_key_name.clone()),
-                Some(channel_name.clone()),
-                model.clone(),
-                Some(upstream_model.clone()),
-                502,
-                0,
-                0,
-                0,
-                duration_ms,
-                Some(msg.clone()),
-                is_stream,
-                raw_request.clone(),
-                None,
-                mode,
-            );
-            return error_response(StatusCode::BAD_GATEWAY, "upstream_error", &msg);
-        }
+        Err(e) => return Err(failover::Outcome::connection(e.to_string())),
     };
-
-    // Non-2xx must be surfaced as a JSON error BEFORE we start an SSE stream —
-    // once we commit to `text/event-stream` we can no longer send a clean
-    // status code.
     let status = resp.status();
     if !status.is_success() {
         let status_code = status.as_u16();
@@ -629,31 +753,42 @@ async fn handle_stream(
                     .map(String::from)
             })
             .unwrap_or_else(|| truncate(&body_text, 300));
-        let duration_ms = start.elapsed().as_millis() as i64;
-        spawn_log(
-            state.clone(),
-            Some(gw_key_name.clone()),
-            Some(channel_name.clone()),
-            model.clone(),
-            Some(upstream_model.clone()),
-            status_code as i32,
-            0,
-            0,
-            0,
-            duration_ms,
-            Some(msg.clone()),
-            is_stream,
-            raw_request.clone(),
-            None,
-            mode,
-        );
-        return error_response(
-            StatusCode::from_u16(status_code).unwrap_or(StatusCode::BAD_GATEWAY),
-            "upstream_error",
-            &msg,
-        );
+        return Err(failover::Outcome::upstream(
+            status_code,
+            msg,
+            is_retryable_status(Some(status_code)),
+        ));
     }
+    Ok(resp)
+}
 
+/// Forward a streaming request and return an SSE `Response`.
+///
+/// OpenAI-compatible upstreams (OpenAI / DeepSeek / OpenAI-compatible custom
+/// channels) are passed through byte-for-byte. Claude and Gemini return their
+/// native SSE, which is converted chunk-by-chunk into OpenAI
+/// `chat.completion.chunk` frames by the per-provider converter.
+///
+/// The upstream `model` name is preserved in the converted frames (it is NOT
+/// rewritten to the client's alias) — keeping
+/// "which model actually generated this" truthful.
+async fn serve_stream(
+    state: Arc<AppState>,
+    gw_key_name: String,
+    channel_name: String,
+    _channel_id: String,
+    model: String,
+    upstream_model: String,
+    is_stream: bool,
+    start: std::time::Instant,
+    raw_request: Option<String>,
+    log_raw_body: bool,
+    channel_type: &str,
+    resp: reqwest::Response,
+    is_retry: bool,
+    mode: &'static str,
+) -> Response {
+    // `resp` 已在调用方（故障转移循环）确认是 2xx，这里直接构建 SSE。
     let converter = match channel_type {
         "claude" => StreamConverter::Claude,
         "gemini" => StreamConverter::Gemini,
@@ -678,6 +813,7 @@ async fn handle_stream(
             converter,
             false, // do_log: the Responses converter below logs instead
             log_raw_body,
+            is_retry,
             "responses",
         );
         let (parts, body) = chat_resp.into_parts();
@@ -694,6 +830,7 @@ async fn handle_stream(
             start,
             raw_request,
             log_raw_body,
+            is_retry,
             mode,
         );
     }
@@ -711,6 +848,7 @@ async fn handle_stream(
         converter,
         true, // do_log
         log_raw_body,
+        is_retry,
         mode,
     )
 }
@@ -740,6 +878,7 @@ fn build_stream_response(
     converter: StreamConverter,
     do_log: bool,
     log_raw_body: bool,
+    is_retry: bool,
     mode: &'static str,
 ) -> Response {
     use tokio::sync::mpsc;
@@ -877,9 +1016,9 @@ fn build_stream_response(
                 model,
                 Some(upstream_model),
                 if had_error { 502 } else { 200 },
-                0,
-                0,
-                0,
+                acc.prompt_tokens,
+                acc.completion_tokens,
+                acc.total_tokens,
                 duration_ms,
                 if had_error {
                     Some("stream interrupted".to_string())
@@ -887,6 +1026,7 @@ fn build_stream_response(
                     None
                 },
                 is_stream,
+                is_retry,
                 raw_request,
                 if log_raw_body {
                     Some(response_body_acc)
@@ -932,6 +1072,7 @@ fn build_responses_stream_response(
     start: std::time::Instant,
     raw_request: Option<String>,
     log_raw_body: bool,
+    is_retry: bool,
     mode: &'static str,
 ) -> Response {
     use futures_util::StreamExt;
@@ -1011,9 +1152,9 @@ fn build_responses_stream_response(
             model,
             Some(upstream_model),
             if had_error { 502 } else { 200 },
-            0,
-            0,
-            0,
+            acc.prompt_tokens,
+            acc.completion_tokens,
+            acc.total_tokens,
             duration_ms,
             if had_error {
                 Some("stream interrupted".to_string())
@@ -1021,6 +1162,7 @@ fn build_responses_stream_response(
                 None
             },
             true, // is_stream
+            is_retry,
             raw_request,
             if log_raw_body {
                 Some(response_body_acc)
