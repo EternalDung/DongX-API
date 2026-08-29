@@ -231,6 +231,30 @@ export interface Settings {
   security_block_on_critical: boolean;
 }
 
+/** 自定义安全规则（对应后端 security_custom_rules + CustomRule） */
+export interface CustomRule {
+  id: string;
+  rule_type: "blacklist" | "whitelist";
+  category: "domain" | "tool" | "path" | "keyword";
+  pattern: string;
+  severity: "low" | "medium" | "high" | "critical";
+  action: "warn" | "block";
+  enabled: boolean;
+  description: string | null;
+  created_at: string;
+}
+
+/** 自定义规则创建/更新参数（对应 Rust CustomRuleInput） */
+export interface CustomRuleInput {
+  rule_type: "blacklist" | "whitelist";
+  category: "domain" | "tool" | "path" | "keyword";
+  pattern: string;
+  severity: "low" | "medium" | "high" | "critical";
+  action: "warn" | "block";
+  enabled: boolean;
+  description: string | null;
+}
+
 // ============================================================
 // 网关服务状态
 // ============================================================

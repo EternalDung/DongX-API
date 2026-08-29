@@ -22,6 +22,8 @@ import type {
   DashboardStats,
   Settings,
   ServerStatus,
+  CustomRule,
+  CustomRuleInput,
 } from "@/types";
 
 // ============================================================
@@ -207,6 +209,28 @@ export const auditApi = {
   /** 查询审计事件（支持按严重级别、事件类型、时间范围过滤） */
   list: (query?: AuditQuery): Promise<AuditEvent[]> =>
     invoke<AuditEvent[]>("list_audit_events", { query }),
+};
+
+// ============================================================
+// 自定义安全规则 API
+// 用户自定义黑名单/白名单（v1 仅黑名单子串匹配生效）
+// ============================================================
+
+export const customRuleApi = {
+  /** 列出全部自定义规则（含已禁用） */
+  list: (): Promise<CustomRule[]> => invoke<CustomRule[]>("list_custom_rules"),
+
+  /** 新建自定义规则，返回新建 id */
+  create: (input: CustomRuleInput): Promise<{ id: string; status: string }> =>
+    invoke<{ id: string; status: string }>("create_custom_rule", { input }),
+
+  /** 更新自定义规则 */
+  update: (id: string, input: CustomRuleInput): Promise<void> =>
+    invoke<void>("update_custom_rule", { id, input }),
+
+  /** 删除自定义规则 */
+  remove: (id: string): Promise<void> =>
+    invoke<void>("delete_custom_rule", { id }),
 };
 
 // ============================================================

@@ -3,4 +3,5 @@ pub mod key;
 pub mod log;
 pub mod audit;
 pub mod settings;
+pub mod security;
 pub mod server;

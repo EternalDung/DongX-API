@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { RefreshCw, Save, RotateCw, Play, Square } from "lucide-react";
+import { RefreshCw, Save, RotateCw, Play, Square, Plus, Pencil, Trash2 } from "lucide-react";
 import {
   Card,
   CardContent,
@@ -12,14 +12,36 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Select } from "@/components/ui/select";
+import { Badge } from "@/components/ui/badge";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Textarea } from "@/components/ui/textarea";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { settingsApi, serverApi, type SettingsUpdate } from "@/lib/api";
+import {
+  settingsApi,
+  serverApi,
+  customRuleApi,
+  type SettingsUpdate,
+} from "@/lib/api";
 import { applyTheme } from "@/lib/theme";
 import { formatListenUrl } from "@/lib/utils";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useToast } from "@/components/ui/toast";
 import { useSearchParams } from "react-router-dom";
-import type { Settings, ThemeMode, SecurityMode, ServerStatus } from "@/types";
+import type {
+  Settings,
+  ThemeMode,
+  SecurityMode,
+  ServerStatus,
+  CustomRule,
+  CustomRuleInput,
+} from "@/types";
 
 /** 安全审计 Tab 内 6 个检测项的复用卡片（标签 + 右上角开关） */
 function SecurityToggleCard({
@@ -36,6 +58,340 @@ function SecurityToggleCard({
       <p className="text-sm font-medium leading-tight">{label}</p>
       <Switch checked={checked} onCheckedChange={onChange} />
     </div>
+  );
+}
+
+/** 安全等级 → Badge 变体 */
+const SEVERITY_VARIANT: Record<CustomRule["severity"], "outline" | "secondary" | "warning" | "destructive"> = {
+  low: "outline",
+  medium: "secondary",
+  high: "warning",
+  critical: "destructive",
+};
+const SEVERITY_LABEL: Record<CustomRule["severity"], string> = {
+  low: "低",
+  medium: "中",
+  high: "高",
+  critical: "严重",
+};
+const CATEGORY_LABEL: Record<CustomRule["category"], string> = {
+  domain: "域名",
+  tool: "工具",
+  path: "路径",
+  keyword: "关键词",
+};
+
+/** 把后端行转换为创建/更新载荷（剔除 id / created_at） */
+const toForm = (r: CustomRule): CustomRuleInput => ({
+  rule_type: r.rule_type,
+  category: r.category,
+  pattern: r.pattern,
+  severity: r.severity,
+  action: r.action,
+  enabled: r.enabled,
+  description: r.description,
+});
+
+const EMPTY_FORM: CustomRuleInput = {
+  rule_type: "blacklist",
+  category: "domain",
+  pattern: "",
+  severity: "medium",
+  action: "warn",
+  enabled: true,
+  description: null,
+};
+
+/**
+ * 安全审计 Tab 内的「自定义安全规则」卡片（第二张）。
+ * v1：仅黑名单子串匹配生效，白名单选项 disabled 并标注"暂未接入"。
+ */
+function CustomRulesCard() {
+  const toast = useToast();
+  const [rules, setRules] = useState<CustomRule[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [editing, setEditing] = useState<CustomRule | null>(null);
+  const [form, setForm] = useState<CustomRuleInput>(EMPTY_FORM);
+
+  const loadRules = async () => {
+    setLoading(true);
+    try {
+      setRules(await customRuleApi.list());
+    } catch (e) {
+      console.error("Failed to load custom rules:", e);
+      toast.error("加载自定义规则失败");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadRules();
+  }, []);
+
+  const openCreate = () => {
+    setEditing(null);
+    setForm(EMPTY_FORM);
+    setDialogOpen(true);
+  };
+
+  const openEdit = (r: CustomRule) => {
+    setEditing(r);
+    setForm(toForm(r));
+    setDialogOpen(true);
+  };
+
+  const handleSubmit = async () => {
+    if (!form.pattern.trim()) {
+      toast.error("匹配模式不能为空");
+      return;
+    }
+    setSaving(true);
+    try {
+      if (editing) {
+        await customRuleApi.update(editing.id, form);
+        toast.success("规则已更新");
+      } else {
+        await customRuleApi.create(form);
+        toast.success("规则已创建");
+      }
+      setDialogOpen(false);
+      await loadRules();
+    } catch (e) {
+      console.error(e);
+      toast.error(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDelete = async (r: CustomRule) => {
+    try {
+      await customRuleApi.remove(r.id);
+      toast.success("规则已删除");
+      await loadRules();
+    } catch (e) {
+      console.error(e);
+      toast.error(String(e));
+    }
+  };
+
+  const toggleEnabled = async (r: CustomRule, next: boolean) => {
+    try {
+      await customRuleApi.update(r.id, { ...toForm(r), enabled: next });
+      await loadRules();
+    } catch (e) {
+      console.error(e);
+      toast.error(String(e));
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-start justify-between gap-2">
+          <div>
+            <CardTitle>自定义安全规则</CardTitle>
+            <CardDescription>
+              按黑名单匹配域名 / 工具 / 路径 / 关键词，命中后告警或阻断（v1 仅黑名单生效）
+            </CardDescription>
+          </div>
+          <Button size="sm" onClick={openCreate} className="shrink-0">
+            <Plus />
+            添加规则
+          </Button>
+        </div>
+      </CardHeader>
+      <CardContent className="grid gap-3">
+        {loading ? (
+          <>
+            <Skeleton className="h-14 w-full rounded-lg" />
+            <Skeleton className="h-14 w-full rounded-lg" />
+          </>
+        ) : rules.length === 0 ? (
+          <p className="py-6 text-center text-sm text-muted-foreground">
+            暂无自定义规则，点击右上角「添加规则」开始配置黑名单。
+          </p>
+        ) : (
+          rules.map((r) => (
+            <div
+              key={r.id}
+              className="flex items-center justify-between gap-3 rounded-lg border bg-card/40 px-3 py-3"
+            >
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge variant="secondary">
+                    {r.rule_type === "blacklist" ? "黑名单" : "白名单"}
+                  </Badge>
+                  <Badge variant="outline">{CATEGORY_LABEL[r.category]}</Badge>
+                  <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">
+                    {r.pattern}
+                  </code>
+                  <Badge variant={SEVERITY_VARIANT[r.severity]}>
+                    {SEVERITY_LABEL[r.severity]}危
+                  </Badge>
+                  <Badge variant={r.action === "block" ? "destructive" : "warning"}>
+                    {r.action === "block" ? "阻断" : "告警"}
+                  </Badge>
+                </div>
+                {r.description && (
+                  <p className="mt-1.5 truncate text-xs text-muted-foreground">
+                    {r.description}
+                  </p>
+                )}
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                <Switch
+                  checked={r.enabled}
+                  onCheckedChange={(v) => toggleEnabled(r, v)}
+                  aria-label="启用规则"
+                />
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => openEdit(r)}
+                  aria-label="编辑规则"
+                >
+                  <Pencil />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => handleDelete(r)}
+                  aria-label="删除规则"
+                >
+                  <Trash2 />
+                </Button>
+              </div>
+            </div>
+          ))
+        )}
+      </CardContent>
+
+      {/* 添加 / 编辑 弹窗 */}
+      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{editing ? "编辑安全规则" : "添加安全规则"}</DialogTitle>
+            <DialogDescription>
+              命中匹配模式的内容将在扫描阶段被标记风险并按动作处置。
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="grid gap-4 py-2">
+            <div className="grid gap-2">
+              <Label htmlFor="cr-type">规则类型</Label>
+              <Select
+                id="cr-type"
+                value={form.rule_type}
+                onChange={(e) =>
+                  setForm({ ...form, rule_type: e.target.value as CustomRuleInput["rule_type"] })
+                }
+              >
+                <option value="blacklist">黑名单（命中即处置）</option>
+                <option value="whitelist" disabled>
+                  白名单（暂未接入）
+                </option>
+              </Select>
+            </div>
+
+            <div className="grid gap-2">
+              <Label htmlFor="cr-category">匹配类别</Label>
+              <Select
+                id="cr-category"
+                value={form.category}
+                onChange={(e) =>
+                  setForm({ ...form, category: e.target.value as CustomRuleInput["category"] })
+                }
+              >
+                <option value="domain">域名</option>
+                <option value="tool">工具</option>
+                <option value="path">路径</option>
+                <option value="keyword">关键词</option>
+              </Select>
+            </div>
+
+            <div className="grid gap-2">
+              <Label htmlFor="cr-pattern">匹配模式</Label>
+              <Input
+                id="cr-pattern"
+                placeholder="例如 evil.example.com 或 sk- 或 rm -rf"
+                value={form.pattern}
+                onChange={(e) => setForm({ ...form, pattern: e.target.value })}
+              />
+              <p className="text-xs text-muted-foreground">
+                子串匹配：请求体中出现该字符串即视为命中。
+              </p>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div className="grid gap-2">
+                <Label htmlFor="cr-severity">风险等级</Label>
+                <Select
+                  id="cr-severity"
+                  value={form.severity}
+                  onChange={(e) =>
+                    setForm({ ...form, severity: e.target.value as CustomRuleInput["severity"] })
+                  }
+                >
+                  <option value="low">低</option>
+                  <option value="medium">中</option>
+                  <option value="high">高</option>
+                  <option value="critical">严重</option>
+                </Select>
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="cr-action">命中动作</Label>
+                <Select
+                  id="cr-action"
+                  value={form.action}
+                  onChange={(e) =>
+                    setForm({ ...form, action: e.target.value as CustomRuleInput["action"] })
+                  }
+                >
+                  <option value="warn">告警</option>
+                  <option value="block">阻断</option>
+                </Select>
+              </div>
+            </div>
+
+            <div className="grid gap-2">
+              <Label htmlFor="cr-desc">说明（可选）</Label>
+              <Textarea
+                id="cr-desc"
+                placeholder="备注该规则的用途"
+                value={form.description ?? ""}
+                onChange={(e) =>
+                  setForm({ ...form, description: e.target.value || null })
+                }
+              />
+            </div>
+
+            <div className="flex items-center justify-between rounded-lg border bg-card/40 px-3 py-3">
+              <div>
+                <p className="text-sm font-medium">启用该规则</p>
+                <p className="text-xs text-muted-foreground">关闭后不在扫描阶段生效</p>
+              </div>
+              <Switch
+                checked={form.enabled}
+                onCheckedChange={(v) => setForm({ ...form, enabled: v })}
+              />
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDialogOpen(false)}>
+              取消
+            </Button>
+            <Button onClick={handleSubmit} disabled={saving}>
+              {saving ? "保存中..." : editing ? "保存修改" : "创建规则"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </Card>
   );
 }
 
@@ -537,6 +893,9 @@ export function SettingsPage() {
               </p>
             </CardContent>
           </Card>
+
+          {/* 第二张卡片：自定义安全规则（黑名单 CRUD） */}
+          <CustomRulesCard />
         </TabsContent>
       </Tabs>
     </div>

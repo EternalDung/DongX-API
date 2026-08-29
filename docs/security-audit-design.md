@@ -281,7 +281,8 @@ let forward_body = gate.forward_body.clone();
 
 - **响应体扫描 / 响应体日志脱敏（已完成）**：`security_scan_response` 后端已接——非流式响应按启用规则扫描，发现 `phase="response"` 写入 `request_security_findings` 并并入本次审计风险；`security_redact_secrets` 开启时，落库的 `request_logs.response_body`（非流式 JSON + 流式 SSE 文本，后者经 `redact::redact_text`）统一脱敏，闭合 G3 响应半边。`cargo test --lib security` 已含 `scan_response_*` 集成用例。
   - **流式响应扫描边界**：流式/SSE 响应为逐帧文本、非完整 JSON，`scan_response` 仅覆盖非流式（JSON）响应；流式响应目前只做日志体脱敏、不做逐帧发现扫描（避免中途打断流、且 SSE 解析复杂）。代码注释与设计文档均已标注此边界。
-- **自定义规则 UI**：`security_custom_rules` 表已建、仓储已接，但前端编辑 UI 未做（P2）。
+- **自定义规则 UI（已完成）**：安全审计 Tab 新增「自定义安全规则」卡片（第二张），提供黑名单规则的全量 CRUD——列表（类型/类别/等级/动作 Badge + 启用 Switch + 编辑/删除）、添加/编辑 Dialog（类型/类别/模式/等级/动作/启用 + 说明），数据通道为新建的 `customRuleApi`（`list_custom_rules` / `create_custom_rule` / `update_custom_rule` / `delete_custom_rule`，后端 `commands/security.rs` + `security/rules.rs` 的 `CustomRuleRepository`）。
+  - **v1 范围**：仅黑名单子串匹配生效（扫描器 `scanner.rs` 已实现 `custom.*` 命中），白名单选项在 Dialog 中 `disabled` 并标注"暂未接入"——扫描管线尚未实现白名单放行语义，故 UI 不开放。后续若接白名单需先扩展 `scanner` 的放行逻辑。
 - **单测（核心逻辑已补）**：`security/mod.rs`、`security/scanner.rs`、`security/redact.rs` 均加 `#[cfg(test)]` 用例；`security/gate.rs` 补 `#[cfg(test)]` 集成测试（内存库跑迁移 003/004，覆盖 4 模式、redact_secrets 脱敏转发体、block_on_critical 跨模式、network/unicode 开关关闭跳过、新键接线、`scan_response` 响应扫描 + phase 标记），`cargo test --lib` 全绿（37 passed）。
 - **误报**：身份证/手机号正则可能误命中数字串；因默认 `audit` 不拦不改，影响可控；`block` 用户需关注告警。
 
