@@ -18,7 +18,7 @@ use crate::core::{dispatcher, failover};
 use crate::db::repository::{
     audit_events, channel_health, channels, gateway_keys, request_logs, security_findings, settings,
 };
-use crate::security::{self, SecurityAction, SecurityFinding, SecurityOutcome};
+use crate::security::{self, redact, SecurityAction, SecurityFinding, SecurityOutcome};
 use crate::server::auth;
 use crate::AppState;
 
@@ -107,12 +107,7 @@ async fn run_chat_pipeline(
         Ok(Some(s)) => serde_json::from_str::<bool>(&s).unwrap_or(false),
         _ => false,
     };
-    // Capture the raw request body only when the toggle is on (privacy/perf).
-    let raw_request = if log_raw_body {
-        Some(String::from_utf8_lossy(&body).to_string())
-    } else {
-        None
-    };
+    // 日志请求体在请求 JSON 解析后构造（见 body_json 之后），统一走脱敏副本，确保 DB 不落明文。
 
     // 1. Auth
     let key = match auth::extract_gateway_key(&headers) {
@@ -152,6 +147,16 @@ async fn run_chat_pipeline(
     let body_json: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => return error_response(StatusCode::BAD_REQUEST, "invalid_json", &e.to_string()),
+    };
+
+    // 日志请求体：仅 log_raw_body 开启时记录。统一走脱敏副本——redact 仅掩 high+ 类别
+    // （密钥/卡号/私钥/外传命令/可疑域名等），确保本地 DB 永不落明文高风险凭证，
+    // 闭合初版 G3「日志永远脱敏」隐私目标。低/中风险（邮箱/手机/身份证）仍保留以便调试。
+    let raw_request = if log_raw_body {
+        let sanitized = redact::redact(&body_json);
+        serde_json::to_string(&sanitized).ok()
+    } else {
+        None
     };
     let model = body_json
         .get("model")

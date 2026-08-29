@@ -251,7 +251,8 @@ let forward_body = gate.forward_body.clone();
 
 ## 8. 已知局限 / 后续项
 
-- **G3 日志体脱敏未完成**：`request_logs.request_body`（仅 `log_raw_body` 开启时）仍存原文。如需"DB 永不落明文"，可在 `spawn_log` 改用 `forward_body`（redact 模式下已是脱敏体；其余模式也可统一走 `redact::redact` 仅对 high+ 类别脱敏的日志副本）。
+- **G3 日志体脱敏（请求体）已完成**：`handler.rs` 不再把原始请求字节落库，改为在 `body_json` 解析后对其调用 `redact::redact()` 生成脱敏副本（仅掩 high+ 类别：密钥/卡号/私钥/外传命令/可疑域名等），再序列化存入 `request_logs.request_body`。即 `log_raw_body` 开启时，本地 DB **永不落明文高风险凭证**；低/中风险（邮箱/手机/身份证）仍保留以便调试。无论 `security_mode` 取值，日志侧一律按脱敏副本存储（闭合初版 G3 隐私目标）。
+- **G3 日志体脱敏（响应体）仍待做**：`request_logs.response_body` 在 `log_raw_body` 开启时仍存原始响应（含可能的模型回显密钥）。响应为流式/SSE、可能非 JSON，需单独处理；列为后续项。
 - **响应体扫描**：当前不扫响应体（参考产品有响应侧安全扫描开关，前端已预留 `scan_response` 类 UI 位，后端未接）。
 - **自定义规则 UI**：`security_custom_rules` 表已建、仓储已接，但前端编辑 UI 未做（P2）。
 - **单测**：gate / scanner / redact 尚无自动化测试（验收目前靠人工）。建议补"脱敏后上游只见掩码""超预算 fail-open""fail-open 槽路"等用例。
