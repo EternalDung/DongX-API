@@ -770,6 +770,7 @@ pub mod security_findings {
     use crate::security::SecurityFinding;
 
     /// 写入一条发现明细，关联 request_logs.id（log_id）。
+    /// phase 来自 finding.phase（request=入站请求体 / response=出站响应体）。
     pub async fn insert(
         pool: &SqlitePool,
         log_id: &str,
@@ -780,10 +781,11 @@ pub mod security_findings {
         sqlx::query(
             "INSERT INTO request_security_findings \
              (id, log_id, phase, category, rule_id, severity, title, description, location, evidence_masked, evidence_hash, action, created_at) \
-             VALUES (?1,?2,'request',?3,?4,?5,?6,?7,?8,?9,NULL,?10,?11)",
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,NULL,?11,?12)",
         )
         .bind(&id)
         .bind(log_id)
+        .bind(&finding.phase)
         .bind(&finding.category)
         .bind(&finding.rule_id)
         .bind(&finding.severity)

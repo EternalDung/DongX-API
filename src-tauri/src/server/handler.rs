@@ -107,6 +107,12 @@ async fn run_chat_pipeline(
         Ok(Some(s)) => serde_json::from_str::<bool>(&s).unwrap_or(false),
         _ => false,
     };
+    // 响应体日志脱敏开关（对齐 waliapi security_redact_secrets）：开启时落库的
+    // 响应体(非流式 JSON / 流式 SSE 文本)统一掩高风险明文，闭合 G3 响应半边。
+    let sec_redact = match settings::get(&state.db, "security_redact_secrets").await {
+        Ok(Some(s)) => serde_json::from_str::<bool>(&s).unwrap_or(false),
+        _ => false,
+    };
     // 日志请求体在请求 JSON 解析后构造（见 body_json 之后），统一走脱敏副本，确保 DB 不落明文。
 
     // 1. Auth
@@ -474,11 +480,37 @@ async fn run_chat_pipeline(
             }
 
             let duration_ms = start.elapsed().as_millis() as i64;
+            // 响应体日志脱敏：security_redact_secrets 开启时掩高风险明文（与请求体一致）。
             let raw_response = if log_raw_body {
-                serde_json::to_string(&resp_body).ok()
+                let body = if sec_redact {
+                    redact::redact(&resp_body)
+                } else {
+                    resp_body.clone()
+                };
+                serde_json::to_string(&body).ok()
             } else {
                 None
             };
+
+            // 响应侧扫描（security_scan_response）：非流式响应按启用规则扫描，
+            // 发现的 phase="response" 并入本次审计（风险等级/评分取较高者）。
+            let mut sec_outcome = sec_outcome.clone();
+            let mut sec_findings = sec_findings.clone();
+            if let Ok(resp_gate) = security::gate::scan_response(&state.db, resp_body.clone()).await {
+                if !resp_gate.findings.is_empty() {
+                    for f in &resp_gate.findings {
+                        sec_findings.push(f.clone());
+                    }
+                    let resp_rank = crate::security::parse_risk_level(&resp_gate.outcome.risk_level).rank();
+                    let cur_rank = crate::security::parse_risk_level(&sec_outcome.risk_level).rank();
+                    if resp_rank > cur_rank {
+                        sec_outcome.risk_level = resp_gate.outcome.risk_level.clone();
+                        sec_outcome.risk_summary = resp_gate.outcome.risk_summary.clone();
+                    }
+                    sec_outcome.risk_score += resp_gate.outcome.risk_score;
+                }
+            }
+
             spawn_log(
                 state.clone(),
                 Some(gw_key.name.clone()),
@@ -1106,6 +1138,12 @@ fn build_stream_response(
         };
         let mut had_error = false;
 
+        // 响应体日志脱敏开关（与请求体同一开关 security_redact_secrets）。
+        let sec_redact = match settings::get(&state.db, "security_redact_secrets").await {
+            Ok(Some(s)) => serde_json::from_str::<bool>(&s).unwrap_or(false),
+            _ => false,
+        };
+
         while let Some(chunk) = upstream.next().await {
             let chunk = match chunk {
                 Ok(c) => c,
@@ -1237,7 +1275,12 @@ fn build_stream_response(
                 is_retry,
                 raw_request,
                 if log_raw_body {
-                    Some(response_body_acc)
+                    let s = if sec_redact {
+                        redact::redact_text(&response_body_acc)
+                    } else {
+                        response_body_acc
+                    };
+                    Some(s)
                 } else {
                     None
                 },
@@ -1314,6 +1357,13 @@ fn build_responses_stream_response(
         rs_state.sequence_number = 1;
 
         let mut had_error = false;
+
+        // 响应体日志脱敏开关（与请求体同一开关 security_redact_secrets）。
+        let sec_redact = match settings::get(&state.db, "security_redact_secrets").await {
+            Ok(Some(s)) => serde_json::from_str::<bool>(&s).unwrap_or(false),
+            _ => false,
+        };
+
         while let Some(chunk) = data_stream.next().await {
             let chunk = match chunk {
                 Ok(c) => c,
@@ -1386,7 +1436,12 @@ fn build_responses_stream_response(
             is_retry,
             raw_request,
             if log_raw_body {
-                Some(response_body_acc)
+                let s = if sec_redact {
+                    redact::redact_text(&response_body_acc)
+                } else {
+                    response_body_acc
+                };
+                Some(s)
             } else {
                 None
             },

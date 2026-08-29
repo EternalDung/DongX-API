@@ -28,6 +28,16 @@ pub fn redact(value: &Value) -> Value {
     }
 }
 
+/// 对原始文本（如流式 SSE 累积体）做同等高风险脱敏，返回脱敏后字符串。
+/// 用于响应体日志脱敏——非 JSON 的 SSE 文本也能掩掉 sk-/AKIA/JWT 等明文。
+pub fn redact_text(text: &str) -> String {
+    let mut out = text.to_string();
+    for re in high_risk_regexes() {
+        out = re.replace_all(&out, MASK).into_owned();
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::redact;

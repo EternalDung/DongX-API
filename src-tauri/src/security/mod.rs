@@ -121,6 +121,8 @@ pub struct SecurityFinding {
     pub description: Option<String>,
     pub location: Option<String>,
     pub evidence_masked: Option<String>,
+    /// 扫描阶段：request（入站请求体）/ response（出站响应体）。落库 request_security_findings.phase。
+    pub phase: String,
 }
 
 /// 一次请求的安全审计结果汇总（写入 request_logs 的 6 个安全字段）。
@@ -282,6 +284,7 @@ mod tests {
             description: None,
             location: None,
             evidence_masked: None,
+            phase: "request".to_string(),
         }
     }
 

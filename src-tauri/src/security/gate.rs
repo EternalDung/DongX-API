@@ -87,6 +87,69 @@ pub async fn run_gate(pool: &SqlitePool, body: Value) -> Result<GateOutput, sqlx
     })
 }
 
+/// 扫描出站响应体（对齐 waliapi 的 security_scan_response 开关）。
+///
+/// 与 run_gate 的区别：
+/// - 仅当 `security_enabled` 且 `security_scan_response` 同时开启才扫描；否则返回空（无发现）。
+/// - 响应已发送给客户端，无需脱敏转发体，也不据此阻断；只产出发现与风险汇总供落库审计。
+/// - 发现统一标记 `phase = "response"`，落库 request_security_findings.phase 以区分请求阶段。
+pub async fn scan_response(pool: &SqlitePool, body: Value) -> Result<GateOutput, sqlx::Error> {
+    let enabled = bool_setting(pool, "security_enabled", true).await;
+    if !enabled {
+        return Ok(GateOutput {
+            forward_body: body,
+            outcome: SecurityOutcome::allow(),
+            findings: Vec::new(),
+            action: SecurityAction::Allow,
+        });
+    }
+
+    // 响应侧独立开关：关闭则不扫描响应（与请求扫描解耦，对齐 waliapi）。
+    let scan_response = bool_setting(pool, "security_scan_response", false).await;
+    if !scan_response {
+        return Ok(GateOutput {
+            forward_body: body,
+            outcome: SecurityOutcome::allow(),
+            findings: Vec::new(),
+            action: SecurityAction::Allow,
+        });
+    }
+
+    // 响应扫描复用同样的 SecuritySettings（含各类目开关），但模式固定 audit：
+    // 响应不触发阻断，仅记录风险等级/评分供审计。
+    let mode = match settings_get(pool, "security_mode").await {
+        Ok(Some(s)) => serde_json::from_str::<String>(&s).unwrap_or_else(|_| "audit".to_string()),
+        _ => "audit".to_string(),
+    };
+    let sec = SecuritySettings {
+        enabled,
+        mode,
+        scan_unicode: bool_setting(pool, "security_scan_unicode", true).await,
+        scan_tools: bool_setting(pool, "security_scan_tools", true).await,
+        scan_network: bool_setting(pool, "security_scan_network", true).await,
+        scan_response: true,
+        redact_secrets: false,
+        block_on_critical: false,
+    };
+
+    let builtin = BuiltinRuleRepository::get_enabled(pool).await?;
+    let custom = CustomRuleRepository::get_enabled(pool).await?;
+    let result = scanner::scan(&body, &sec, &builtin, &custom);
+
+    let (action, outcome) = decide_action(&result.findings, &sec);
+    let mut findings = result.findings;
+    for f in findings.iter_mut() {
+        f.phase = "response".to_string();
+    }
+
+    Ok(GateOutput {
+        forward_body: body,
+        outcome,
+        findings,
+        action,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,6 +267,58 @@ mod tests {
         assert!(
             on.findings.iter().any(|f| f.rule_id == "unicode.zero_width"),
             "开启 security_scan_unicode 后应检出零宽字符"
+        );
+    }
+
+    #[tokio::test]
+    async fn scan_response_off_no_findings() {
+        // security_scan_response 关闭时，响应体不扫描。
+        let pool = test_pool().await;
+        set(&pool, "security_scan_response", "false").await;
+        let body = json!({"choices":[{"message":{"content":"leak sk-abcdefghijklmnopqrstuvwx"}}]});
+        let out = scan_response(&pool, body).await.expect("gate");
+        assert!(out.findings.is_empty(), "响应扫描关闭时不应有发现");
+    }
+
+    #[tokio::test]
+    async fn scan_response_on_finds_secret_and_tags_phase() {
+        // security_scan_response 开启时，响应体中的密钥应被检出且 phase=response。
+        let pool = test_pool().await;
+        set(&pool, "security_scan_response", "true").await;
+        let body = json!({"choices":[{"message":{"content":"leak sk-abcdefghijklmnopqrstuvwx"}}]});
+        let out = scan_response(&pool, body).await.expect("gate");
+        assert!(
+            out.findings.iter().any(|f| f.rule_id == "cred.secret_token"),
+            "响应体中的密钥应被检出"
+        );
+        assert!(
+            out.findings.iter().all(|f| f.phase == "response"),
+            "响应阶段发现 phase 应为 response"
+        );
+        assert!(out.outcome.risk_level == "high");
+    }
+
+    #[tokio::test]
+    async fn scan_response_respects_unicode_toggle() {
+        // 响应扫描仍受 category 开关约束：关闭 scan_unicode 后响应内零宽字符不检出。
+        let pool = test_pool().await;
+        set(&pool, "security_scan_response", "true").await;
+        set(&pool, "security_scan_unicode", "false").await;
+        let off = scan_response(&pool, json!({"content":"\u{200B}sneaky"}))
+            .await
+            .expect("gate");
+        assert!(
+            off.findings.iter().all(|f| f.rule_id != "unicode.zero_width"),
+            "响应扫描关闭 scan_unicode 后不应检出零宽字符"
+        );
+
+        set(&pool, "security_scan_unicode", "\"true\"").await;
+        let on = scan_response(&pool, json!({"content":"\u{200B}sneaky"}))
+            .await
+            .expect("gate");
+        assert!(
+            on.findings.iter().any(|f| f.rule_id == "unicode.zero_width"),
+            "响应扫描开启 scan_unicode 后应检出零宽字符"
         );
     }
 }

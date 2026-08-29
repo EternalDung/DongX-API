@@ -87,7 +87,7 @@ GateOutput { forward_body, outcome, findings, action }
 | `security_scan_unicode` | 扫描类目 | `true` | Unicode 隐写检测（b022–b025） |
 | `security_scan_tools` | 扫描类目 | `true` | 工具/命令风险（exec.* 规则） |
 | `security_scan_network` | 扫描类目 | `true` | 外联/追踪（net.* 规则） |
-| `security_scan_response` | 响应侧 | `false` | 响应体扫描（DongX 暂未实现，仅预留） |
+| `security_scan_response` | 响应侧 | `false` | 响应体扫描（非流式响应按规则扫描，发现 phase=response 落库） |
 | `security_redact_secrets` | **行为** | `false` | 独立于模式：开启后转发体高风险脱敏 |
 | `security_block_on_critical` | **行为** | `false` | 独立于模式：Critical 命中一律阻断 |
 
@@ -167,7 +167,7 @@ GateOutput { forward_body, outcome, findings, action }
 
 - **转发体脱敏**：当 `security_redact_secrets=true`（独立于 `mode`）时，`run_gate` 对所有请求体调用 `redact::redact()`，上游收到的即为脱敏体。`sanitized` 标记 = `security_redact_secrets`。
 - **日志体脱敏（G3 请求体已完成）**：`handler.rs` 在解析 `body_json` 后、落库前对其调用 `redact::redact()` 生成脱敏副本，存入 `request_logs.request_body`（仅 `log_raw_body` 开启时落）。即本地 DB **永不落明文高风险凭证**；低/中风险（邮箱/手机/身份证）仍保留以便调试。无论 `mode` 与 `redact_secrets` 取值，日志侧一律存脱敏副本。
-- **日志体脱敏（响应体仍待做）**：`request_logs.response_body` 在 `log_raw_body` 开启时仍存原始响应，见 §8。
+- **日志体脱敏（响应体已完成）**：`log_raw_body` 开启时，`request_logs.response_body` 在 `security_redact_secrets` 开启时统一脱敏（非流式 JSON 走 `redact::redact`，流式 SSE 文本走 `redact::redact_text`），闭合 G3 响应半边。
 
 ### 4.5 与现有代码接线（接入点 = `handler.rs::run_chat_pipeline`）
 
@@ -210,7 +210,7 @@ let forward_body = gate.forward_body.clone();
 | `security_scan_unicode` | bool | `true` | Unicode 隐写检测 |
 | `security_scan_tools` | bool | `true` | 工具/命令风险检测 |
 | `security_scan_network` | bool | `true` | 外联/追踪风险检测 |
-| `security_scan_response` | bool | `false` | 响应侧安全扫描（预留，后端未接） |
+| `security_scan_response` | bool | `false` | 响应侧安全扫描（非流式响应已接，发现 phase=response 落库） |
 | `security_redact_secrets` | bool | `false` | 请求脱敏转发（独立于模式） |
 | `security_block_on_critical` | bool | `false` | 严重风险强制阻断（跨模式覆盖） |
 
@@ -279,10 +279,10 @@ let forward_body = gate.forward_body.clone();
 
 ## 8. 已知局限 / 后续项
 
-- **响应体扫描 / 响应体日志脱敏仍待做**：`security_scan_response` 开关 UI 已有、后端已读取，但响应侧扫描逻辑未接；`request_logs.response_body` 在 `log_raw_body` 开启时仍存原始响应（含可能的模型回显密钥）。响应为流式/SSE、可能非 JSON，需单独处理；列为后续项。
+- **响应体扫描 / 响应体日志脱敏（已完成）**：`security_scan_response` 后端已接——非流式响应按启用规则扫描，发现 `phase="response"` 写入 `request_security_findings` 并并入本次审计风险；`security_redact_secrets` 开启时，落库的 `request_logs.response_body`（非流式 JSON + 流式 SSE 文本，后者经 `redact::redact_text`）统一脱敏，闭合 G3 响应半边。`cargo test --lib security` 已含 `scan_response_*` 集成用例。
+  - **流式响应扫描边界**：流式/SSE 响应为逐帧文本、非完整 JSON，`scan_response` 仅覆盖非流式（JSON）响应；流式响应目前只做日志体脱敏、不做逐帧发现扫描（避免中途打断流、且 SSE 解析复杂）。代码注释与设计文档均已标注此边界。
 - **自定义规则 UI**：`security_custom_rules` 表已建、仓储已接，但前端编辑 UI 未做（P2）。
-- **单测（核心逻辑已补）**：`security/mod.rs`（`decide_action` 真值表 + `block_on_critical` 覆盖 + `is_switch_on` 开关双控 + `risk_score` 累加）、`security/scanner.rs`（密钥/身份证检出、开关关闭跳过类别、始终开启类不可关、Unicode Bidi 检出、自定义黑名单子串、1MiB 预算超限 fail-open 跳过、良性文本零误报）、`security/redact.rs`（高危串掩 `[REDACTED]`、良性/结构不变、嵌套脱敏）均已加 `#[cfg(test)]` 用例，`cargo test --lib security` 通过。
-  - **gate 集成测试仍待做**：`run_gate` 依赖 DB（读设置/规则），需 sqlite 内存库 + 跑迁移才能单测；列为后续。
+- **单测（核心逻辑已补）**：`security/mod.rs`、`security/scanner.rs`、`security/redact.rs` 均加 `#[cfg(test)]` 用例；`security/gate.rs` 补 `#[cfg(test)]` 集成测试（内存库跑迁移 003/004，覆盖 4 模式、redact_secrets 脱敏转发体、block_on_critical 跨模式、network/unicode 开关关闭跳过、新键接线、`scan_response` 响应扫描 + phase 标记），`cargo test --lib` 全绿（37 passed）。
 - **误报**：身份证/手机号正则可能误命中数字串；因默认 `audit` 不拦不改，影响可控；`block` 用户需关注告警。
 
 ---

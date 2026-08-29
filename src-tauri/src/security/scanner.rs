@@ -195,6 +195,7 @@ fn scan_string(text: &str, path: &str, ctx: &mut ScanCtx) {
                     description: rule.description.clone(),
                     location: Some(path.to_string()),
                     evidence_masked: Some(mask_evidence(m.as_str())),
+                    phase: "request".to_string(),
                 });
             }
         }
@@ -215,6 +216,7 @@ fn scan_string(text: &str, path: &str, ctx: &mut ScanCtx) {
                 description: Some(cr.pattern.clone()),
                 location: Some(path.to_string()),
                 evidence_masked: Some(mask_evidence(&cr.pattern)),
+                phase: "request".to_string(),
             });
         }
     }
