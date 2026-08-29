@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useState } from "react";
-import { ShieldAlert, RefreshCw, ChevronDown, ChevronRight } from "lucide-react";
+import { ShieldAlert, RefreshCw, ChevronDown, ChevronRight, Settings } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -17,6 +17,7 @@ import {
 import { Select } from "@/components/ui/select";
 import { auditApi, type AuditQuery } from "@/lib/api";
 import type { AuditEvent, AuditEventType, AuditSeverity } from "@/types";
+import { useNavigate } from "react-router-dom";
 
 const PAGE_SIZE = 20;
 
@@ -59,6 +60,7 @@ function formatTime(iso: string): string {
 
 export function AuditPage() {
   const toast = useToast();
+  const navigate = useNavigate();
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [severity, setSeverity] = useState("");
@@ -120,15 +122,25 @@ export function AuditPage() {
             风控规则命中、异常访问与配置变更记录
           </p>
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => load()}
-          disabled={loading}
-        >
-          <RefreshCw className={loading ? "animate-spin" : ""} />
-          刷新
-        </Button>
+        <div className="flex gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => navigate("/settings?tab=security")}
+          >
+            <Settings />
+            设置
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => load()}
+            disabled={loading}
+          >
+            <RefreshCw className={loading ? "animate-spin" : ""} />
+            刷新
+          </Button>
+        </div>
       </div>
 
       {/* 过滤 */}

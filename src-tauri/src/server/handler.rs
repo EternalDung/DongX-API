@@ -16,8 +16,9 @@ use crate::adapter::{
 };
 use crate::core::{dispatcher, failover};
 use crate::db::repository::{
-    audit_events, channel_health, channels, gateway_keys, request_logs, settings,
+    audit_events, channel_health, channels, gateway_keys, request_logs, security_findings, settings,
 };
+use crate::security::{self, SecurityAction, SecurityFinding, SecurityOutcome};
 use crate::server::auth;
 use crate::AppState;
 
@@ -169,6 +170,55 @@ async fn run_chat_pipeline(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
+    // 2.5 安全审计闸门：解析后、分发前对原始请求体扫描。
+    let gate = match security::gate::run_gate(&state.db, body_json.clone()).await {
+        Ok(g) => g,
+        Err(e) => {
+            tracing::warn!("安全闸门执行失败，fail-open 放行: {}", e);
+            security::GateOutput {
+                forward_body: body_json.clone(),
+                outcome: SecurityOutcome::allow(),
+                findings: Vec::new(),
+                action: SecurityAction::Allow,
+            }
+        }
+    };
+    let sec_outcome = gate.outcome.clone();
+    let sec_findings = gate.findings.clone();
+
+    // 严格模式命中高风险 → 直接阻断（先落日志与发现，再回 403）。
+    if gate.action == SecurityAction::Block {
+        let duration_ms = start.elapsed().as_millis() as i64;
+        spawn_log(
+            state.clone(),
+            Some(gw_key.name.clone()),
+            None,
+            model.clone(),
+            None,
+            403,
+            0,
+            0,
+            0,
+            duration_ms,
+            gate.outcome.blocked_reason.clone(),
+            is_stream,
+            false,
+            raw_request.clone(),
+            None,
+            mode,
+            sec_outcome.clone(),
+            sec_findings.clone(),
+        );
+        return error_response(
+            StatusCode::FORBIDDEN,
+            "security_blocked",
+            gate.outcome.blocked_reason.as_deref().unwrap_or("请求被安全审计阻断"),
+        );
+    }
+
+    // 实际转发体：脱敏模式下为脱敏副本，否则为原始请求体。
+    let forward_body = gate.forward_body.clone();
+
     // 3. Load retry settings (defaults: enabled, 3 retries).
     //    retry_times = 「额外重试次数」; max_attempts = retry_times + 1（含首次）。
     let retry_enabled: bool = match settings::get(&state.db, "retry_enabled").await {
@@ -189,7 +239,7 @@ async fn run_chat_pipeline(
         model: model.clone(),
         api_key_id: gw_key.id.clone(),
         is_stream,
-        request_body: body_json.clone(),
+        request_body: forward_body.clone(),
     };
     let mut fo = failover::Failover::new(state.db.clone(), ctx, max_attempts);
 
@@ -237,7 +287,7 @@ async fn run_chat_pipeline(
         };
         let proxy_req = ProxyRequest {
             model: model.clone(),
-            body: body_json.clone(),
+            body: forward_body.clone(),
             stream: is_stream,
         };
         let upstream_model = adapter::map_model(&proxy_req, &config);
@@ -277,6 +327,8 @@ async fn run_chat_pipeline(
                         raw_request.clone(),
                         None,
                         mode,
+                        sec_outcome.clone(),
+                        sec_findings.clone(),
                     );
                     // 按上游状态分类：5xx/429/408/409 计入熔断，其余 4xx 不计。
                     record_upstream_outcome(
@@ -327,6 +379,8 @@ async fn run_chat_pipeline(
                         raw_request.clone(),
                         None,
                         mode,
+                        sec_outcome.clone(),
+                        sec_findings.clone(),
                     );
                     // 上游连接/超时失败 → 可重试，计入熔断。
                     record_upstream_outcome(&state, &selected.id, false, true, &msg).await;
@@ -380,6 +434,8 @@ async fn run_chat_pipeline(
                 resp,
                 fo.is_retry(),
                 mode,
+                sec_outcome.clone(),
+                sec_findings.clone(),
             )
             .await;
         }
@@ -435,6 +491,8 @@ async fn run_chat_pipeline(
                 raw_request.clone(),
                 raw_response,
                 mode,
+                sec_outcome.clone(),
+                sec_findings.clone(),
             );
 
             // Return upstream body + status.
@@ -704,8 +762,9 @@ fn error_response(status: StatusCode, code: &str, message: &str) -> Response {
         .into_response()
 }
 
-/// Spawn an async task to insert a `request_logs` row. Fire-and-forget —
-/// logging failures must never break the response path.
+/// Spawn an async task to insert a `request_logs` row plus its security
+/// findings + suspicious audit. Fire-and-forget — failures must never break
+/// the response path (same principle as quota/health stats).
 #[allow(clippy::too_many_arguments)]
 fn spawn_log(
     state: Arc<AppState>,
@@ -724,9 +783,11 @@ fn spawn_log(
     request_body: Option<String>,
     response_body: Option<String>,
     mode: &'static str,
+    sec: SecurityOutcome,
+    findings: Vec<SecurityFinding>,
 ) {
     tokio::spawn(async move {
-        let _ = request_logs::insert(
+        let log_id = match request_logs::insert(
             &state.db,
             api_key_name.as_deref(),
             channel_name.as_deref(),
@@ -743,14 +804,59 @@ fn spawn_log(
             is_retry,
             request_body.as_deref(),
             response_body.as_deref(),
-            "none",
-            0,
-            None,
-            "none",
-            false,
-            None,
+            &sec.risk_level,
+            sec.risk_score,
+            sec.risk_summary.as_deref(),
+            &sec.security_action,
+            sec.sanitized,
+            sec.blocked_reason.as_deref(),
         )
-        .await;
+        .await
+        {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::warn!("请求日志写入失败: {}", e);
+                return;
+            }
+        };
+
+        // 安全发现明细：关联本次请求日志。
+        for f in &findings {
+            if let Err(e) =
+                security_findings::insert(&state.db, &log_id, f, &sec.security_action).await
+            {
+                tracing::warn!("安全发现写入失败: {}", e);
+            }
+        }
+
+        // 命中风险 → 写 suspicious 审计（fire-and-forget，失败仅告警）。
+        if !findings.is_empty() {
+            let severity = match sec.risk_level.as_str() {
+                "critical" | "high" => "critical",
+                "medium" => "warning",
+                _ => "info",
+            };
+            let meta = serde_json::to_string(&json!({
+                "risk_level": sec.risk_level,
+                "risk_score": sec.risk_score,
+                "action": sec.security_action,
+                "count": findings.len(),
+            }))
+            .ok();
+            let message = sec
+                .risk_summary
+                .clone()
+                .unwrap_or_else(|| "安全审计命中风险".to_string());
+            let _ = audit_events::insert(
+                &state.db,
+                "suspicious",
+                severity,
+                api_key_name.as_deref(),
+                &message,
+                meta.as_deref(),
+            )
+            .await;
+        }
     });
 }
 
@@ -847,6 +953,8 @@ async fn serve_stream(
     resp: reqwest::Response,
     is_retry: bool,
     mode: &'static str,
+    sec: SecurityOutcome,
+    findings: Vec<SecurityFinding>,
 ) -> Response {
     // `resp` 已在调用方（故障转移循环）确认是 2xx，这里直接构建 SSE。
     let converter = match channel_type {
@@ -878,6 +986,8 @@ async fn serve_stream(
             log_raw_body,
             is_retry,
             "responses",
+            sec.clone(),
+            findings.clone(),
         );
         let (parts, body) = chat_resp.into_parts();
         if !parts.status.is_success() {
@@ -896,6 +1006,8 @@ async fn serve_stream(
             log_raw_body,
             is_retry,
             mode,
+            sec,
+            findings,
         );
     }
 
@@ -915,6 +1027,8 @@ async fn serve_stream(
         log_raw_body,
         is_retry,
         mode,
+        sec,
+        findings,
     )
 }
 
@@ -950,6 +1064,8 @@ fn build_stream_response(
     log_raw_body: bool,
     is_retry: bool,
     mode: &'static str,
+    sec: SecurityOutcome,
+    findings: Vec<SecurityFinding>,
 ) -> Response {
     use tokio::sync::mpsc;
 
@@ -1121,6 +1237,8 @@ fn build_stream_response(
                     None
                 },
                 mode,
+                sec,
+                findings,
             );
         }
     });
@@ -1162,6 +1280,8 @@ fn build_responses_stream_response(
     log_raw_body: bool,
     is_retry: bool,
     mode: &'static str,
+    sec: SecurityOutcome,
+    findings: Vec<SecurityFinding>,
 ) -> Response {
     use futures_util::StreamExt;
     use tokio::sync::mpsc;
@@ -1266,6 +1386,8 @@ fn build_responses_stream_response(
                 None
             },
             mode,
+            sec,
+            findings,
         );
     });
 

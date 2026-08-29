@@ -18,7 +18,26 @@ import { applyTheme } from "@/lib/theme";
 import { formatListenUrl } from "@/lib/utils";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useToast } from "@/components/ui/toast";
+import { useSearchParams } from "react-router-dom";
 import type { Settings, ThemeMode, SecurityMode, ServerStatus } from "@/types";
+
+/** 安全审计 Tab 内 6 个检测项的复用卡片（标签 + 右上角开关） */
+function SecurityToggleCard({
+  label,
+  checked,
+  onChange,
+}: {
+  label: string;
+  checked: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <div className="flex items-start justify-between gap-2 rounded-lg border bg-card/40 px-3 py-3">
+      <p className="text-sm font-medium leading-tight">{label}</p>
+      <Switch checked={checked} onCheckedChange={onChange} />
+    </div>
+  );
+}
 
 export function SettingsPage() {
   const toast = useToast();
@@ -28,6 +47,9 @@ export function SettingsPage() {
   const [saved, setSaved] = useState(false);
   const [serverStatus, setServerStatus] = useState<ServerStatus | null>(null);
   const [serverBusy, setServerBusy] = useState(false);
+
+  const [searchParams] = useSearchParams();
+  const initialTab = searchParams.get("tab") === "security" ? "security" : "server";
 
   /** 刷新网关服务运行态（实际监听地址 + 是否需重启） */
   const loadStatus = async () => {
@@ -78,6 +100,12 @@ export function SettingsPage() {
         log_raw_body: settings.log_raw_body,
         security_enabled: settings.security_enabled,
         security_mode: settings.security_mode,
+        security_detect_unicode_stego: settings.security_detect_unicode_stego,
+        security_detect_tool_risk: settings.security_detect_tool_risk,
+        security_detect_outbound_tracking: settings.security_detect_outbound_tracking,
+        security_scan_response: settings.security_scan_response,
+        security_redact_request: settings.security_redact_request,
+        security_block_critical: settings.security_block_critical,
       };
       const result = await settingsApi.update(update);
       setSettings(result);
@@ -166,12 +194,13 @@ export function SettingsPage() {
         </div>
       </div>
 
-      <Tabs defaultValue="server" className="mt-6 gap-4">
+      <Tabs defaultValue={initialTab} className="mt-6 gap-4">
         <TabsList>
           <TabsTrigger value="server">服务配置</TabsTrigger>
           <TabsTrigger value="general">通用设置</TabsTrigger>
           <TabsTrigger value="appearance">界面设置</TabsTrigger>
           <TabsTrigger value="retry">重试策略</TabsTrigger>
+          <TabsTrigger value="security">安全审计</TabsTrigger>
         </TabsList>
 
         {/* ================= 服务配置 ================= */}
@@ -415,32 +444,97 @@ export function SettingsPage() {
                   }
                 />
               </div>
-              <div className="h-px bg-border" />
-              <div className="flex items-center justify-between max-w-md">
-                <div>
-                  <p className="text-sm font-medium">安全审计</p>
-                  <p className="text-xs text-muted-foreground">
-                    对请求内容进行敏感信息扫描与风险分级
-                  </p>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* ================= 安全审计 ================= */}
+        <TabsContent value="security">
+          <Card>
+            <CardHeader>
+              <CardTitle>安全审计</CardTitle>
+              <CardDescription>
+                对请求内容进行敏感信息扫描与风险分级，按模式处置
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-6">
+              {/*** 第一行：启用安全审计 + 安全模式 左右分栏 ***/}
+              <div className="grid gap-6 md:grid-cols-2 md:gap-8">
+                {/* 左：启用安全审计 */}
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <p className="text-sm font-medium">启用安全审计</p>
+                    <p className="mt-0.5 text-xs text-muted-foreground">
+                      扫描请求体中的密钥、身份证、手机号等敏感信息
+                    </p>
+                  </div>
+                  <Switch
+                    checked={settings.security_enabled}
+                    onCheckedChange={(v) => patch({ security_enabled: v })}
+                  />
                 </div>
-                <Switch
-                  checked={settings.security_enabled}
-                  onCheckedChange={(v) => patch({ security_enabled: v })}
+
+                {/* 右：安全模式 */}
+                <div className="grid gap-2 md:border-l md:pl-8">
+                  <Label htmlFor="sec-mode">安全模式</Label>
+                  <Select
+                    id="sec-mode"
+                    disabled={!settings.security_enabled}
+                    value={settings.security_mode}
+                    onChange={(e) =>
+                      patch({ security_mode: e.target.value as SecurityMode })
+                    }
+                  >
+                    <option value="permissive">宽松（仅记录）</option>
+                    <option value="warning">警告（中高风险标记告警）</option>
+                    <option value="redact">脱敏（高风险脱敏转发）</option>
+                    <option value="strict">严格（高风险直接阻断）</option>
+                  </Select>
+                </div>
+              </div>
+
+              {/*** 分隔 ***/}
+              <div className="h-px bg-border" />
+
+              {/*** 检测项开关：6 个独立开关，控制扫描哪类风险 ***/}
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+                <SecurityToggleCard
+                  label="Unicode 隐写检测"
+                  checked={settings.security_detect_unicode_stego}
+                  onChange={(v) => patch({ security_detect_unicode_stego: v })}
+                />
+                <SecurityToggleCard
+                  label="工具/命令风险检测"
+                  checked={settings.security_detect_tool_risk}
+                  onChange={(v) => patch({ security_detect_tool_risk: v })}
+                />
+                <SecurityToggleCard
+                  label="外联/追踪风险检测"
+                  checked={settings.security_detect_outbound_tracking}
+                  onChange={(v) => patch({ security_detect_outbound_tracking: v })}
+                />
+                <SecurityToggleCard
+                  label="响应侧安全扫描"
+                  checked={settings.security_scan_response}
+                  onChange={(v) => patch({ security_scan_response: v })}
+                />
+                <SecurityToggleCard
+                  label="请求脱敏转发"
+                  checked={settings.security_redact_request}
+                  onChange={(v) => patch({ security_redact_request: v })}
+                />
+                <SecurityToggleCard
+                  label="严重风险强制阻断"
+                  checked={settings.security_block_critical}
+                  onChange={(v) => patch({ security_block_critical: v })}
                 />
               </div>
-              <div className="grid max-w-sm grid-cols-[140px_1fr] items-center gap-4">
-                <Label htmlFor="rt-secmode">安全模式</Label>
-                <Select
-                  id="rt-secmode"
-                  disabled={!settings.security_enabled}
-                  value={settings.security_mode}
-                  onChange={(e) => patch({ security_mode: e.target.value as SecurityMode })}
-                >
-                  <option value="strict">严格（高风险直接拦截）</option>
-                  <option value="balanced">均衡（拦截 + 标记）</option>
-                  <option value="permissive">宽松（仅标记）</option>
-                </Select>
-              </div>
+
+              {/*** 底部说明 ***/}
+              <p className="text-xs text-muted-foreground">
+                「请求脱敏转发」开启后，请求体中的 API
+                Key、Token、私钥等敏感信息会在转发上游前被替换为脱敏值。「响应侧安全扫描」开启后，上游返回内容也会被扫描并记录风险。
+              </p>
             </CardContent>
           </Card>
         </TabsContent>

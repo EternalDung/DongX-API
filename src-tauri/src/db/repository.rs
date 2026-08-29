@@ -761,3 +761,40 @@ pub mod channel_health {
         Ok(())
     }
 }
+
+// ============================================================
+// security_findings: 安全审计发现明细
+// ============================================================
+pub mod security_findings {
+    use super::*;
+    use crate::security::SecurityFinding;
+
+    /// 写入一条发现明细，关联 request_logs.id（log_id）。
+    pub async fn insert(
+        pool: &SqlitePool,
+        log_id: &str,
+        finding: &SecurityFinding,
+        action: &str,
+    ) -> Result<(), sqlx::Error> {
+        let id = new_id();
+        sqlx::query(
+            "INSERT INTO request_security_findings \
+             (id, log_id, phase, category, rule_id, severity, title, description, location, evidence_masked, evidence_hash, action, created_at) \
+             VALUES (?1,?2,'request',?3,?4,?5,?6,?7,?8,?9,NULL,?10,?11)",
+        )
+        .bind(&id)
+        .bind(log_id)
+        .bind(&finding.category)
+        .bind(&finding.rule_id)
+        .bind(&finding.severity)
+        .bind(&finding.title)
+        .bind(&finding.description)
+        .bind(&finding.location)
+        .bind(&finding.evidence_masked)
+        .bind(action)
+        .bind(now())
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+}

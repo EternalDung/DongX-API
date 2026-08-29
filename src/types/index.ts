@@ -200,7 +200,13 @@ export interface DashboardStats {
 // ============================================================
 
 export type ThemeMode = "light" | "dark" | "system";
-export type SecurityMode = "strict" | "balanced" | "permissive";
+/** 安全审计模式 — 4 级风险响应策略
+ *  - permissive: 只记录（高风险也不阻断，仅落审计）
+ *  - warning:    中高风险标记告警（最低默认）
+ *  - redact:     高风险脱敏转发（敏感值替换后转发）
+ *  - strict:     高风险直接阻断（不离开本机）
+ */
+export type SecurityMode = "permissive" | "warning" | "redact" | "strict";
 
 export interface Settings {
   server_port: number;
@@ -216,6 +222,13 @@ export interface Settings {
   log_raw_body: boolean;
   security_enabled: boolean;
   security_mode: SecurityMode;
+  /** 安全审计检测项配置（仅当 security_enabled=true 时生效） */
+  security_detect_unicode_stego: boolean;
+  security_detect_tool_risk: boolean;
+  security_detect_outbound_tracking: boolean;
+  security_scan_response: boolean;
+  security_redact_request: boolean;
+  security_block_critical: boolean;
 }
 
 // ============================================================
