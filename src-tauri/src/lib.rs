@@ -6,7 +6,6 @@ mod adapter;
 mod channel_presets;
 mod responses_stream;
 mod commands;
-mod config;
 mod core;
 mod crypto;
 mod db;
