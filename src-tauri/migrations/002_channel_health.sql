@@ -1,8 +1,8 @@
 -- DongX schema v2: per-channel circuit-breaker health
 --
--- Mirrors waliapi's `channel_mode_health`: health state is persisted in the
--- DB (survives process restart) and lives in its OWN table — it is NOT mixed
--- into `request_logs` (which stays a pure audit trail).
+-- Health state is persisted in the DB (survives process restart) and lives in
+-- its OWN table — it is NOT mixed into `request_logs` (which stays a pure audit
+-- trail).
 --
 -- The dispatcher skips any channel whose breaker is "open" (cooldown_until is
 -- still in the future); `record_failure` trips the breaker after N consecutive

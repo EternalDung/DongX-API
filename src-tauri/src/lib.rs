@@ -14,6 +14,7 @@ mod error;
 mod models;
 mod security;
 mod server;
+mod tray;
 
 use std::sync::Arc;
 use tauri::Manager;
@@ -24,6 +25,10 @@ use tauri::Manager;
 /// so no Mutex is needed (unlike Java where you'd wrap a DataSource in a singleton).
 pub struct AppState {
     pub db: sqlx::SqlitePool,
+    /// 网关服务运行态句柄：查询/停止/重启数据面服务都通过它。
+    pub server: server::ServerHandle,
+    /// 关闭到托盘开关的运行态镜像（由设置页保存时更新，供窗口关闭钩子同步读取）。
+    pub close_to_tray: std::sync::Arc<std::sync::Mutex<bool>>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -38,6 +43,22 @@ pub fn run() {
             None,
         ))
         .plugin(tauri_plugin_dialog::init())
+        .on_window_event(|window, event| {
+            // 关闭到托盘：拦截关闭请求，按设置决定是否隐藏而非退出。
+            // 托盘菜单的「退出」用 app.exit(0) 强制退出，绕过此拦截。
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let should_tray = window
+                    .state::<Arc<AppState>>()
+                    .close_to_tray
+                    .lock()
+                    .map(|g| *g)
+                    .unwrap_or(false);
+                if should_tray {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             commands::channel::list_channels,
             commands::channel::create_channel,
@@ -59,6 +80,10 @@ pub fn run() {
             commands::settings::get_settings,
             commands::settings::update_settings,
             commands::settings::get_dashboard_stats,
+            commands::server::get_server_status,
+            commands::server::start_gateway_server,
+            commands::server::stop_gateway_server,
+            commands::server::restart_gateway_server,
         ])
         .setup(|app| {
             // Initialize logging before anything else
@@ -69,7 +94,8 @@ pub fn run() {
                 )
                 .init();
 
-            // Resolve db path: %APPDATA%/com.dongx.app/dongx.db
+            // Resolve db path: %APPDATA%/<tauri.conf.json identifier>/dongx.db
+            // (identifier = "com.wei.dongx", so: %APPDATA%/com.wei.dongx/dongx.db)
             let data_dir = app.path().app_data_dir()?;
             let db_path = data_dir.join("dongx.db");
 
@@ -83,7 +109,29 @@ pub fn run() {
 
             // AppState managed here; commands access it via
             // State<'_, Arc<AppState>> and clone the pool handle freely.
-            app.manage(Arc::new(AppState { db: pool.clone() }));
+
+            // 启动即应用「开机自启动」与「关闭到托盘」设置。
+            let startup_settings = tauri::async_runtime::block_on(
+                commands::settings::load_all_settings(&pool),
+            )
+            .unwrap_or_default();
+            if let Some(v) = startup_settings
+                .get("auto_start")
+                .and_then(|v| v.as_bool())
+            {
+                commands::settings::apply_autostart(app.handle(), v);
+            }
+            let close_to_tray = startup_settings
+                .get("close_to_tray")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            let app_state = Arc::new(AppState {
+                db: pool.clone(),
+                server: server::ServerHandle::new(),
+                close_to_tray: std::sync::Arc::new(std::sync::Mutex::new(close_to_tray)),
+            });
+            app.manage(app_state);
 
             // Spawn Axum HTTP server (data plane) in background
             let handle = app.handle().clone();
@@ -92,6 +140,9 @@ pub fn run() {
                     tracing::error!("Axum server error: {}", e);
                 }
             });
+
+            // 系统托盘 + 窗口关闭钩子（最小化/关闭到托盘的前置条件）
+            tray::create(app)?;
 
             Ok(())
         })

@@ -217,3 +217,23 @@ export interface Settings {
   security_enabled: boolean;
   security_mode: SecurityMode;
 }
+
+// ============================================================
+// 网关服务状态
+// ============================================================
+
+/** 网关服务运行态快照（对应 Rust ServerStatus） */
+export interface ServerStatus {
+  /** 服务当前是否在运行 */
+  running: boolean;
+  /** 实际监听地址（未运行时为 null） */
+  host: string | null;
+  port: number | null;
+  /** 完整端点 URL（未运行时为 null） */
+  url: string | null;
+  /** settings 中配置的值（重启服务后才会成为运行态值） */
+  configured_host: string;
+  configured_port: number;
+  /** 配置与运行态不一致 → 需重启服务才生效 */
+  restart_required: boolean;
+}

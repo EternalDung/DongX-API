@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { RefreshCw, Save } from "lucide-react";
+import { RefreshCw, Save, RotateCw, Play, Square } from "lucide-react";
 import {
   Card,
   CardContent,
@@ -13,11 +13,12 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Select } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { settingsApi, type SettingsUpdate } from "@/lib/api";
+import { settingsApi, serverApi, type SettingsUpdate } from "@/lib/api";
 import { applyTheme } from "@/lib/theme";
+import { formatListenUrl } from "@/lib/utils";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useToast } from "@/components/ui/toast";
-import type { Settings, ThemeMode, SecurityMode } from "@/types";
+import type { Settings, ThemeMode, SecurityMode, ServerStatus } from "@/types";
 
 export function SettingsPage() {
   const toast = useToast();
@@ -25,6 +26,17 @@ export function SettingsPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [serverStatus, setServerStatus] = useState<ServerStatus | null>(null);
+  const [serverBusy, setServerBusy] = useState(false);
+
+  /** 刷新网关服务运行态（实际监听地址 + 是否需重启） */
+  const loadStatus = async () => {
+    try {
+      setServerStatus(await serverApi.status());
+    } catch (e) {
+      console.error("Failed to load server status:", e);
+    }
+  };
 
   const load = async () => {
     setLoading(true);
@@ -39,6 +51,7 @@ export function SettingsPage() {
 
   useEffect(() => {
     load();
+    loadStatus();
   }, []);
 
   /** 局部更新字段 */
@@ -69,7 +82,14 @@ export function SettingsPage() {
       const result = await settingsApi.update(update);
       setSettings(result);
       setSaved(true);
-      toast.success("设置已保存");
+      // 重新拉运行态，据此判断监听地址改动是否还需重启
+      const status = await serverApi.status().catch(() => null);
+      if (status) setServerStatus(status);
+
+      const changed =
+        !!status &&
+        (result.server_host !== status.host || result.server_port !== status.port);
+      toast.success(changed ? "设置已保存，重启服务后生效" : "设置已保存");
       setTimeout(() => setSaved(false), 2000);
     } catch (e) {
       console.error("Failed to save settings:", e);
@@ -78,6 +98,44 @@ export function SettingsPage() {
       setSaving(false);
     }
   };
+
+  /** 运行态与当前表单配置不一致 → 改动尚未生效 */
+  const pendingChange =
+    !!settings &&
+    !!serverStatus?.running &&
+    (settings.server_host !== serverStatus.host ||
+      settings.server_port !== serverStatus.port);
+
+  /** 统一的运行结果反馈：成功刷新状态，失败提示原因 */
+  const runServerAction = async (action: () => Promise<ServerStatus>, okMsg: (s: ServerStatus) => string) => {
+    setServerBusy(true);
+    try {
+      const s = await action();
+      setServerStatus(s);
+      toast.success(okMsg(s));
+    } catch (e) {
+      // 启动/重启失败时服务可能已停，拉一次真实状态避免显示成旧地址
+      setServerStatus(await serverApi.status().catch(() => null));
+      toast.error(String(e));
+    } finally {
+      setServerBusy(false);
+    }
+  };
+
+  const handleRestart = () =>
+    runServerAction(
+      serverApi.restart,
+      (s) => `服务已重启：${formatListenUrl(s.host, s.port)}`,
+    );
+
+  const handleStop = () =>
+    runServerAction(serverApi.stop, () => "服务已停止");
+
+  const handleStart = () =>
+    runServerAction(
+      serverApi.start,
+      (s) => `服务已启动：${formatListenUrl(s.host, s.port)}`,
+    );
 
   if (loading || !settings) {
     return (
@@ -122,7 +180,7 @@ export function SettingsPage() {
             <CardHeader>
               <CardTitle>网关服务</CardTitle>
               <CardDescription>
-                Axum 数据面 HTTP 服务监听地址，修改后重启应用生效
+                Axum 数据面 HTTP 服务监听地址，修改后需重启服务生效
               </CardDescription>
             </CardHeader>
             <CardContent className="grid gap-4">
@@ -151,11 +209,65 @@ export function SettingsPage() {
                 />
               </div>
               <p className="text-xs text-muted-foreground">
-                OpenAI 兼容端点：
+                配置端点：
                 <code className="rounded bg-muted px-1.5 py-0.5 font-mono">
-                  http://{settings.server_host}:{settings.server_port}/v1
+                  {formatListenUrl(settings.server_host, settings.server_port)}
                 </code>
               </p>
+
+              <div className="h-px bg-border" />
+
+              {/* 运行状态：展示服务实际监听的地址，与上方配置值对照 */}
+              <div className="flex items-start justify-between gap-4 max-w-md">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium">运行状态</p>
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    {!serverStatus
+                      ? "加载中..."
+                      : serverStatus.running
+                        ? `实际监听 ${formatListenUrl(serverStatus.host, serverStatus.port)}`
+                        : `服务未运行（配置端口 ${serverStatus.configured_port}）`}
+                  </p>
+                  {pendingChange && (
+                    <p className="mt-1 text-xs text-warning">
+                      监听地址/端口已修改，重启服务后生效
+                    </p>
+                  )}
+                </div>
+                <div className="flex shrink-0 gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handleRestart}
+                    disabled={serverBusy}
+                    title="按当前配置重启服务"
+                  >
+                    <RotateCw className={serverBusy ? "animate-spin" : ""} />
+                    重启
+                  </Button>
+                  {serverStatus?.running ? (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleStop}
+                      disabled={serverBusy}
+                    >
+                      <Square />
+                      停止
+                    </Button>
+                  ) : (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleStart}
+                      disabled={serverBusy}
+                    >
+                      <Play />
+                      启动
+                    </Button>
+                  )}
+                </div>
+              </div>
             </CardContent>
           </Card>
         </TabsContent>

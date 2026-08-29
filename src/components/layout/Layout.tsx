@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { NavLink, Outlet } from "react-router-dom";
 import {
   LayoutDashboard,
@@ -13,8 +13,10 @@ import {
   Moon,
   BookOpen,
 } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn, formatListenUrl } from "@/lib/utils";
 import { applyTheme, getStoredTheme, type ThemeMode } from "@/lib/theme";
+import { serverApi } from "@/lib/api";
+import type { ServerStatus } from "@/types";
 
 const NAV_ITEMS = [
   { to: "/", label: "仪表盘", icon: LayoutDashboard, end: true },
@@ -61,6 +63,72 @@ function ThemeToggle() {
           </button>
         );
       })}
+    </div>
+  );
+}
+
+/**
+ * 侧边栏底部的网关运行状态。
+ *
+ * 地址取自服务的运行态监听地址（而非设置里填的配置值），两者不一致时
+ * 说明改动还没生效——这时以地址旁标注提示，避免误导。
+ */
+function GatewayStatus() {
+  const [status, setStatus] = useState<ServerStatus | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const load = async () => {
+      try {
+        const s = await serverApi.status();
+        if (!cancelled) setStatus(s);
+      } catch (e) {
+        console.error("Failed to load gateway status:", e);
+      }
+    };
+
+    load();
+    // 轮询：服务可能在设置页被停止/重启，侧边栏需跟随更新
+    const timer = setInterval(load, 10_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, []);
+
+  const running = status?.running ?? false;
+  // 配置与运行态不一致 → 展示的是旧地址，标注「待重启」避免误读
+  const stale = running && (status?.restart_required ?? false);
+
+  return (
+    <div className="border-t p-4">
+      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+        <span className="relative flex h-2 w-2">
+          {running && (
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-success/60" />
+          )}
+          <span
+            className={cn(
+              "relative inline-flex h-2 w-2 rounded-full",
+              running ? "bg-success" : "bg-muted-foreground/40",
+            )}
+          />
+        </span>
+        {running ? "网关运行中" : status ? "网关已停止" : "网关状态加载中"}
+      </div>
+      <div className="mt-1 font-mono text-[11px] text-muted-foreground">
+        {running && status
+          ? formatListenUrl(status.host, status.port)
+          : status
+            ? `配置端口 ${status.configured_port}`
+            : "--"}
+      </div>
+      {stale && (
+        <div className="mt-1 text-[11px] text-warning">
+          配置已变更，重启服务后生效
+        </div>
+      )}
     </div>
   );
 }
@@ -127,18 +195,7 @@ export default function Layout() {
         </nav>
 
         {/* Footer status */}
-        <div className="border-t p-4">
-          <div className="flex items-center gap-2 text-xs text-muted-foreground">
-            <span className="relative flex h-2 w-2">
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-success/60" />
-              <span className="relative inline-flex h-2 w-2 rounded-full bg-success" />
-            </span>
-            网关运行中
-          </div>
-          <div className="mt-1 font-mono text-[11px] text-muted-foreground">
-            localhost:9842
-          </div>
-        </div>
+        <GatewayStatus />
       </aside>
 
       {/* Main column */}

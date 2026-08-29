@@ -8,6 +8,7 @@ import {
   ArrowUpRight,
   KeyRound,
   BarChart3,
+  ShieldCheck,
 } from "lucide-react";
 import {
   Card,
@@ -20,6 +21,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { EmptyState } from "@/components/ui/empty-state";
 import { StatusBadge, type StatusTone } from "@/components/ui/status-badge";
+import { cn } from "@/lib/utils";
 import { statsApi, channelApi } from "@/lib/api";
 import type { DashboardStats, Channel } from "@/types";
 
@@ -35,37 +37,114 @@ const CHANNEL_TONE: Record<number, { tone: StatusTone; label: string }> = {
   0: { tone: "secondary", label: "禁用" },
 };
 
+type StatTone = "primary" | "success" | "warning" | "destructive";
+
 interface StatDef {
   title: string;
   value: string;
   icon: typeof Activity;
   description: string;
   hint?: string;
+  /** 有 tone 时数字/图标/进度条走该色，底部说明用状态点代替箭头 */
+  tone?: StatTone;
+  /** 0-100，存在时渲染一条占比进度条 */
+  progress?: number;
 }
+
+const TONE_VALUE: Record<StatTone, string> = {
+  primary: "",
+  success: "text-success",
+  warning: "text-warning",
+  destructive: "text-destructive",
+};
+
+const TONE_BOX: Record<StatTone, string> = {
+  primary: "bg-primary/10 text-primary ring-primary/15 group-hover:bg-primary/15",
+  success: "bg-success/10 text-success ring-success/15 group-hover:bg-success/15",
+  warning: "bg-warning/10 text-warning ring-warning/15 group-hover:bg-warning/15",
+  destructive:
+    "bg-destructive/10 text-destructive ring-destructive/15 group-hover:bg-destructive/15",
+};
+
+const TONE_BAR: Record<StatTone, string> = {
+  primary: "bg-primary",
+  success: "bg-success",
+  warning: "bg-warning",
+  destructive: "bg-destructive",
+};
+
+const TONE_DOT: Record<StatTone, string> = {
+  primary: "bg-primary",
+  success: "bg-success",
+  warning: "bg-warning",
+  destructive: "bg-destructive",
+};
 
 function StatCard({ stat }: { stat: StatDef }) {
   const Icon = stat.icon;
+  const tone = stat.tone ?? "primary";
   return (
     <Card className="group relative overflow-hidden transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md">
       <CardContent className="pt-6">
         <div className="flex items-start justify-between">
           <div className="space-y-1">
             <p className="text-sm text-muted-foreground">{stat.title}</p>
-            <p className="text-3xl font-semibold tracking-tight tabular-nums">
+            <p
+              className={cn(
+                "text-3xl font-semibold tracking-tight tabular-nums",
+                TONE_VALUE[tone],
+              )}
+            >
               {stat.value}
             </p>
           </div>
-          <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-primary/10 text-primary ring-1 ring-inset ring-primary/15 transition-colors group-hover:bg-primary/15">
+          <div
+            className={cn(
+              "flex h-11 w-11 items-center justify-center rounded-xl ring-1 ring-inset transition-colors",
+              TONE_BOX[tone],
+            )}
+          >
             <Icon className="h-5 w-5" />
           </div>
         </div>
+
+        {stat.progress !== undefined && (
+          <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-muted">
+            <div
+              className={cn(
+                "h-full rounded-full transition-all duration-300",
+                TONE_BAR[tone],
+              )}
+              style={{ width: `${Math.min(100, Math.max(0, stat.progress))}%` }}
+            />
+          </div>
+        )}
+
         <div className="mt-3 flex items-center gap-1.5 text-xs text-muted-foreground">
-          <ArrowUpRight className="h-3.5 w-3.5 text-success" />
+          {stat.tone ? (
+            <span className={cn("h-1.5 w-1.5 rounded-full", TONE_DOT[tone])} />
+          ) : (
+            <ArrowUpRight className="h-3.5 w-3.5 text-success" />
+          )}
           <span>{stat.description}</span>
         </div>
       </CardContent>
     </Card>
   );
+}
+
+/** 启用渠道占总渠道的百分比；无渠道时返回 null（不展示误导性的 0%） */
+function calcAvailability(stats: DashboardStats | null): number | null {
+  if (!stats || stats.total_channels <= 0) return null;
+  return Math.round((stats.active_channels / stats.total_channels) * 100);
+}
+
+/** 可用率配色阈值：≥80 健康 / ≥50 警告 / 否则危险 */
+function availabilityTone(pct: number | null): StatTone {
+  if (pct === null) return "primary";
+  if (pct >= 80) return "success";
+  if (pct >= 50) return "warning";
+  return "destructive";
 }
 
 export function DashboardPage() {
@@ -90,6 +169,8 @@ export function DashboardPage() {
     load();
   }, []);
 
+  const availability = calcAvailability(stats);
+
   const cards: StatDef[] = [
     {
       title: "今日请求",
@@ -108,6 +189,17 @@ export function DashboardPage() {
       value: stats ? `${stats.active_channels}/${stats.total_channels}` : "--",
       icon: Network,
       description: "启用中 / 总渠道数",
+    },
+    {
+      title: "服务可用率",
+      value: availability === null ? "--" : `${availability}%`,
+      icon: ShieldCheck,
+      description:
+        availability === null || !stats
+          ? "暂无渠道，前往渠道管理添加"
+          : `活跃 ${stats.active_channels} / 总 ${stats.total_channels} 渠道`,
+      tone: availabilityTone(availability),
+      progress: availability ?? undefined,
     },
     {
       title: "平均延迟",
@@ -153,7 +245,7 @@ export function DashboardPage() {
       {/* 统计卡片 */}
       <div className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         {loading
-          ? Array.from({ length: 4 }).map((_, i) => (
+          ? Array.from({ length: 8 }).map((_, i) => (
               <Card key={i}>
                 <CardContent className="pt-6">
                   <div className="flex items-start justify-between">

@@ -5,7 +5,7 @@ use sqlx::SqlitePool;
 use crate::core::dispatcher::{self, DispatchContext, SelectedChannel};
 use crate::error::{AppError, AppResult};
 
-/// 单次请求内的「故障转移」状态机，参照 waliapi 的 `AttemptFlow`。
+/// 单次请求内的「故障转移」状态机。
 ///
 /// 状态流转（每次 `next()` 推进一环）：
 ///
@@ -20,9 +20,8 @@ use crate::error::{AppError, AppResult};
 ///   候选耗尽 / 重试次数耗尽 ──▶ Exhausted
 /// ```
 ///
-/// 与 waliapi 的差异：DongX 只做「渠道级」故障转移（waliapi 也是渠道级），
-/// 不跨协议组降级（DongX 当前没有协议优先级概念）。熔断判定复用持久化的
-/// `channel_health` 表（与 waliapi 的 `channel_mode_health` 同思路）。
+/// DongX 只做「渠道级」故障转移，不跨协议组降级（DongX 当前没有协议优先级
+/// 概念）。熔断判定复用持久化的 `channel_health` 表。
 pub struct Failover {
     pool: SqlitePool,
     ctx: DispatchContext,

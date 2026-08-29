@@ -130,7 +130,7 @@ async fn run_chat_pipeline(
     let max_attempts = if retry_enabled { retry_times + 1 } else { 1 };
 
     // 4. Dispatch + forward, wrapped in an automatic channel-failover state
-    //    machine (core/failover.rs, modelled after waliapi's AttemptFlow):
+    //    machine (core/failover.rs):
     //    pick a candidate channel -> forward -> on a *retryable* failure, record
     //    it against the circuit breaker and try the next candidate channel.
     let ctx = dispatcher::DispatchContext {
@@ -315,6 +315,7 @@ async fn run_chat_pipeline(
             return serve_stream(
                 state.clone(),
                 gw_key.name.clone(),
+                gw_key.id.clone(),
                 selected.name.clone(),
                 selected.id.clone(),
                 model.clone(),
@@ -695,7 +696,7 @@ fn spawn_log(
     });
 }
 
-/// 上游 HTTP 状态是否应计入熔断器（参考 waliapi 的错误分类思想）：
+/// 上游 HTTP 状态是否应计入熔断器（按错误分类思想）：
 /// 5xx / 429 / 408 / 409 = 可重试的上游故障 → 计入熔断；
 /// 其余（401/403 鉴权、400/422 客户端错误）不是渠道本身的问题 → 不计入。
 fn is_retryable_status(status: Option<u16>) -> bool {
@@ -775,6 +776,7 @@ async fn acquire_stream_response(
 async fn serve_stream(
     state: Arc<AppState>,
     gw_key_name: String,
+    gw_key_id: String,
     channel_name: String,
     _channel_id: String,
     model: String,
@@ -803,6 +805,7 @@ async fn serve_stream(
         let chat_resp = build_stream_response(
             state.clone(),
             gw_key_name.clone(),
+            Some(gw_key_id.clone()),
             channel_name.clone(),
             model.clone(),
             upstream_model.clone(),
@@ -811,7 +814,9 @@ async fn serve_stream(
             raw_request.clone(),
             resp,
             converter,
-            false, // do_log: the Responses converter below logs instead
+            // do_log=false: this pass is a pure Chat->Chat relay; the Responses
+            // converter below owns the log AND the quota debit.
+            false,
             log_raw_body,
             is_retry,
             "responses",
@@ -824,6 +829,7 @@ async fn serve_stream(
             body,
             state,
             gw_key_name,
+            Some(gw_key_id),
             channel_name,
             model,
             upstream_model,
@@ -838,6 +844,7 @@ async fn serve_stream(
     build_stream_response(
         state,
         gw_key_name,
+        Some(gw_key_id),
         channel_name,
         model,
         upstream_model,
@@ -846,7 +853,7 @@ async fn serve_stream(
         raw_request,
         resp,
         converter,
-        true, // do_log
+        true, // do_log — also owns the end-of-stream quota debit
         log_raw_body,
         is_retry,
         mode,
@@ -858,6 +865,10 @@ async fn serve_stream(
 /// Token usage is scanned from the stream and written to the log at
 /// end-of-stream (the streaming usage arrives on a dedicated frame).
 ///
+/// `do_log` marks which pass owns the request's end-of-stream bookkeeping: the
+/// log row AND the gateway-key quota debit. Only one pass may do it, otherwise a
+/// Responses call (relay + converter) would debit twice.
+///
 /// `Body::from_stream` requires `S: TryStream + Send + 'static`, where `TryStream`
 /// comes from `futures-core` 0.3. We isolate the upstream reading + SSE conversion
 /// inside a spawned task and push converted frames through an `mpsc` channel. The
@@ -868,6 +879,7 @@ async fn serve_stream(
 fn build_stream_response(
     state: Arc<AppState>,
     gw_key_name: String,
+    gw_key_id: Option<String>,
     channel_name: String,
     model: String,
     upstream_model: String,
@@ -1009,6 +1021,17 @@ fn build_stream_response(
 
         let duration_ms = start.elapsed().as_millis() as i64;
         if do_log {
+            // Debit the gateway key quota. Unlike the non-streaming path (which
+            // only debits an already-successful response), a stream can break
+            // mid-flight after upstream has generated billable tokens — so we
+            // debit whatever the stream actually reported, even when
+            // `had_error` is set. A break before any usage frame leaves
+            // `total_tokens` at 0, so nothing is debited in that case.
+            if acc.total_tokens > 0 {
+                if let Some(ref key_id) = gw_key_id {
+                    let _ = gateway_keys::add_quota_used(&state.db, key_id, acc.total_tokens).await;
+                }
+            }
             spawn_log(
                 state,
                 Some(gw_key_name),
@@ -1066,6 +1089,7 @@ fn build_responses_stream_response(
     body: Body,
     state: Arc<AppState>,
     gw_key_name: String,
+    gw_key_id: Option<String>,
     channel_name: String,
     model: String,
     upstream_model: String,
@@ -1143,8 +1167,16 @@ fn build_responses_stream_response(
             }
         }
 
-        // End-of-stream: write the request log with the full Response-shaped body.
+        // End-of-stream: debit the gateway key quota, then write the request log
+        // with the full Response-shaped body. The relay pass in
+        // `build_stream_response` runs with do_log=false, so this is the single
+        // place the quota is charged for a Responses call.
         let duration_ms = start.elapsed().as_millis() as i64;
+        if acc.total_tokens > 0 {
+            if let Some(ref key_id) = gw_key_id {
+                let _ = gateway_keys::add_quota_used(&state.db, key_id, acc.total_tokens).await;
+            }
+        }
         spawn_log(
             state,
             Some(gw_key_name),

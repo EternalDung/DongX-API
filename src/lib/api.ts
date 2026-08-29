@@ -21,6 +21,7 @@ import type {
   AuditEvent,
   DashboardStats,
   Settings,
+  ServerStatus,
 } from "@/types";
 
 // ============================================================
@@ -211,9 +212,30 @@ export const settingsApi = {
   /** 获取完整系统设置 */
   get: (): Promise<Settings> => invoke<Settings>("get_settings"),
 
-  /** 部分更新系统设置（只需传变更字段） */
+  /** 部分更新系统设置（只需传变更字段），返回回写后的完整设置 */
   update: (update: SettingsUpdate): Promise<Settings> =>
     invoke<Settings>("update_settings", { update }),
+};
+
+// ============================================================
+// 网关服务 API
+// 数据面服务的运行态查询与控制（启动/停止/重启）
+// ============================================================
+
+export const serverApi = {
+  /** 查询服务运行状态（含实际监听地址与配置地址） */
+  status: (): Promise<ServerStatus> => invoke<ServerStatus>("get_server_status"),
+
+  /** 启动服务（未运行时） */
+  start: (): Promise<ServerStatus> =>
+    invoke<ServerStatus>("start_gateway_server"),
+
+  /** 停止服务 */
+  stop: (): Promise<ServerStatus> => invoke<ServerStatus>("stop_gateway_server"),
+
+  /** 按最新配置重启服务（改端口/监听地址后调用） */
+  restart: (): Promise<ServerStatus> =>
+    invoke<ServerStatus>("restart_gateway_server"),
 };
 
 // ============================================================

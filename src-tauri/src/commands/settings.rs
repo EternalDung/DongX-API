@@ -1,11 +1,28 @@
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use crate::db::repository::{settings as settings_repo, stats};
 use crate::error::AppResult;
 use crate::AppState;
+
+/// 应用开机自启动设置。
+///
+/// 同步 API（tauri-plugin-autostart 的 enable/disable 本身不是 async）。
+/// 失败仅告警，不阻断主流程（例如 dev 模式下注册表写入可能受限）。
+pub fn apply_autostart(app: &AppHandle, enable: bool) {
+    use tauri_plugin_autostart::ManagerExt;
+    let mgr = app.autolaunch();
+    let res = if enable { mgr.enable() } else { mgr.disable() };
+    if let Err(e) = res {
+        tracing::warn!(
+            "设置开机自启动失败 (enable={}): {}",
+            enable,
+            e
+        );
+    }
+}
 
 /// Settings partial update payload (mirrors frontend SettingsUpdate).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,14 +60,17 @@ const DEFAULTS: &str = r#"{
     "security_mode": "balanced"
 }"#;
 
-/// Get all settings (stored values override built-in defaults).
-#[tauri::command]
-pub async fn get_settings(state: State<'_, Arc<AppState>>) -> AppResult<serde_json::Value> {
+/// Load settings: built-in defaults merged with stored values.
+///
+/// `pub` 以便 `setup` 在启动时读取自启动 / 关闭到托盘等设置并立即生效。
+pub async fn load_all_settings(pool: &sqlx::SqlitePool) -> AppResult<serde_json::Value> {
     let mut obj: serde_json::Map<String, serde_json::Value> =
         serde_json::from_str(DEFAULTS).unwrap_or_default();
 
-    let rows = settings_repo::get_all(&state.db).await?;
+    let rows = settings_repo::get_all(pool).await?;
     for row in rows {
+        // 存储值是 JSON 编码后的字符串；解析失败（脏数据）时保留默认值，
+        // 而不是把整份 settings 打断。
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&row.value) {
             obj.insert(row.key, v);
         }
@@ -59,9 +79,16 @@ pub async fn get_settings(state: State<'_, Arc<AppState>>) -> AppResult<serde_js
     Ok(serde_json::Value::Object(obj))
 }
 
+/// Get all settings (stored values override built-in defaults).
+#[tauri::command]
+pub async fn get_settings(state: State<'_, Arc<AppState>>) -> AppResult<serde_json::Value> {
+    load_all_settings(&state.db).await
+}
+
 /// Update settings (partial update — only provided fields are written).
 #[tauri::command]
 pub async fn update_settings(
+    app: AppHandle,
     update: SettingsUpdate,
     state: State<'_, Arc<AppState>>,
 ) -> AppResult<serde_json::Value> {
@@ -92,7 +119,18 @@ pub async fn update_settings(
         settings_repo::upsert_many(&state.db, &entries).await?;
     }
 
-    Ok(serde_json::json!({ "status": "updated" }))
+    // 自启动：保存即应用（开关与系统登录项保持同步）
+    if let Some(v) = update.auto_start {
+        apply_autostart(&app, v);
+    }
+    // 关闭到托盘：更新运行态标志，供 on_window_event 同步读取
+    if let Some(v) = update.close_to_tray {
+        *state.close_to_tray.lock().unwrap() = v;
+    }
+
+    // 回写后的完整 settings（不是 {status:"updated"}）：前端直接拿它做
+    // setSettings，契约与 get_settings 一致，避免把状态对象覆盖成状态码。
+    load_all_settings(&state.db).await
 }
 
 /// Get dashboard statistics (aggregated from request_logs + channels + gateway_keys).
