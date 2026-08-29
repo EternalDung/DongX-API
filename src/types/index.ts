@@ -200,13 +200,13 @@ export interface DashboardStats {
 // ============================================================
 
 export type ThemeMode = "light" | "dark" | "system";
-/** 安全审计模式 — 4 级风险响应策略
- *  - permissive: 只记录（高风险也不阻断，仅落审计）
- *  - warning:    中高风险标记告警（最低默认）
- *  - redact:     高风险脱敏转发（敏感值替换后转发）
- *  - strict:     高风险直接阻断（不离开本机）
+/** 安全审计模式 — 4 级风险响应策略（对齐 waliapi）
+ *  - audit:  只审计（记录风险，不影响请求）
+ *  - warn:   中高风险标记告警
+ *  - redact: 高风险脱敏转发（敏感值替换后转发）
+ *  - block:  高风险直接阻断（不离开本机）
  */
-export type SecurityMode = "permissive" | "warning" | "redact" | "strict";
+export type SecurityMode = "audit" | "warn" | "redact" | "block";
 
 export interface Settings {
   server_port: number;
@@ -222,13 +222,13 @@ export interface Settings {
   log_raw_body: boolean;
   security_enabled: boolean;
   security_mode: SecurityMode;
-  /** 安全审计检测项配置（仅当 security_enabled=true 时生效） */
-  security_detect_unicode_stego: boolean;
-  security_detect_tool_risk: boolean;
-  security_detect_outbound_tracking: boolean;
+  /** 安全审计检测项配置（仅当 security_enabled=true 时生效，对齐 waliapi） */
+  security_scan_unicode: boolean;
+  security_scan_tools: boolean;
+  security_scan_network: boolean;
   security_scan_response: boolean;
-  security_redact_request: boolean;
-  security_block_critical: boolean;
+  security_redact_secrets: boolean;
+  security_block_on_critical: boolean;
 }
 
 // ============================================================

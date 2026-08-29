@@ -100,12 +100,12 @@ export function SettingsPage() {
         log_raw_body: settings.log_raw_body,
         security_enabled: settings.security_enabled,
         security_mode: settings.security_mode,
-        security_detect_unicode_stego: settings.security_detect_unicode_stego,
-        security_detect_tool_risk: settings.security_detect_tool_risk,
-        security_detect_outbound_tracking: settings.security_detect_outbound_tracking,
+        security_scan_unicode: settings.security_scan_unicode,
+        security_scan_tools: settings.security_scan_tools,
+        security_scan_network: settings.security_scan_network,
         security_scan_response: settings.security_scan_response,
-        security_redact_request: settings.security_redact_request,
-        security_block_critical: settings.security_block_critical,
+        security_redact_secrets: settings.security_redact_secrets,
+        security_block_on_critical: settings.security_block_on_critical,
       };
       const result = await settingsApi.update(update);
       setSettings(result);
@@ -485,10 +485,10 @@ export function SettingsPage() {
                       patch({ security_mode: e.target.value as SecurityMode })
                     }
                   >
-                    <option value="permissive">宽松（仅记录）</option>
-                    <option value="warning">警告（中高风险标记告警）</option>
+                    <option value="audit">只审计（仅记录风险，不影响请求）</option>
+                    <option value="warn">警告（中高风险标记告警）</option>
                     <option value="redact">脱敏（高风险脱敏转发）</option>
-                    <option value="strict">严格（高风险直接阻断）</option>
+                    <option value="block">阻断（高风险直接阻断）</option>
                   </Select>
                 </div>
               </div>
@@ -500,18 +500,18 @@ export function SettingsPage() {
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
                 <SecurityToggleCard
                   label="Unicode 隐写检测"
-                  checked={settings.security_detect_unicode_stego}
-                  onChange={(v) => patch({ security_detect_unicode_stego: v })}
+                  checked={settings.security_scan_unicode}
+                  onChange={(v) => patch({ security_scan_unicode: v })}
                 />
                 <SecurityToggleCard
                   label="工具/命令风险检测"
-                  checked={settings.security_detect_tool_risk}
-                  onChange={(v) => patch({ security_detect_tool_risk: v })}
+                  checked={settings.security_scan_tools}
+                  onChange={(v) => patch({ security_scan_tools: v })}
                 />
                 <SecurityToggleCard
                   label="外联/追踪风险检测"
-                  checked={settings.security_detect_outbound_tracking}
-                  onChange={(v) => patch({ security_detect_outbound_tracking: v })}
+                  checked={settings.security_scan_network}
+                  onChange={(v) => patch({ security_scan_network: v })}
                 />
                 <SecurityToggleCard
                   label="响应侧安全扫描"
@@ -520,13 +520,13 @@ export function SettingsPage() {
                 />
                 <SecurityToggleCard
                   label="请求脱敏转发"
-                  checked={settings.security_redact_request}
-                  onChange={(v) => patch({ security_redact_request: v })}
+                  checked={settings.security_redact_secrets}
+                  onChange={(v) => patch({ security_redact_secrets: v })}
                 />
                 <SecurityToggleCard
                   label="严重风险强制阻断"
-                  checked={settings.security_block_critical}
-                  onChange={(v) => patch({ security_block_critical: v })}
+                  checked={settings.security_block_on_critical}
+                  onChange={(v) => patch({ security_block_on_critical: v })}
                 />
               </div>
 

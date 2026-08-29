@@ -91,18 +91,23 @@ impl SecurityAction {
     }
 }
 
-/// 安全设置（来自 settings KV 表的 7 个键）。
+/// 安全设置（来自 settings KV 表）。
+/// 对齐 waliapi：4 模式(audit/warn/redact/block) + 6 开关(3 检测 + 响应 + 2 行为)。
 #[derive(Debug, Clone)]
 pub struct SecuritySettings {
     pub enabled: bool,
-    /// permissive | warning | redact | strict
+    /// audit | warn | redact | block
     pub mode: String,
-    pub scan_credentials: bool,
-    pub scan_pii: bool,
-    pub scan_payment: bool,
+    /// 3 个可被独立开关控制的扫描类目（对齐 waliapi）。
+    pub scan_unicode: bool,
+    pub scan_tools: bool,
     pub scan_network: bool,
-    pub scan_code_exec: bool,
-    pub scan_prompt_injection: bool,
+    /// 响应侧扫描开关（DongX 暂未实现响应扫描，仅预留）。
+    pub scan_response: bool,
+    /// 行为开关：独立于模式，控制转发体脱敏（对齐 waliapi redact_secrets）。
+    pub redact_secrets: bool,
+    /// 行为开关：跨模式覆盖，Critical 一律阻断（对齐 waliapi block_on_critical）。
+    pub block_on_critical: bool,
 }
 
 /// 单条风险发现（对应 request_security_findings 一行）。
@@ -143,15 +148,14 @@ impl SecurityOutcome {
     }
 }
 
-/// toggle_key -> 对应的 6 个检测开关。NULL/未知 -> 常开（true）。
+/// toggle_key -> 对应的 3 个可切换扫描类目开关。
+/// 仅 unicode/tools/network 受独立开关控制；NULL/未知/凭证/PII/支付/命令/提示注入
+/// 等类目视为常开（true，与 waliapi 一致——这些类别不可单独关闭）。
 pub fn is_switch_on(s: &SecuritySettings, toggle_key: &str) -> bool {
     match toggle_key {
-        "scan_credentials" => s.scan_credentials,
-        "scan_pii" => s.scan_pii,
-        "scan_payment" => s.scan_payment,
-        "scan_network" => s.scan_network,
-        "scan_code_exec" => s.scan_code_exec,
-        "scan_prompt_injection" => s.scan_prompt_injection,
+        "security_scan_unicode" => s.scan_unicode,
+        "security_scan_tools" => s.scan_tools,
+        "security_scan_network" => s.scan_network,
         _ => true,
     }
 }
@@ -194,18 +198,18 @@ pub fn decide_action(findings: &[SecurityFinding], settings: &SecuritySettings) 
         counts[RiskLevel::Low.rank() as usize - 1] + counts[RiskLevel::Info.rank() as usize - 1],
     ));
 
-    let action = match settings.mode.as_str() {
-        // 宽松：只记录，永远放行。
-        "permissive" => SecurityAction::Allow,
+    let mut action = match settings.mode.as_str() {
+        // 审计：仅记录，永远放行。
+        "audit" => SecurityAction::Allow,
         // 警告：中高风险标记告警，仍放行原文。
-        "warning" => {
+        "warn" => {
             if max.rank() >= RiskLevel::Medium.rank() {
                 SecurityAction::Warn
             } else {
                 SecurityAction::Allow
             }
         }
-        // 脱敏：高风险脱敏后转发。
+        // 脱敏：高风险动作标记为 Redact；实际转发脱敏由 redact_secrets 独立控制。
         "redact" => {
             if max.rank() >= RiskLevel::High.rank() {
                 SecurityAction::Redact
@@ -213,12 +217,10 @@ pub fn decide_action(findings: &[SecurityFinding], settings: &SecuritySettings) 
                 SecurityAction::Allow
             }
         }
-        // 严格：高风险阻断；中高标记告警；其余放行。
-        "strict" => {
+        // 阻断：高风险阻断；其余放行。
+        "block" => {
             if max.rank() >= RiskLevel::High.rank() {
                 SecurityAction::Block
-            } else if max.rank() >= RiskLevel::Medium.rank() {
-                SecurityAction::Warn
             } else {
                 SecurityAction::Allow
             }
@@ -226,7 +228,12 @@ pub fn decide_action(findings: &[SecurityFinding], settings: &SecuritySettings) 
         _ => SecurityAction::Allow,
     };
 
-    let sanitized = action == SecurityAction::Redact;
+    // 跨模式覆盖：严重风险强制阻断（对齐 waliapi block_on_critical）。
+    if settings.block_on_critical && max == RiskLevel::Critical {
+        action = SecurityAction::Block;
+    }
+
+    let sanitized = settings.redact_secrets;
     let blocked_reason = if action == SecurityAction::Block {
         Some(format!(
             "安全审计（{} 模式）：命中 {} 级风险「{}」，已阻断请求",
@@ -247,4 +254,122 @@ pub fn decide_action(findings: &[SecurityFinding], settings: &SecuritySettings) 
         blocked_reason,
     };
     (action, outcome)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn settings(mode: &str) -> SecuritySettings {
+        SecuritySettings {
+            enabled: true,
+            mode: mode.to_string(),
+            scan_unicode: true,
+            scan_tools: true,
+            scan_network: true,
+            scan_response: true,
+            redact_secrets: false,
+            block_on_critical: false,
+        }
+    }
+
+    fn finding(severity: &str) -> SecurityFinding {
+        SecurityFinding {
+            rule_id: "x".to_string(),
+            category: "credential".to_string(),
+            severity: severity.to_string(),
+            title: "t".to_string(),
+            description: None,
+            location: None,
+            evidence_masked: None,
+        }
+    }
+
+    #[test]
+    fn empty_findings_always_allow() {
+        let (a, o) = decide_action(&[], &settings("block"));
+        assert_eq!(a, SecurityAction::Allow);
+        assert_eq!(o.risk_level, "none");
+    }
+
+    #[test]
+    fn block_blocks_high() {
+        let (a, o) = decide_action(&[finding("high")], &settings("block"));
+        assert_eq!(a, SecurityAction::Block);
+        assert!(o.blocked_reason.is_some());
+    }
+
+    #[test]
+    fn block_allows_medium() {
+        let (a, _o) = decide_action(&[finding("medium")], &settings("block"));
+        assert_eq!(a, SecurityAction::Allow);
+    }
+
+    #[test]
+    fn warn_warns_medium() {
+        let (a, _o) = decide_action(&[finding("medium")], &settings("warn"));
+        assert_eq!(a, SecurityAction::Warn);
+    }
+
+    #[test]
+    fn warn_allows_low() {
+        let (a, _o) = decide_action(&[finding("low")], &settings("warn"));
+        assert_eq!(a, SecurityAction::Allow);
+    }
+
+    #[test]
+    fn redact_redacts_high() {
+        let (a, _o) = decide_action(&[finding("high")], &settings("redact"));
+        assert_eq!(a, SecurityAction::Redact);
+    }
+
+    #[test]
+    fn redact_allows_medium() {
+        let (a, _o) = decide_action(&[finding("medium")], &settings("redact"));
+        assert_eq!(a, SecurityAction::Allow);
+    }
+
+    #[test]
+    fn audit_allows_high() {
+        let (a, _o) = decide_action(&[finding("high")], &settings("audit"));
+        assert_eq!(a, SecurityAction::Allow);
+    }
+
+    #[test]
+    fn block_on_critical_overrides_mode() {
+        // 即便模式是 warn（本不阻断），block_on_critical 也应强制阻断 Critical。
+        let mut s = settings("warn");
+        s.block_on_critical = true;
+        let (a, _o) = decide_action(&[finding("critical")], &s);
+        assert_eq!(a, SecurityAction::Block);
+    }
+
+    #[test]
+    fn block_on_critical_ignores_high() {
+        // block_on_critical 仅对 Critical 生效，High 不被强制阻断。
+        let mut s = settings("audit");
+        s.block_on_critical = true;
+        let (a, _o) = decide_action(&[finding("high")], &s);
+        assert_eq!(a, SecurityAction::Allow);
+    }
+
+    #[test]
+    fn risk_score_is_sum_of_ranks() {
+        // medium(3) + high(4) = 7
+        let (_a, o) = decide_action(&[finding("medium"), finding("high")], &settings("warning"));
+        assert_eq!(o.risk_score, 7);
+    }
+
+    #[test]
+    fn unknown_toggle_key_is_always_on() {
+        let s = settings("warning");
+        assert!(is_switch_on(&s, "not_a_real_toggle"));
+    }
+
+    #[test]
+    fn known_toggle_off_is_respected() {
+        let mut s = settings("audit");
+        s.scan_network = false;
+        assert!(!is_switch_on(&s, "security_scan_network"));
+    }
 }

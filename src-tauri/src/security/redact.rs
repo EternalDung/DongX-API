@@ -27,3 +27,47 @@ pub fn redact(value: &Value) -> Value {
         other => other.clone(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::redact;
+    use serde_json::json;
+
+    #[test]
+    fn masks_secret_in_string() {
+        let v = json!({"key":"sk-abcdefghijklmnopqrstuvwxyz"});
+        let out = redact(&v);
+        let s = out["key"].as_str().unwrap();
+        assert!(s.contains("[REDACTED]"));
+        assert!(!s.contains("sk-abcdefghijklmnopqrstuvwxyz"));
+    }
+
+    #[test]
+    fn leaves_benign_intact() {
+        let v = json!({"name":"alice","age":30,"ok":true});
+        let out = redact(&v);
+        assert_eq!(out["name"].as_str().unwrap(), "alice");
+        assert_eq!(out["age"].as_i64().unwrap(), 30);
+        assert_eq!(out["ok"].as_bool().unwrap(), true);
+    }
+
+    #[test]
+    fn masks_nested_object_and_array() {
+        let v = json!({
+            "user": {"token": "AKIAABCDEFGHIJKLMNOP"},
+            "list": ["plain", "ghp_abcdefghijklmnopqrstuvwxyz"]
+        });
+        let out = redact(&v);
+        assert!(out["user"]["token"].as_str().unwrap().contains("[REDACTED]"));
+        assert_eq!(out["list"][0].as_str().unwrap(), "plain");
+        assert!(out["list"][1].as_str().unwrap().contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn does_not_alter_structure() {
+        let v = json!({"a":1,"b":[1,2,3],"c":{"d":"e"}});
+        let out = redact(&v);
+        // 无高风险命中，结构与值应保持完全一致。
+        assert_eq!(out, v);
+    }
+}

@@ -41,12 +41,12 @@ pub struct SettingsUpdate {
     pub log_raw_body: Option<bool>,
     pub security_enabled: Option<bool>,
     pub security_mode: Option<String>,
-    pub security_detect_unicode_stego: Option<bool>,
-    pub security_detect_tool_risk: Option<bool>,
-    pub security_detect_outbound_tracking: Option<bool>,
+    pub security_scan_unicode: Option<bool>,
+    pub security_scan_tools: Option<bool>,
+    pub security_scan_network: Option<bool>,
     pub security_scan_response: Option<bool>,
-    pub security_redact_request: Option<bool>,
-    pub security_block_critical: Option<bool>,
+    pub security_redact_secrets: Option<bool>,
+    pub security_block_on_critical: Option<bool>,
 }
 
 /// Built-in defaults merged under stored values.
@@ -63,13 +63,13 @@ const DEFAULTS: &str = r#"{
     "log_retention_days": 30,
     "log_raw_body": false,
     "security_enabled": true,
-    "security_mode": "warning",
-    "security_detect_unicode_stego": true,
-    "security_detect_tool_risk": true,
-    "security_detect_outbound_tracking": true,
-    "security_scan_response": true,
-    "security_redact_request": true,
-    "security_block_critical": true
+    "security_mode": "audit",
+    "security_scan_unicode": true,
+    "security_scan_tools": true,
+    "security_scan_network": true,
+    "security_scan_response": false,
+    "security_redact_secrets": false,
+    "security_block_on_critical": false
 }"#;
 
 /// Load settings: built-in defaults merged with stored values.
@@ -126,12 +126,12 @@ pub async fn update_settings(
     push!(log_raw_body, "log_raw_body");
     push!(security_enabled, "security_enabled");
     push!(security_mode, "security_mode");
-    push!(security_detect_unicode_stego, "security_detect_unicode_stego");
-    push!(security_detect_tool_risk, "security_detect_tool_risk");
-    push!(security_detect_outbound_tracking, "security_detect_outbound_tracking");
+    push!(security_scan_unicode, "security_scan_unicode");
+    push!(security_scan_tools, "security_scan_tools");
+    push!(security_scan_network, "security_scan_network");
     push!(security_scan_response, "security_scan_response");
-    push!(security_redact_request, "security_redact_request");
-    push!(security_block_critical, "security_block_critical");
+    push!(security_redact_secrets, "security_redact_secrets");
+    push!(security_block_on_critical, "security_block_on_critical");
 
     if !entries.is_empty() {
         settings_repo::upsert_many(&state.db, &entries).await?;

@@ -46,19 +46,21 @@ pub async fn run_gate(pool: &SqlitePool, body: Value) -> Result<GateOutput, sqlx
     }
 
     let mode = match settings_get(pool, "security_mode").await {
-        Ok(Some(s)) => serde_json::from_str::<String>(&s).unwrap_or_else(|_| "warning".to_string()),
-        _ => "warning".to_string(),
+        Ok(Some(s)) => serde_json::from_str::<String>(&s).unwrap_or_else(|_| "audit".to_string()),
+        _ => "audit".to_string(),
     };
 
+    // 对齐 waliapi 的 6 开关：3 个可切换扫描类目(默认开) + 响应扫描(默认关)
+    // + 2 个行为开关(redact_secrets/block_on_critical 默认关，与模式解耦)。
     let sec = SecuritySettings {
         enabled,
         mode,
-        scan_credentials: bool_setting(pool, "scan_credentials", true).await,
-        scan_pii: bool_setting(pool, "scan_pii", true).await,
-        scan_payment: bool_setting(pool, "scan_payment", true).await,
-        scan_network: bool_setting(pool, "scan_network", true).await,
-        scan_code_exec: bool_setting(pool, "scan_code_exec", true).await,
-        scan_prompt_injection: bool_setting(pool, "scan_prompt_injection", true).await,
+        scan_unicode: bool_setting(pool, "security_scan_unicode", true).await,
+        scan_tools: bool_setting(pool, "security_scan_tools", true).await,
+        scan_network: bool_setting(pool, "security_scan_network", true).await,
+        scan_response: bool_setting(pool, "security_scan_response", false).await,
+        redact_secrets: bool_setting(pool, "security_redact_secrets", false).await,
+        block_on_critical: bool_setting(pool, "security_block_on_critical", false).await,
     };
 
     let builtin = BuiltinRuleRepository::get_enabled(pool).await?;
@@ -70,7 +72,8 @@ pub async fn run_gate(pool: &SqlitePool, body: Value) -> Result<GateOutput, sqlx
     }
 
     let (action, outcome) = decide_action(&result.findings, &sec);
-    let forward_body = if action == SecurityAction::Redact {
+    // 转发体脱敏由独立开关 redact_secrets 控制（对齐 waliapi，与模式解耦）。
+    let forward_body = if sec.redact_secrets {
         redact::redact(&body)
     } else {
         body

@@ -96,12 +96,12 @@ export interface SettingsUpdate {
   log_raw_body?: boolean;
   security_enabled?: boolean;
   security_mode?: string;
-  security_detect_unicode_stego?: boolean;
-  security_detect_tool_risk?: boolean;
-  security_detect_outbound_tracking?: boolean;
+  security_scan_unicode?: boolean;
+  security_scan_tools?: boolean;
+  security_scan_network?: boolean;
   security_scan_response?: boolean;
-  security_redact_request?: boolean;
-  security_block_critical?: boolean;
+  security_redact_secrets?: boolean;
+  security_block_on_critical?: boolean;
 }
 
 // ============================================================
