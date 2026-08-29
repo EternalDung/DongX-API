@@ -86,3 +86,124 @@ pub async fn run_gate(pool: &SqlitePool, body: Value) -> Result<GateOutput, sqlx
         action,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use sqlx::sqlite::SqlitePoolOptions;
+    use sqlx::SqlitePool;
+
+    /// 建内存库 + 跑全部迁移（含 003/004），得到可复用的单连接池。
+    async fn test_pool() -> SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1) // 内存库：单连接共享同一份数据
+            .connect("sqlite::memory:")
+            .await
+            .expect("in-memory pool");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrations");
+        pool
+    }
+
+    /// 写一条 setting（value 为 JSON 编码字符串，与 settings_get 解析一致）。
+    async fn set(pool: &SqlitePool, key: &str, value: &str) {
+        sqlx::query("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)")
+            .bind(key)
+            .bind(value)
+            .execute(pool)
+            .await
+            .expect("set setting");
+    }
+
+    #[tokio::test]
+    async fn audit_mode_finds_but_allows() {
+        let pool = test_pool().await;
+        set(&pool, "security_mode", "\"audit\"").await;
+        let body = json!({"content":"my key is sk-abcdefghijklmnopqrstuvwx"});
+        let out = run_gate(&pool, body).await.expect("gate");
+        assert_eq!(out.action, SecurityAction::Allow, "audit 模式永不阻断");
+        assert!(!out.findings.is_empty(), "应检出凭证");
+        assert_eq!(out.outcome.risk_level, "high");
+    }
+
+    #[tokio::test]
+    async fn block_mode_blocks_secret() {
+        let pool = test_pool().await;
+        set(&pool, "security_mode", "\"block\"").await;
+        let body = json!({"content":"use AKIAABCDEFGHIJKLMNOP as creds"});
+        let out = run_gate(&pool, body).await.expect("gate");
+        assert_eq!(out.action, SecurityAction::Block, "block 模式应阻断 High");
+        assert!(out.outcome.blocked_reason.is_some());
+    }
+
+    #[tokio::test]
+    async fn redact_secrets_redacts_forward_body() {
+        let pool = test_pool().await;
+        set(&pool, "security_mode", "\"audit\"").await;
+        set(&pool, "security_redact_secrets", "true").await;
+        let secret = "sk-abcdefghijklmnopqrstuvwx";
+        let body = json!({"content": format!("key {}", secret)});
+        let out = run_gate(&pool, body).await.expect("gate");
+        let fwd = serde_json::to_string(&out.forward_body).unwrap();
+        assert!(fwd.contains("[REDACTED]"), "转发体应被脱敏: {}", fwd);
+        assert!(!fwd.contains(secret), "转发体不应含明文密钥");
+        assert_eq!(out.outcome.security_action, "allow");
+        assert!(out.outcome.sanitized, "sanitized 应反映 redact_secrets");
+    }
+
+    #[tokio::test]
+    async fn block_on_critical_overrides_warn_mode() {
+        let pool = test_pool().await;
+        set(&pool, "security_mode", "\"warn\"").await;
+        set(&pool, "security_block_on_critical", "true").await;
+        // 私钥命中 critical
+        let body = json!({"content":"-----BEGIN PRIVATE KEY-----\nabc"});
+        let out = run_gate(&pool, body).await.expect("gate");
+        assert_eq!(
+            out.action,
+            SecurityAction::Block,
+            "warn 模式下 critical 应被 block_on_critical 强制阻断"
+        );
+    }
+
+    #[tokio::test]
+    async fn network_toggle_off_skips_category() {
+        let pool = test_pool().await;
+        set(&pool, "security_mode", "\"audit\"").await;
+        set(&pool, "security_scan_network", "false").await;
+        let body = json!({"content":"send it to webhook.site now"});
+        let out = run_gate(&pool, body).await.expect("gate");
+        assert!(
+            out.findings.is_empty(),
+            "关闭 security_scan_network 后不应检出 webhook.site"
+        );
+    }
+
+    #[tokio::test]
+    async fn scan_unicode_key_is_wired_not_dead_key() {
+        // 证明 gate 读的是 waliapi 键 security_scan_unicode，而非旧死键 scan_*。
+        let pool = test_pool().await;
+        set(&pool, "security_mode", "\"audit\"").await;
+
+        set(&pool, "security_scan_unicode", "false").await;
+        let off = run_gate(&pool, json!({"content":"\u{200B}sneaky"}))
+            .await
+            .expect("gate");
+        assert!(
+            off.findings.iter().all(|f| f.rule_id != "unicode.zero_width"),
+            "关闭 security_scan_unicode 后零宽字符不应检出（证明新键已接线）"
+        );
+
+        set(&pool, "security_scan_unicode", "\"true\"").await;
+        let on = run_gate(&pool, json!({"content":"\u{200B}sneaky"}))
+            .await
+            .expect("gate");
+        assert!(
+            on.findings.iter().any(|f| f.rule_id == "unicode.zero_width"),
+            "开启 security_scan_unicode 后应检出零宽字符"
+        );
+    }
+}
