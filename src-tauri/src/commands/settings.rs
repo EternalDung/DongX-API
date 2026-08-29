@@ -3,7 +3,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 
-use crate::db::repository::{settings as settings_repo, stats};
+use crate::db::repository::{audit_events, settings as settings_repo, stats};
 use crate::error::AppResult;
 use crate::AppState;
 
@@ -117,6 +117,19 @@ pub async fn update_settings(
 
     if !entries.is_empty() {
         settings_repo::upsert_many(&state.db, &entries).await?;
+
+        // 审计：配置变更（记录本次改动了哪些键，便于事后追溯）。
+        let changed: Vec<&str> = entries.iter().map(|(k, _)| k.as_str()).collect();
+        let meta = serde_json::to_string(&serde_json::json!({ "changed": changed })).ok();
+        let _ = audit_events::insert(
+            &state.db,
+            "config_change",
+            "info",
+            Some("settings"),
+            "配置已更新",
+            meta.as_deref(),
+        )
+        .await;
     }
 
     // 自启动：保存即应用（开关与系统登录项保持同步）

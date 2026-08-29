@@ -295,26 +295,32 @@ pub mod gateway_keys {
 
     /// Atomically add consumed tokens; auto-disable key when quota exhausted.
     /// (0 = unlimited, never exhausted)
+    ///
+    /// 返回 `(quota_used 新值, status 新值)`，便于调用方在密钥被自动禁用时
+    /// 写一条 `quota_exhaust` 审计事件（用 `RETURNING` 一次搞定，避免额外查询）。
     pub async fn add_quota_used(
         pool: &SqlitePool,
         id: &str,
         tokens: i64,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query(
+    ) -> Result<(i64, i32), sqlx::Error> {
+        let row = sqlx::query(
             "UPDATE gateway_keys
              SET quota_used = quota_used + ?2,
                  status = CASE
                      WHEN quota_limit > 0 AND quota_used + ?2 >= quota_limit THEN 0
                      ELSE status END,
                  updated_at = ?3
-             WHERE id = ?1",
+             WHERE id = ?1
+             RETURNING quota_used, status",
         )
         .bind(id)
         .bind(tokens)
         .bind(now())
-        .execute(pool)
+        .fetch_one(pool)
         .await?;
-        Ok(())
+        let used_after: i64 = row.try_get("quota_used")?;
+        let status: i32 = row.try_get("status")?;
+        Ok((used_after, status))
     }
 }
 

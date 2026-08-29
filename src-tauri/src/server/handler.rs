@@ -15,9 +15,49 @@ use crate::adapter::{
     split_sse_records,
 };
 use crate::core::{dispatcher, failover};
-use crate::db::repository::{channel_health, channels, gateway_keys, request_logs, settings};
+use crate::db::repository::{
+    audit_events, channel_health, channels, gateway_keys, request_logs, settings,
+};
 use crate::server::auth;
 use crate::AppState;
+
+/// Fire-and-forget 审计写入：失败仅告警，绝不阻断主请求链路。
+async fn audit(
+    state: &Arc<AppState>,
+    event_type: &str,
+    severity: &str,
+    actor: Option<&str>,
+    message: &str,
+    meta: Option<&str>,
+) {
+    if let Err(e) = audit_events::insert(&state.db, event_type, severity, actor, message, meta).await
+    {
+        tracing::warn!("审计事件写入失败 ({}): {}", event_type, e);
+    }
+}
+
+/// 配额耗尽审计（密钥被自动禁用时）。
+async fn audit_quota_exhaust(state: &Arc<AppState>, key_name: &str, used_after: i64) {
+    let meta = serde_json::to_string(&json!({ "used_after": used_after })).ok();
+    audit(
+        state,
+        "quota_exhaust",
+        "warning",
+        Some(key_name),
+        "网关密钥配额已耗尽，已自动禁用",
+        meta.as_deref(),
+    )
+    .await;
+}
+
+/// 脱敏网关密钥：仅保留前缀与末 4 位，避免审计日志泄露完整密钥。
+fn mask_gateway_key(key: &str) -> String {
+    if key.len() <= 12 {
+        "sk-dongapi-****".to_string()
+    } else {
+        format!("{}…{}", &key[..12], &key[key.len() - 4..])
+    }
+}
 
 /// Health check endpoint.
 pub async fn health() -> impl IntoResponse {
@@ -87,6 +127,18 @@ async fn run_chat_pipeline(
     let gw_key = match auth::validate_gateway_key(&state.db, &key).await {
         Some(k) => k,
         None => {
+            // 审计：出示了 sk-dongapi- 密钥但校验失败（不存在/已禁用/已过期/配额耗尽）。
+            // 缺失或非 dongapi 格式的请求（extract 返回 None）过于常见，不记审计避免噪音。
+            let actor = mask_gateway_key(&key);
+            audit(
+                &state,
+                "invalid_key",
+                "warning",
+                Some(&actor),
+                "网关密钥校验失败（不存在/已禁用/已过期/配额耗尽）",
+                None,
+            )
+            .await;
             return error_response(
                 StatusCode::UNAUTHORIZED,
                 "invalid_key",
@@ -351,7 +403,13 @@ async fn run_chat_pipeline(
 
             // Debit gateway key quota.
             if tt > 0 {
-                let _ = gateway_keys::add_quota_used(&state.db, &gw_key.id, tt).await;
+                if let Ok((used_after, status)) =
+                    gateway_keys::add_quota_used(&state.db, &gw_key.id, tt).await
+                {
+                    if status == 0 {
+                        audit_quota_exhaust(&state, &gw_key.name, used_after).await;
+                    }
+                }
             }
 
             let duration_ms = start.elapsed().as_millis() as i64;
@@ -1029,7 +1087,13 @@ fn build_stream_response(
             // `total_tokens` at 0, so nothing is debited in that case.
             if acc.total_tokens > 0 {
                 if let Some(ref key_id) = gw_key_id {
-                    let _ = gateway_keys::add_quota_used(&state.db, key_id, acc.total_tokens).await;
+                    if let Ok((used_after, status)) =
+                        gateway_keys::add_quota_used(&state.db, key_id, acc.total_tokens).await
+                    {
+                        if status == 0 {
+                            audit_quota_exhaust(&state, &gw_key_name, used_after).await;
+                        }
+                    }
                 }
             }
             spawn_log(
