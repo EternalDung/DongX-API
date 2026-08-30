@@ -16,49 +16,11 @@ use crate::adapter::{
 };
 use crate::core::{dispatcher, failover};
 use crate::db::repository::{
-    audit_events, channel_health, channels, gateway_keys, request_logs, security_findings, settings,
+    channel_health, channels, gateway_keys, request_logs, security_findings, settings,
 };
 use crate::security::{self, redact, SecurityAction, SecurityFinding, SecurityOutcome};
 use crate::server::auth;
 use crate::AppState;
-
-/// Fire-and-forget 审计写入：失败仅告警，绝不阻断主请求链路。
-async fn audit(
-    state: &Arc<AppState>,
-    event_type: &str,
-    severity: &str,
-    actor: Option<&str>,
-    message: &str,
-    meta: Option<&str>,
-) {
-    if let Err(e) = audit_events::insert(&state.db, event_type, severity, actor, message, meta).await
-    {
-        tracing::warn!("审计事件写入失败 ({}): {}", event_type, e);
-    }
-}
-
-/// 配额耗尽审计（密钥被自动禁用时）。
-async fn audit_quota_exhaust(state: &Arc<AppState>, key_name: &str, used_after: i64) {
-    let meta = serde_json::to_string(&json!({ "used_after": used_after })).ok();
-    audit(
-        state,
-        "quota_exhaust",
-        "warning",
-        Some(key_name),
-        "网关密钥配额已耗尽，已自动禁用",
-        meta.as_deref(),
-    )
-    .await;
-}
-
-/// 脱敏网关密钥：仅保留前缀与末 4 位，避免审计日志泄露完整密钥。
-fn mask_gateway_key(key: &str) -> String {
-    if key.len() <= 12 {
-        "sk-dongapi-****".to_string()
-    } else {
-        format!("{}…{}", &key[..12], &key[key.len() - 4..])
-    }
-}
 
 /// Health check endpoint.
 pub async fn health() -> impl IntoResponse {
@@ -107,7 +69,7 @@ async fn run_chat_pipeline(
         Ok(Some(s)) => serde_json::from_str::<bool>(&s).unwrap_or(false),
         _ => false,
     };
-    // 响应体日志脱敏开关（对齐 waliapi security_redact_secrets）：开启时落库的
+    // 响应体日志脱敏开关（security_redact_secrets）：开启时落库的
     // 响应体(非流式 JSON / 流式 SSE 文本)统一掩高风险明文，闭合 G3 响应半边。
     let sec_redact = match settings::get(&state.db, "security_redact_secrets").await {
         Ok(Some(s)) => serde_json::from_str::<bool>(&s).unwrap_or(false),
@@ -129,18 +91,6 @@ async fn run_chat_pipeline(
     let gw_key = match auth::validate_gateway_key(&state.db, &key).await {
         Some(k) => k,
         None => {
-            // 审计：出示了 sk-dongapi- 密钥但校验失败（不存在/已禁用/已过期/配额耗尽）。
-            // 缺失或非 dongapi 格式的请求（extract 返回 None）过于常见，不记审计避免噪音。
-            let actor = mask_gateway_key(&key);
-            audit(
-                &state,
-                "invalid_key",
-                "warning",
-                Some(&actor),
-                "网关密钥校验失败（不存在/已禁用/已过期/配额耗尽）",
-                None,
-            )
-            .await;
             return error_response(
                 StatusCode::UNAUTHORIZED,
                 "invalid_key",
@@ -148,6 +98,28 @@ async fn run_chat_pipeline(
             )
         }
     };
+
+    // 1.5 请求限流：按网关密钥滑动窗口限速（设置 enable_rate_limit 开启时生效）。
+    //     超限直接返回 429，不进后续解析/分发，避免无效上游请求占用配额。
+    {
+        let rl = match state.rate_limiter.lock() {
+            Ok(g) => g,
+            Err(_) => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal",
+                    "限速器状态损坏",
+                );
+            }
+        };
+        if rl.enabled && rl.limiter.check(key.as_str()).is_err() {
+            return error_response(
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate_limited",
+                "请求过于频繁，已超过每分钟允许的请求数上限",
+            );
+        }
+    }
 
     // 2. Parse
     let body_json: serde_json::Value = match serde_json::from_slice(&body) {
@@ -469,14 +441,9 @@ async fn run_chat_pipeline(
                 .unwrap_or((0, 0, 0));
 
             // Debit gateway key quota.
+            // 配额超限自动禁用由 add_quota_used 的 SQL 层完成。
             if tt > 0 {
-                if let Ok((used_after, status)) =
-                    gateway_keys::add_quota_used(&state.db, &gw_key.id, tt).await
-                {
-                    if status == 0 {
-                        audit_quota_exhaust(&state, &gw_key.name, used_after).await;
-                    }
-                }
+                let _ = gateway_keys::add_quota_used(&state.db, &gw_key.id, tt).await;
             }
 
             let duration_ms = start.elapsed().as_millis() as i64;
@@ -493,7 +460,10 @@ async fn run_chat_pipeline(
             };
 
             // 响应侧扫描（security_scan_response）：非流式响应按启用规则扫描，
-            // 发现的 phase="response" 并入本次审计（风险等级/评分取较高者）。
+            // 发现的 phase="response" 并入本次审计；并以「请求+响应」合并发现
+            // 重算 risk_level/risk_score/risk_summary，确保主行汇总与落库
+            // findings 一致（原逻辑只取较高阶段 summary、用 += 叠加 score，
+            // 三者互不对应——修复见 security::compute_risk_metrics）。
             let mut sec_outcome = sec_outcome.clone();
             let mut sec_findings = sec_findings.clone();
             if let Ok(resp_gate) = security::gate::scan_response(&state.db, resp_body.clone()).await {
@@ -501,13 +471,12 @@ async fn run_chat_pipeline(
                     for f in &resp_gate.findings {
                         sec_findings.push(f.clone());
                     }
-                    let resp_rank = crate::security::parse_risk_level(&resp_gate.outcome.risk_level).rank();
-                    let cur_rank = crate::security::parse_risk_level(&sec_outcome.risk_level).rank();
-                    if resp_rank > cur_rank {
-                        sec_outcome.risk_level = resp_gate.outcome.risk_level.clone();
-                        sec_outcome.risk_summary = resp_gate.outcome.risk_summary.clone();
-                    }
-                    sec_outcome.risk_score += resp_gate.outcome.risk_score;
+                    // 合并全部发现后重算风险汇总（保留请求阶段已定的
+                    // 动作/脱敏/拦截原因，仅刷新风险指标字段）。
+                    let (rl, rs, summ, _top_title) = security::compute_risk_metrics(&sec_findings);
+                    sec_outcome.risk_level = rl;
+                    sec_outcome.risk_score = rs;
+                    sec_outcome.risk_summary = summ;
                 }
             }
 
@@ -800,8 +769,8 @@ fn error_response(status: StatusCode, code: &str, message: &str) -> Response {
 }
 
 /// Spawn an async task to insert a `request_logs` row plus its security
-/// findings + suspicious audit. Fire-and-forget — failures must never break
-/// the response path (same principle as quota/health stats).
+/// findings. Fire-and-forget — failures must never break the response path
+/// (same principle as quota/health stats).
 #[allow(clippy::too_many_arguments)]
 fn spawn_log(
     state: Arc<AppState>,
@@ -864,35 +833,6 @@ fn spawn_log(
             {
                 tracing::warn!("安全发现写入失败: {}", e);
             }
-        }
-
-        // 命中风险 → 写 suspicious 审计（fire-and-forget，失败仅告警）。
-        if !findings.is_empty() {
-            let severity = match sec.risk_level.as_str() {
-                "critical" | "high" => "critical",
-                "medium" => "warning",
-                _ => "info",
-            };
-            let meta = serde_json::to_string(&json!({
-                "risk_level": sec.risk_level,
-                "risk_score": sec.risk_score,
-                "action": sec.security_action,
-                "count": findings.len(),
-            }))
-            .ok();
-            let message = sec
-                .risk_summary
-                .clone()
-                .unwrap_or_else(|| "安全审计命中风险".to_string());
-            let _ = audit_events::insert(
-                &state.db,
-                "suspicious",
-                severity,
-                api_key_name.as_deref(),
-                &message,
-                meta.as_deref(),
-            )
-            .await;
         }
     });
 }
@@ -1138,6 +1078,16 @@ fn build_stream_response(
         };
         let mut had_error = false;
 
+        // 流式响应增量审计上下文：与 gate::scan_response 同口径
+        // （security_enabled + security_scan_response 同时开启才扫描）。
+        // 每块转发前扫其文本，命中累积，流末与请求侧发现合并、重算风险汇总写主行。
+        // 仅记录不阻断（流式内容已实时发往客户端）。do_log=false 的中继路径
+        // （Responses 模式）不在此审计，避免与 build_responses_stream_response 重复。
+        let scan_ctx = security::gate::load_scan_context(&state.db).await;
+        let do_stream_audit =
+            do_log && matches!(&scan_ctx, Ok((sec, _, _)) if sec.enabled && sec.scan_response);
+        let mut stream_findings: Vec<SecurityFinding> = Vec::new();
+
         // 响应体日志脱敏开关（与请求体同一开关 security_redact_secrets）。
         let sec_redact = match settings::get(&state.db, "security_redact_secrets").await {
             Ok(Some(s)) => serde_json::from_str::<bool>(&s).unwrap_or(false),
@@ -1166,6 +1116,18 @@ fn build_stream_response(
                         if log_raw_body {
                             response_body_acc.push_str(s);
                         }
+                        if do_stream_audit {
+                            if let Ok(ctx) = &scan_ctx {
+                                for sf in security::scanner::scan_text_chunk(
+                                    s,
+                                    &ctx.0,
+                                    &ctx.1,
+                                    &ctx.2,
+                                ) {
+                                    stream_findings.push(sf);
+                                }
+                            }
+                        }
                         let _ = tx.send(Ok::<_, std::io::Error>(chunk)).await;
                     }
                 }
@@ -1177,6 +1139,18 @@ fn build_stream_response(
                         for f in c.convert(&rec, &mut acc) {
                             if log_raw_body {
                                 response_body_acc.push_str(&f);
+                            }
+                            if do_stream_audit {
+                                if let Ok(ctx) = &scan_ctx {
+                                    for sf in security::scanner::scan_text_chunk(
+                                        &f,
+                                        &ctx.0,
+                                        &ctx.1,
+                                        &ctx.2,
+                                    ) {
+                                        stream_findings.push(sf);
+                                    }
+                                }
                             }
                             let _ = tx.send(Ok::<_, std::io::Error>(Bytes::from(f))).await;
                         }
@@ -1190,6 +1164,18 @@ fn build_stream_response(
                         for f in c.convert(&rec, &mut acc) {
                             if log_raw_body {
                                 response_body_acc.push_str(&f);
+                            }
+                            if do_stream_audit {
+                                if let Ok(ctx) = &scan_ctx {
+                                    for sf in security::scanner::scan_text_chunk(
+                                        &f,
+                                        &ctx.0,
+                                        &ctx.1,
+                                        &ctx.2,
+                                    ) {
+                                        stream_findings.push(sf);
+                                    }
+                                }
                             }
                             let _ = tx.send(Ok::<_, std::io::Error>(Bytes::from(f))).await;
                         }
@@ -1208,6 +1194,18 @@ fn build_stream_response(
                             if log_raw_body {
                                 response_body_acc.push_str(&f);
                             }
+                            if do_stream_audit {
+                                if let Ok(ctx) = &scan_ctx {
+                                    for sf in security::scanner::scan_text_chunk(
+                                        &f,
+                                        &ctx.0,
+                                        &ctx.1,
+                                        &ctx.2,
+                                    ) {
+                                        stream_findings.push(sf);
+                                    }
+                                }
+                            }
                             let _ = tx.send(Ok::<_, std::io::Error>(Bytes::from(f))).await;
                         }
                     }
@@ -1217,6 +1215,18 @@ fn build_stream_response(
                         for f in c.convert(&rec, &mut acc) {
                             if log_raw_body {
                                 response_body_acc.push_str(&f);
+                            }
+                            if do_stream_audit {
+                                if let Ok(ctx) = &scan_ctx {
+                                    for sf in security::scanner::scan_text_chunk(
+                                        &f,
+                                        &ctx.0,
+                                        &ctx.1,
+                                        &ctx.2,
+                                    ) {
+                                        stream_findings.push(sf);
+                                    }
+                                }
                             }
                             let _ = tx.send(Ok::<_, std::io::Error>(Bytes::from(f))).await;
                         }
@@ -1246,15 +1256,26 @@ fn build_stream_response(
             // `total_tokens` at 0, so nothing is debited in that case.
             if acc.total_tokens > 0 {
                 if let Some(ref key_id) = gw_key_id {
-                    if let Ok((used_after, status)) =
-                        gateway_keys::add_quota_used(&state.db, key_id, acc.total_tokens).await
-                    {
-                        if status == 0 {
-                            audit_quota_exhaust(&state, &gw_key_name, used_after).await;
-                        }
-                    }
+                    // 配额超限自动禁用由 add_quota_used 的 SQL 层完成。
+                    let _ = gateway_keys::add_quota_used(&state.db, key_id, acc.total_tokens).await;
                 }
             }
+
+            // 流式增量审计：把响应侧逐块发现并入请求侧发现，重算风险汇总（与主行一致）。
+            // 仅当确实有响应侧命中时才覆盖，否则沿用请求侧结论。
+            let (sec_final, findings_final) = if do_stream_audit && !stream_findings.is_empty() {
+                let mut all = findings;
+                all.append(&mut stream_findings);
+                let (rl, rs, summ, _t) = security::compute_risk_metrics(&all);
+                let mut s = sec;
+                s.risk_level = rl;
+                s.risk_score = rs;
+                s.risk_summary = summ;
+                (s, all)
+            } else {
+                (sec, findings)
+            };
+
             spawn_log(
                 state,
                 Some(gw_key_name),
@@ -1285,8 +1306,8 @@ fn build_stream_response(
                     None
                 },
                 mode,
-                sec,
-                findings,
+                sec_final,
+                findings_final,
             );
         }
     });
@@ -1358,6 +1379,14 @@ fn build_responses_stream_response(
 
         let mut had_error = false;
 
+        // 流式响应增量审计上下文：与 gate::scan_response 同口径。
+        // Responses 模式由 build_stream_response 中继（do_log=false）转交此处，
+        // 故审计只在此处做一次，避免与 Chat 中继路径重复扫描。
+        let scan_ctx = security::gate::load_scan_context(&state.db).await;
+        let do_stream_audit =
+            matches!(&scan_ctx, Ok((sec, _, _)) if sec.enabled && sec.scan_response);
+        let mut stream_findings: Vec<SecurityFinding> = Vec::new();
+
         // 响应体日志脱敏开关（与请求体同一开关 security_redact_secrets）。
         let sec_redact = match settings::get(&state.db, "security_redact_secrets").await {
             Ok(Some(s)) => serde_json::from_str::<bool>(&s).unwrap_or(false),
@@ -1384,6 +1413,18 @@ fn build_responses_stream_response(
             };
             let text = String::from_utf8_lossy(&chunk);
             crate::adapter::scan_openai_usage(&text, &mut acc);
+            if do_stream_audit {
+                if let Ok(ctx) = &scan_ctx {
+                    for sf in security::scanner::scan_text_chunk(
+                        &text,
+                        &ctx.0,
+                        &ctx.1,
+                        &ctx.2,
+                    ) {
+                        stream_findings.push(sf);
+                    }
+                }
+            }
             for ev in crate::responses_stream::convert_chunk(&text, &response_id, &mut rs_state) {
                 if log_raw_body {
                     response_body_acc.push_str(&ev);
@@ -1416,6 +1457,21 @@ fn build_responses_stream_response(
                 let _ = gateway_keys::add_quota_used(&state.db, key_id, acc.total_tokens).await;
             }
         }
+
+        // 流式增量审计：把响应侧逐块发现并入请求侧发现，重算风险汇总（与主行一致）。
+        let (sec_final, findings_final) = if do_stream_audit && !stream_findings.is_empty() {
+            let mut all = findings;
+            all.append(&mut stream_findings);
+            let (rl, rs, summ, _t) = security::compute_risk_metrics(&all);
+            let mut s = sec;
+            s.risk_level = rl;
+            s.risk_score = rs;
+            s.risk_summary = summ;
+            (s, all)
+        } else {
+            (sec, findings)
+        };
+
         spawn_log(
             state,
             Some(gw_key_name),
@@ -1446,8 +1502,8 @@ fn build_responses_stream_response(
                 None
             },
             mode,
-            sec,
-            findings,
+            sec_final,
+            findings_final,
         );
     });
 

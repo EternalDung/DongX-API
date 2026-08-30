@@ -124,22 +124,6 @@ pub struct RequestSecurityFindingRow {
 }
 
 // ============================================================
-// audit_events
-// ============================================================
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
-pub struct AuditEventRow {
-    pub id: String,
-    pub timestamp: String,
-    #[sqlx(rename = "type")]
-    #[serde(rename = "type")]
-    pub event_type: String,   // rate_limit | invalid_key | quota_exhaust | suspicious | config_change
-    pub severity: String,     // info | warning | critical
-    pub actor: Option<String>,
-    pub message: String,
-    pub meta: Option<String>, // JSON string
-}
-
-// ============================================================
 // settings (key-value)
 // ============================================================
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]

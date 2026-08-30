@@ -72,6 +72,26 @@ impl RateLimiter {
     }
 }
 
+/// 运行态限速器：随设置启停 / 改 RPM 时整体替换。
+///
+/// `RateLimiter` 自身不支持运行时改限额（`set_rpm` 为占位），故设置变更时
+/// 由调用方重建（见 `commands/settings.rs` 的 `update_settings` 与 `lib.rs` 启动）。
+pub struct RateLimiterState {
+    /// 是否启用限流（对应设置 `enable_rate_limit`）
+    pub enabled: bool,
+    /// 实际限速器（按 Key 滑动窗口）
+    pub limiter: RateLimiter,
+}
+
+impl RateLimiterState {
+    pub fn new(enabled: bool, rpm: u32) -> Self {
+        Self {
+            enabled,
+            limiter: RateLimiter::new(rpm),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

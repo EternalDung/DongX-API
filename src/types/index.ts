@@ -202,7 +202,7 @@ export interface DashboardStats {
 // ============================================================
 
 export type ThemeMode = "light" | "dark" | "system";
-/** 安全审计模式 — 4 级风险响应策略（对齐 waliapi）
+/** 安全审计模式 — 4 级风险响应策略 */
  *  - audit:  只审计（记录风险，不影响请求）
  *  - warn:   中高风险标记告警
  *  - redact: 高风险脱敏转发（敏感值替换后转发）
@@ -220,11 +220,13 @@ export interface Settings {
   auto_start: boolean;
   retry_enabled: boolean;
   retry_times: number;
+  enable_rate_limit: boolean;
+  rate_limit_rpm: number;
   log_retention_days: number;
   log_raw_body: boolean;
   security_enabled: boolean;
   security_mode: SecurityMode;
-  /** 安全审计检测项配置（仅当 security_enabled=true 时生效，对齐 waliapi） */
+  /** 安全审计检测项配置（仅当 security_enabled=true 时生效） */
   security_scan_unicode: boolean;
   security_scan_tools: boolean;
   security_scan_network: boolean;
@@ -255,6 +257,31 @@ export interface CustomRuleInput {
   action: "warn" | "block";
   enabled: boolean;
   description: string | null;
+}
+
+/** 内置安全规则（对应后端 security_builtin_rules + BuiltinRule） */
+export interface BuiltinRule {
+  rule_id: string;
+  category:
+    | "credential"
+    | "personal"
+    | "payment"
+    | "network"
+    | "tool"
+    | "prompt"
+    | "unicode";
+  severity: "info" | "low" | "medium" | "high" | "critical";
+  title: string;
+  description: string | null;
+  /** 控制该规则所属类目的全局开关 key；NULL 表示常开（不可单独关闭） */
+  toggle_key: string | null;
+  enabled: boolean;
+}
+
+/** 内置规则更新参数（对应 Rust BuiltinRuleUpdate） */
+export interface BuiltinRuleUpdate {
+  enabled: boolean;
+  severity: "info" | "low" | "medium" | "high" | "critical";
 }
 
 // ============================================================

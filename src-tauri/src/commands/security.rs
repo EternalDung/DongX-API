@@ -5,7 +5,7 @@ use tauri::State;
 use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
-use crate::security::rules::{CustomRule, CustomRuleRepository};
+use crate::security::rules::{BuiltinRuleRepository, CustomRule, CustomRuleRepository};
 use crate::AppState;
 
 /// 自定义规则创建/更新载荷（对齐前端 CustomRuleInput）。
@@ -126,5 +126,63 @@ fn validate(input: &CustomRuleInput) -> AppResult<()> {
     if !["warn", "block"].contains(&input.action.as_str()) {
         return Err(AppError::Validation("命中动作必须为 warn/block".into()));
     }
+    Ok(())
+}
+
+/// 内置规则更新载荷（enabled + severity 双控，对应前端 BuiltinRuleUpdate）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct BuiltinRuleUpdate {
+    pub enabled: bool,
+    pub severity: String,
+}
+
+/// 列出全部内置规则（含已禁用），供管理页展示与开关/严重度编辑。
+#[tauri::command]
+pub async fn list_builtin_rules(
+    state: State<'_, Arc<AppState>>,
+) -> AppResult<Vec<serde_json::Value>> {
+    let rows = BuiltinRuleRepository::list_all(&state.db).await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| {
+            serde_json::json!({
+                "rule_id": r.rule_id,
+                "category": r.category,
+                "severity": r.severity,
+                "title": r.title,
+                "description": r.description,
+                "toggle_key": r.toggle_key,
+                "enabled": r.enabled != 0,
+            })
+        })
+        .collect())
+}
+
+/// 更新内置规则的启用状态与严重等级（severity 取值非法时返回校验错误）。
+#[tauri::command]
+pub async fn update_builtin_rule(
+    rule_id: String,
+    input: BuiltinRuleUpdate,
+    state: State<'_, Arc<AppState>>,
+) -> AppResult<()> {
+    if !["info", "low", "medium", "high", "critical"].contains(&input.severity.as_str()) {
+        return Err(AppError::Validation(
+            "风险等级必须为 info/low/medium/high/critical".into(),
+        ));
+    }
+    let n1 = BuiltinRuleRepository::update_enabled(&state.db, &rule_id, if input.enabled { 1 } else { 0 })
+        .await?;
+    let n2 = BuiltinRuleRepository::update_severity(&state.db, &rule_id, &input.severity).await?;
+    if n1 == 0 && n2 == 0 {
+        return Err(AppError::NotFound(format!("内置规则 {} 不存在", rule_id)));
+    }
+    Ok(())
+}
+
+/// 恢复全部内置规则到出厂默认配置（enabled=1，severity/title 等还原）。
+#[tauri::command]
+pub async fn reset_builtin_rules(state: State<'_, Arc<AppState>>) -> AppResult<()> {
+    BuiltinRuleRepository::reset_to_defaults(&state.db).await?;
     Ok(())
 }

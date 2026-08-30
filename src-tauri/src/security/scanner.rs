@@ -12,6 +12,7 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use super::{is_switch_on, SecurityFinding, SecuritySettings};
 use crate::security::rules::{BuiltinRule, CustomRule};
@@ -43,7 +44,7 @@ static PATTERNS: &[(&str, &str)] = &[
     ("exec.ssh_key", r#"(?i)\b(?:id_rsa|id_ed25519|id_ecdsa|id_dsa|\.ssh/)\b"#),
     ("prompt.injection", r#"(?i)(?:忽略(?:以上|前面|之前|所有|上述)的?指令|无视(?:系统|先前)提示|忽略(?:所有|上述)规则|disregard|ignore (?:the|all|previous) (?:instruction|prompt|rule)|system prompt|reveal your (?:instruction|prompt)|jailbreak|绕过(?:审计|安全|限制)|越权)"#),
     ("prompt.fingerprint", r#"(?i)(?:fingerprint|浏览器指纹|设备指纹|风控|代理池|user-agent 伪装|canvas 指纹)"#),
-    // Unicode 隐写检测（对齐 waliapi b012-b015），受 security_scan_unicode 控制。
+    // Unicode 隐写检测，受 security_scan_unicode 控制。
     ("unicode.zero_width", r#"[\u{200B}\u{200C}\u{200D}\u{2060}\u{FEFF}]"#),
     ("unicode.bidi_control", r#"[\u{202A}-\u{202E}\u{2066}-\u{2069}]"#),
     ("unicode.variation_selector", r#"[\u{FE00}-\u{FE0F}\u{E0100}-\u{E01EF}]"#),
@@ -114,14 +115,21 @@ struct ScanCtx<'a> {
     findings: Vec<SecurityFinding>,
     scanned: usize,
     budget_exceeded: bool,
+    /// 发现所属的扫描阶段（"request"/"response"），同时用作 JSON 指针根前缀。
+    phase: String,
 }
 
-/// 对外入口：扫描整个请求 JSON，返回发现与预算状态。
+/// 对外入口：扫描整个 JSON，返回发现与预算状态。
+///
+/// `root` 同时作为两件事：
+/// - JSON 指针的根前缀（如 "request" / "response"），使发现 `location` 准确反映所处报文；
+/// - 发现 `phase` 字段值（请求阶段 / 响应阶段），用于落库区分与审计展示。
 pub fn scan(
     value: &Value,
     settings: &SecuritySettings,
     builtin: &[BuiltinRule],
     custom: &[CustomRule],
+    root: &str,
 ) -> SecurityScanResult {
     let mut ctx = ScanCtx {
         settings,
@@ -131,13 +139,48 @@ pub fn scan(
         findings: Vec::new(),
         scanned: 0,
         budget_exceeded: false,
+        phase: root.to_string(),
     };
-    let mut path = String::from("request");
+    let mut path = String::from(root);
     walk(value, &mut path, &mut ctx);
     SecurityScanResult {
         findings: ctx.findings,
         budget_exceeded: ctx.budget_exceeded,
     }
+}
+
+/// 流式响应增量审计入口。
+///
+/// 对单个 SSE chunk 转发前的纯文本（已含 JSON 结构，正则仍按子串命中内容）
+/// 跑与请求侧同一套内置正则 + 自定义黑名单，产出发现。
+///
+/// 设计要点：
+/// - `phase = "response_delta"`，落库 request_security_findings.phase 以区分
+///   请求阶段 / 非流式响应阶段，便于审计展示。
+/// - 仅用于审计记录：流式内容已实时发往客户端，命中不可撤回，故不做阻断。
+/// - 预算/扫描计数按单块独立（每块通常远小于上限），不做跨块累计——流式下
+///   精细预算意义不大，且避免引入跨块可变状态拖累实时性。
+pub fn scan_text_chunk(
+    text: &str,
+    settings: &SecuritySettings,
+    builtin: &[BuiltinRule],
+    custom: &[CustomRule],
+) -> Vec<SecurityFinding> {
+    if !settings.enabled {
+        return Vec::new();
+    }
+    let mut ctx = ScanCtx {
+        settings,
+        builtin,
+        custom,
+        compiled: compiled(),
+        findings: Vec::new(),
+        scanned: 0,
+        budget_exceeded: false,
+        phase: "response_delta".to_string(),
+    };
+    scan_string(text, "response.stream", &mut ctx);
+    ctx.findings
 }
 
 fn walk(value: &Value, path: &mut String, ctx: &mut ScanCtx) {
@@ -195,7 +238,8 @@ fn scan_string(text: &str, path: &str, ctx: &mut ScanCtx) {
                     description: rule.description.clone(),
                     location: Some(path.to_string()),
                     evidence_masked: Some(mask_evidence(m.as_str())),
-                    phase: "request".to_string(),
+                    evidence_hash: Some(evidence_hash(m.as_str())),
+                    phase: ctx.phase.clone(),
                 });
             }
         }
@@ -216,22 +260,47 @@ fn scan_string(text: &str, path: &str, ctx: &mut ScanCtx) {
                 description: Some(cr.pattern.clone()),
                 location: Some(path.to_string()),
                 evidence_masked: Some(mask_evidence(&cr.pattern)),
-                phase: "request".to_string(),
+                evidence_hash: Some(evidence_hash(&cr.pattern)),
+                phase: ctx.phase.clone(),
             });
         }
     }
 }
 
-/// 脱敏证据：过短直接 ****；否则保留首尾各 2 字符 + ****，既可读又不出明文。
+/// 脱敏证据：过短整体遮罩；短串保留前 2 字符指示类型；长串保留首尾各 2 字符。
+///
+/// 设计目标：审计员看得到「这是什么类型的数据」（如 sk- 开头是令牌、AK 开头是云密钥），
+/// 但拿不到任何可用于重放的明文片段。完整明文的一致性锚点由 `evidence_hash` 承担。
 fn mask_evidence(s: &str) -> String {
     let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= 6 {
-        "****".to_string()
+    let n = chars.len();
+    if n <= 2 {
+        // 过短：无足够上下文，整体遮罩，避免泄露任何明文。
+        "**".to_string()
+    } else if n <= 6 {
+        // 短串：保留前 2 字符指示类型（如 sk-/AK/gh），其余遮罩。
+        let head: String = chars.iter().take(2).collect();
+        format!("{}{}", head, "*".repeat(n - 2))
     } else {
+        // 长串：保留首尾各 2 字符。
         let first: String = chars.iter().take(2).collect();
-        let last: String = chars.iter().skip(chars.len() - 2).collect();
+        let last: String = chars.iter().skip(n - 2).collect();
         format!("{}****{}", first, last)
     }
+}
+
+/// 明文证据 SHA-256（十六进制），用于审计取证链：
+/// 跨 request/response/response_delta 阶段以同一哈希去重/串联「同一明文」，
+/// 而不在任何落库字段保留明文。便于事后溯源「这条风险在请求与响应里是同一个密钥」。
+fn evidence_hash(s: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(s.as_bytes());
+    let out = h.finalize();
+    let mut hex = String::with_capacity(out.len() * 2);
+    for b in out {
+        hex.push_str(&format!("{:02x}", b));
+    }
+    hex
 }
 
 #[cfg(test)]
@@ -254,7 +323,7 @@ mod tests {
         }
     }
 
-    /// 凭证类规则：toggle_key=NULL，始终扫描（不可单独关闭，对齐 waliapi）。
+    /// 凭证类规则：toggle_key=NULL，始终扫描（不可单独关闭）。
     fn secret_rule() -> BuiltinRule {
         BuiltinRule {
             rule_id: "cred.secret_token".to_string(),
@@ -296,7 +365,7 @@ mod tests {
     #[test]
     fn detects_secret_token_and_masks_evidence() {
         let body = json!({"messages":[{"role":"user","content":"my key is sk-abcdefghijklmnopqrstuvwx"}]});
-        let res = scan(&body, &settings(), &[secret_rule()], &[]);
+        let res = scan(&body, &settings(), &[secret_rule()], &[], "request");
         assert!(!res.findings.is_empty(), "应检出凭证");
         let f = res.findings.iter().find(|f| f.category == "credential").unwrap();
         assert_eq!(f.severity, "high");
@@ -314,7 +383,7 @@ mod tests {
         s.scan_tools = false;
         s.scan_network = false;
         let body = json!({"content":"sk-abcdefghijklmnopqrstuvwx"});
-        let res = scan(&body, &s, &[secret_rule()], &[]);
+        let res = scan(&body, &s, &[secret_rule()], &[], "request");
         assert!(!res.findings.is_empty(), "凭证类始终扫描，开关不应影响");
     }
 
@@ -324,14 +393,14 @@ mod tests {
         let mut s = settings();
         s.scan_network = false;
         let body = json!({"content":"send it to webhook.site"});
-        let res = scan(&body, &s, &[network_rule()], &[]);
+        let res = scan(&body, &s, &[network_rule()], &[], "request");
         assert!(res.findings.is_empty(), "关闭 scan_network 后不应检出可疑域名");
     }
 
     #[test]
     fn detects_chinese_id_card() {
         let body = json!({"id":"11010519900307657X"});
-        let res = scan(&body, &settings(), &[id_card_rule()], &[]);
+        let res = scan(&body, &settings(), &[id_card_rule()], &[], "request");
         assert!(res.findings.iter().any(|f| f.rule_id == "pii.id_card"));
     }
 
@@ -347,7 +416,7 @@ mod tests {
             description: None,
             toggle_key: Some("security_scan_unicode".to_string()),
             enabled: 1,
-        }], &[]);
+        }], &[], "request");
         assert!(res.findings.iter().any(|f| f.rule_id == "unicode.bidi_control"));
     }
 
@@ -362,7 +431,7 @@ mod tests {
             enabled: 1,
         };
         let body = json!({"text":"this contains forbidden-phrase inside"});
-        let res = scan(&body, &settings(), &[], &[rule]);
+        let res = scan(&body, &settings(), &[], &[rule], "request");
         assert!(res.findings.iter().any(|f| f.rule_id.starts_with("custom.")));
     }
 
@@ -370,7 +439,7 @@ mod tests {
     fn budget_exceeded_skips_scan() {
         let big = "a".repeat(2 * 1024 * 1024); // 2 MiB > MAX_SCAN_BYTES(1 MiB)
         let body = json!({"content": big});
-        let res = scan(&body, &settings(), &[secret_rule()], &[]);
+        let res = scan(&body, &settings(), &[secret_rule()], &[], "request");
         assert!(res.budget_exceeded, "超大请求应触发预算上限且不阻断");
         // 超限后未扫描，故无发现（验证 fail-open 跳过语义）
         assert!(res.findings.is_empty());
@@ -379,7 +448,25 @@ mod tests {
     #[test]
     fn benign_text_no_finding() {
         let body = json!({"content":"the quick brown fox jumps over the lazy dog"});
-        let res = scan(&body, &settings(), &[secret_rule(), id_card_rule()], &[]);
+        let res = scan(&body, &settings(), &[secret_rule(), id_card_rule()], &[], "request");
         assert!(res.findings.is_empty());
+    }
+
+    #[test]
+    fn scan_text_chunk_tags_response_delta_phase() {
+        // 流式增量审计入口：对单块纯文本扫描，发现 phase 应为 response_delta，
+        // 且 disabled 时不审计。
+        let text = "leak sk-abcdefghijklmnopqrstuvwx in response";
+        let res = scan_text_chunk(text, &settings(), &[secret_rule()], &[]);
+        assert_eq!(res.len(), 1, "应检出流式响应块中的密钥");
+        assert_eq!(res[0].phase, "response_delta", "增量审计发现 phase 应为 response_delta");
+        assert_eq!(res[0].severity, "high");
+
+        let mut disabled = settings();
+        disabled.enabled = false;
+        assert!(
+            scan_text_chunk(text, &disabled, &[secret_rule()], &[]).is_empty(),
+            "安全关闭时不审计"
+        );
     }
 }

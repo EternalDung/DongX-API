@@ -159,7 +159,7 @@ DongX 是 dongapi（D:\dongapi）的设计重构版。dongapi 作为前期探索
   ├─ 5. 转发：Reqwest 发请求到 base_url + endpoint，注入上游 api_key
   ├─ 6. 响应回流：SSE 流式回传客户端
   ├─ 7. 落库：异步写 request_logs（token、延迟、状态）
-  └─ 8. 风控：异常时写 audit_events + notification
+  └─ 8. 风控：异常时记录错误信息 + notification
 ```
 
 #### 2.4.3 流式 SSE 支持
@@ -254,8 +254,8 @@ DongX 是 dongapi（D:\dongapi）的设计重构版。dongapi 作为前期探索
 - 单密钥限流（每分钟最大请求数）
 - 总配额耗尽告警
 - 异常流量检测（短时高频/错误率突增）
-- 触发时写 audit_events + notification 弹窗
-- 审计时间线按严重级别筛选
+- 触发时记录错误信息 + notification 弹窗
+- 安全发现（`security_findings`）在日志详情中按严重级别查看
 
 #### 2.8.3 安全模式
 
@@ -386,7 +386,7 @@ src-tauri/src/
 channels 1───* gateway_keys (allowed_channels)
 channels 1───* request_logs (channel_name)
 gateway_keys 1───* request_logs (api_key_name)
-gateway_keys 1───* audit_events (actor)
+request_logs 1───* security_findings (log_id)
 settings (独立 KV 表)
 ```
 
@@ -396,7 +396,7 @@ settings (独立 KV 表)
 - `channels` — 上游渠道
 - `gateway_keys` — 网关密钥
 - `request_logs` — 请求日志
-- `audit_events` — 安全审计
+- `security_findings` — 安全发现（关联 request_logs）
 - `settings` — 系统设置（KV）
 
 ### 4.3 设计原则
@@ -438,7 +438,7 @@ settings (独立 KV 表)
 | `list_logs` | 查询请求日志 |
 | `get_log_detail` | 日志详情 |
 | `clear_logs` | 清理日志 |
-| `list_audit_events` | 查询审计事件 |
+| `get_log_security_findings` | 查询日志的安全发现 |
 | `get_settings` | 读取设置 |
 | `update_settings` | 更新设置 |
 | `get_dashboard_stats` | 仪表盘统计 |

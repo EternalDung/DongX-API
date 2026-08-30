@@ -12,8 +12,8 @@ use sqlx::sqlite::Sqlite;
 use sqlx::{QueryBuilder, Row, SqlitePool};
 
 use crate::models::{
-    AuditEventRow, ChannelRow, DashboardStatsRow, GatewayKeyRow, RequestLogListItem,
-    RequestLogRow, RequestSecurityFindingRow, SettingRow,
+    ChannelRow, DashboardStatsRow, GatewayKeyRow, RequestLogListItem, RequestLogRow,
+    RequestSecurityFindingRow, SettingRow,
 };
 
 fn now() -> String {
@@ -505,79 +505,6 @@ pub mod request_logs {
 }
 
 // ============================================================
-// audit_events
-// ============================================================
-/// Audit filter conditions (all optional).
-#[derive(Debug, Default, Clone)]
-pub struct AuditFilter {
-    pub severity: Option<String>,
-    pub event_type: Option<String>,
-    pub start_time: Option<String>,
-    pub end_time: Option<String>,
-    pub page: u32,
-    pub page_size: u32,
-}
-
-pub mod audit_events {
-    use super::*;
-
-    pub async fn insert(
-        pool: &SqlitePool,
-        event_type: &str,
-        severity: &str,
-        actor: Option<&str>,
-        message: &str,
-        meta: Option<&str>, // JSON string
-    ) -> Result<String, sqlx::Error> {
-        let id = new_id();
-        sqlx::query(
-            "INSERT INTO audit_events (id, timestamp, type, severity, actor, message, meta)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        )
-        .bind(&id)
-        .bind(now())
-        .bind(event_type)
-        .bind(severity)
-        .bind(actor)
-        .bind(message)
-        .bind(meta)
-        .execute(pool)
-        .await?;
-        Ok(id)
-    }
-
-    pub async fn list_filtered(
-        pool: &SqlitePool,
-        filter: &AuditFilter,
-    ) -> Result<Vec<AuditEventRow>, sqlx::Error> {
-        let mut qb: QueryBuilder<Sqlite> =
-            QueryBuilder::new("SELECT * FROM audit_events WHERE 1=1 ");
-
-        if let Some(s) = &filter.severity {
-            qb.push(" AND severity = ").push_bind(s.clone());
-        }
-        if let Some(t) = &filter.event_type {
-            qb.push(" AND type = ").push_bind(t.clone());
-        }
-        if let Some(s) = &filter.start_time {
-            qb.push(" AND timestamp >= ").push_bind(s.clone());
-        }
-        if let Some(e) = &filter.end_time {
-            qb.push(" AND timestamp <= ").push_bind(e.clone());
-        }
-
-        let page_size = filter.page_size.clamp(1, 200);
-        let offset = filter.page.saturating_sub(1).saturating_mul(page_size) as i64;
-        qb.push(" ORDER BY timestamp DESC LIMIT ");
-        qb.push_bind(page_size as i64);
-        qb.push(" OFFSET ");
-        qb.push_bind(offset);
-
-        qb.build_query_as::<AuditEventRow>().fetch_all(pool).await
-    }
-}
-
-// ============================================================
 // settings (key-value store, JSON-encoded values)
 // ============================================================
 pub mod settings {
@@ -781,7 +708,7 @@ pub mod security_findings {
         sqlx::query(
             "INSERT INTO request_security_findings \
              (id, log_id, phase, category, rule_id, severity, title, description, location, evidence_masked, evidence_hash, action, created_at) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,NULL,?11,?12)",
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
         )
         .bind(&id)
         .bind(log_id)
@@ -793,6 +720,7 @@ pub mod security_findings {
         .bind(&finding.description)
         .bind(&finding.location)
         .bind(&finding.evidence_masked)
+        .bind(&finding.evidence_hash)
         .bind(action)
         .bind(now())
         .execute(pool)

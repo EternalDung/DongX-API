@@ -128,7 +128,7 @@ D:\DongX/
 6. adapter → OpenAI 格式转上游格式（如 Anthropic messages）
 7. proxy → Reqwest 转发 → SSE 流式透传
 8. 响应回流客户端 + 异步落库 request_logs
-9. 异常时写 audit_events + notification
+9. 异常时记录错误信息 + notification
 ```
 
 ### 3.3 前端架构
@@ -170,7 +170,7 @@ React Frontend
 | `channels` | 上游渠道 |
 | `gateway_keys` | 网关密钥 |
 | `request_logs` | 请求日志 |
-| `audit_events` | 安全审计 |
+| `security_findings` | 安全发现（关联 request_logs） |
 | `settings` | 系统设置（KV） |
 
 ### 4.2 设计约定

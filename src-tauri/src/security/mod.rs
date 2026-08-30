@@ -9,7 +9,7 @@
 // - redact.rs  高风险类别脱敏转发体
 // - gate.rs    编排：加载设置→扫描→决策动作→(可选)脱敏→输出
 //
-// rate_limit 仍属搁置未接线功能，保留并静音其死代码告警。
+// rate_limit 已实现并在请求链路中启用（见 server/handler.rs 的网关密钥限速）；模块级 allow 保留以防其他暂未使用的辅助项告警。
 #![allow(dead_code)]
 
 pub mod gate;
@@ -92,21 +92,21 @@ impl SecurityAction {
 }
 
 /// 安全设置（来自 settings KV 表）。
-/// 对齐 waliapi：4 模式(audit/warn/redact/block) + 6 开关(3 检测 + 响应 + 2 行为)。
+/// 安全设置模型：4 模式(audit/warn/redact/block) + 6 开关(3 检测 + 响应 + 2 行为)。
 #[derive(Debug, Clone)]
 pub struct SecuritySettings {
     pub enabled: bool,
     /// audit | warn | redact | block
     pub mode: String,
-    /// 3 个可被独立开关控制的扫描类目（对齐 waliapi）。
+    /// 3 个可被独立开关控制的扫描类目。
     pub scan_unicode: bool,
     pub scan_tools: bool,
     pub scan_network: bool,
-    /// 响应侧扫描开关（DongX 暂未实现响应扫描，仅预留）。
+    /// 响应侧扫描开关（已实装：gate::scan_response + handler 非流式/流式两处均接入）。
     pub scan_response: bool,
-    /// 行为开关：独立于模式，控制转发体脱敏（对齐 waliapi redact_secrets）。
+    /// 行为开关：独立于模式，控制转发体脱敏（redact_secrets）。
     pub redact_secrets: bool,
-    /// 行为开关：跨模式覆盖，Critical 一律阻断（对齐 waliapi block_on_critical）。
+    /// 行为开关：跨模式覆盖，Critical 一律阻断（block_on_critical）。
     pub block_on_critical: bool,
 }
 
@@ -121,6 +121,9 @@ pub struct SecurityFinding {
     pub description: Option<String>,
     pub location: Option<String>,
     pub evidence_masked: Option<String>,
+    /// 明文证据 SHA-256（十六进制）。用于审计取证链：跨 request/response/response_delta
+    /// 阶段以同一哈希去重/串联「同一明文」，而不在任何落库字段保留明文；不暴露给前端。
+    pub evidence_hash: Option<String>,
     /// 扫描阶段：request（入站请求体）/ response（出站响应体）。落库 request_security_findings.phase。
     pub phase: String,
 }
@@ -152,7 +155,7 @@ impl SecurityOutcome {
 
 /// toggle_key -> 对应的 3 个可切换扫描类目开关。
 /// 仅 unicode/tools/network 受独立开关控制；NULL/未知/凭证/PII/支付/命令/提示注入
-/// 等类目视为常开（true，与 waliapi 一致——这些类别不可单独关闭）。
+/// 等类目视为常开（true——这些类别不可单独关闭）。
 pub fn is_switch_on(s: &SecuritySettings, toggle_key: &str) -> bool {
     match toggle_key {
         "security_scan_unicode" => s.scan_unicode,
@@ -162,27 +165,17 @@ pub fn is_switch_on(s: &SecuritySettings, toggle_key: &str) -> bool {
     }
 }
 
-/// 根据发现与模式决策最终动作 + 输出汇总。
-pub fn decide_action(findings: &[SecurityFinding], settings: &SecuritySettings) -> (SecurityAction, SecurityOutcome) {
+/// 仅根据发现计算风险指标（risk_level / risk_score / risk_summary / 最高风险标题），
+/// 不决定动作。供两种场景复用：
+/// - `decide_action` 内部生成 `SecurityOutcome`；
+/// - 响应阶段扫描后，把「请求+响应」合并发现重算汇总，使主行与落库 findings 一致。
+pub fn compute_risk_metrics(
+    findings: &[SecurityFinding],
+) -> (String, i64, Option<String>, Option<String>) {
     if findings.is_empty() {
-        return (SecurityAction::Allow, SecurityOutcome::allow());
+        return ("none".to_string(), 0, None, None);
     }
 
-    let max = findings
-        .iter()
-        .map(|f| parse_risk_level(&f.severity))
-        .max()
-        .unwrap_or(RiskLevel::Info);
-    let risk_level = max.as_str().to_string();
-
-    // 风险评分：各发现秩之和，封顶 999，便于排序与展示。
-    let risk_score: i64 = findings
-        .iter()
-        .map(|f| parse_risk_level(&f.severity).rank() as i64)
-        .sum::<i64>()
-        .min(999);
-
-    // 汇总文案：按等级计数 + 最高风险标题。
     let mut counts = [0u32; 5]; // Info/Low/Medium/High/Critical
     let mut top: Option<&SecurityFinding> = None;
     for f in findings {
@@ -192,6 +185,16 @@ pub fn decide_action(findings: &[SecurityFinding], settings: &SecuritySettings) 
             top = Some(f);
         }
     }
+    let max = top.map(|t| parse_risk_level(&t.severity)).unwrap_or(RiskLevel::Info);
+    let risk_level = max.as_str().to_string();
+
+    // 风险评分：各发现秩之和，封顶 999，便于排序与展示。
+    let risk_score: i64 = findings
+        .iter()
+        .map(|f| parse_risk_level(&f.severity).rank() as i64)
+        .sum::<i64>()
+        .min(999);
+
     let risk_summary = Some(format!(
         "检出 {} 项风险（高:{} 中:{} 低:{}）",
         findings.len(),
@@ -199,6 +202,19 @@ pub fn decide_action(findings: &[SecurityFinding], settings: &SecuritySettings) 
         counts[RiskLevel::Medium.rank() as usize - 1],
         counts[RiskLevel::Low.rank() as usize - 1] + counts[RiskLevel::Info.rank() as usize - 1],
     ));
+
+    let top_title = top.map(|t| t.title.clone());
+    (risk_level, risk_score, risk_summary, top_title)
+}
+
+/// 根据发现与模式决策最终动作 + 输出汇总。
+pub fn decide_action(findings: &[SecurityFinding], settings: &SecuritySettings) -> (SecurityAction, SecurityOutcome) {
+    if findings.is_empty() {
+        return (SecurityAction::Allow, SecurityOutcome::allow());
+    }
+
+    let (risk_level, risk_score, risk_summary, top_title) = compute_risk_metrics(findings);
+    let max = parse_risk_level(&risk_level);
 
     let mut action = match settings.mode.as_str() {
         // 审计：仅记录，永远放行。
@@ -230,7 +246,7 @@ pub fn decide_action(findings: &[SecurityFinding], settings: &SecuritySettings) 
         _ => SecurityAction::Allow,
     };
 
-    // 跨模式覆盖：严重风险强制阻断（对齐 waliapi block_on_critical）。
+    // 跨模式覆盖：严重风险强制阻断（block_on_critical）。
     if settings.block_on_critical && max == RiskLevel::Critical {
         action = SecurityAction::Block;
     }
@@ -241,7 +257,7 @@ pub fn decide_action(findings: &[SecurityFinding], settings: &SecuritySettings) 
             "安全审计（{} 模式）：命中 {} 级风险「{}」，已阻断请求",
             settings.mode,
             risk_level,
-            top.map(|t| t.title.as_str()).unwrap_or("未知")
+            top_title.as_deref().unwrap_or("未知")
         ))
     } else {
         None
@@ -284,6 +300,7 @@ mod tests {
             description: None,
             location: None,
             evidence_masked: None,
+            evidence_hash: None,
             phase: "request".to_string(),
         }
     }

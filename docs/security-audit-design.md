@@ -2,7 +2,7 @@
 
 > 适配目标：本地单用户 LLM 网关（Tauri 2 + Rust/Axum）。参考同类桌面 LLM 网关（CC Switch 这类）的成熟安全闸门做法，按 DongX 的实际定位（单用户、本地、Chat + Responses 为主）裁剪。
 >
-> 本文档**描述已落地的真实实现**。安全审计设置模型（4 模式 + 6 开关）已**对齐 waliapi**；末尾「§9 waliapi 对齐度对照」列出与参考实现的差异与保留的 DongX 本地化决策。
+> 本文档**描述已落地的真实实现**。安全审计设置模型（4 模式 + 6 开关）已**对齐参考实现的设计**；末尾「§6 与参考实现对齐度对照」列出与参考实现的差异与保留的 DongX 本地化决策。
 
 ---
 
@@ -13,7 +13,7 @@
 | 内容扫描 | `security/scanner.rs` 有 `check_api_keys` / `check_credit_cards` / `check_ssn`(美式 `XXX-XX-XXXX`) / `check_internal_ips` | ① **全部未接入请求管道**（死代码，`#![allow(dead_code)]` 静音）；② `check_ssn` 是美式格式，**无中国身份证规则**；③ 没有手机号 / 邮箱 / 银行卡 / 私钥 / 提示注入等 |
 | 脱敏 | `scanner::redact_secrets` 已实现但从未调用 | 日志里 `log_raw_body` 开启时会把**原始请求/响应体**落库（`request_logs.request_body/response_body`），凭证可能进本地 DB |
 | 介入点 | 无统一"路由/转换/访问上游之前审计"的位置 | 鉴权后直接 `dispatcher`→`adapter`→上游，没有任何内容安全闸门 |
-| 审计落库 | `audit_events` 表已接 `invalid_key`/`quota_exhaust`/`config_change` | `suspicious` 类型已预留但**未接线**（因为扫描没接） |
+| 审计落库 | 无独立 `audit_events` 事件流；安全发现落 `request_logs` + `security_findings`，在日志详情展示 | 已对齐参考实现（其无独立审计事件流），findings 的落库与展示已补齐 |
 | 设置开关 | 前端 6 个开关写 `security_detect_*` 等键，但后端 gate 读的是另一套 `scan_*` 死键 | **6 个开关全是装饰品**，对闸门零作用（本次对齐已修正） |
 
 **一句话**：所谓"安全"只是几条文案级正则且没生效；真正的缺口是「统一闸门 + 脱敏转发 + 本地化 PII 规则 + 审计落库 + 开关真正生效」。
@@ -26,8 +26,8 @@
 - **G2 原始协议全树扫描**：扫的是解析后的原始请求 JSON 全树，不是转换后的 Chat JSON（否则会漏掉 Responses 工具、图片 URL、未知字段）。
 - **G3 脱敏转发 + 日志脱敏**：`security_redact_secrets` 开启时对转发体做全树高风险脱敏；日志落库体**始终**走脱敏副本（高风险凭证不出本机、不入 DB）。
 - **G4 扫描预算保护**：单次请求累计扫描字节上限 1 MiB，超限**跳过剩余内容**（fail-open，不阻断请求）。
-- **G5 风险分级 + 动作语义**（`audit`/`warn`/`redact`/`block`，对齐 waliapi），**默认 `audit` 模式**——本地单用户默认仅记录、零误伤。
-- **G6 审计落库**：命中即写 `request_security_findings` 明细 + `request_logs` 风险汇总 6 字段 + `suspicious` 审计事件。
+- **G5 风险分级 + 动作语义**（`audit`/`warn`/`redact`/`block`），**默认 `audit` 模式**——本地单用户默认仅记录、零误伤。
+- **G6 审计落库**：命中即写 `request_security_findings` 明细 + `request_logs` 风险汇总 6 字段。
 
 ### 2.1 关键原则：fail-open（与初版 fail-closed 相反）
 
@@ -61,7 +61,7 @@ db/repository.rs
    ▼
 run_gate(pool, body)
    ├─ security_enabled == false → 直接放行（forward=原 body, outcome=allow）
-   ├─ 加载安全设置（enabled + mode + 6 开关，键名对齐 waliapi）
+   ├─ 加载安全设置（enabled + mode + 6 开关，键名与参考实现一致）
    ├─ BuiltinRuleRepository::get_enabled + CustomRuleRepository::get_enabled
    ├─ scanner::scan(全树, settings, builtin, custom) → (findings, budget_exceeded)
    ├─ decide_action(findings, settings)              → (SecurityAction, SecurityOutcome)
@@ -71,16 +71,16 @@ run_gate(pool, body)
 GateOutput { forward_body, outcome, findings, action }
    ├─ action == Block → 403 阻断，写日志(含 blocked_reason) + findings，绝不联系上游
    └─ 否则: forward_body 往下传; outcome 写 request_logs 6 字段;
-            findings 写 request_security_findings; findings 非空写 suspicious 审计
+            findings 写 request_security_findings; findings 非空落库（无独立审计事件流）
 ```
 
 ---
 
 ## 4. 关键设计点
 
-### 4.1 4 级模式 + 6 个检测开关（对齐 waliapi）
+### 4.1 4 级模式 + 6 个检测开关
 
-`security_mode`（`audit`/`warn`/`redact`/`block`）+ 6 个开关（3 个可切换扫描类目 + 1 个响应侧 + 2 个行为开关）共同决定行为。键名与 waliapi 完全一致：
+`security_mode`（`audit`/`warn`/`redact`/`block`）+ 6 个开关（3 个可切换扫描类目 + 1 个响应侧 + 2 个行为开关）共同决定行为。键名如下：
 
 | 开关 | 类型 | 默认 | 说明 |
 |---|---|---|---|
@@ -91,7 +91,7 @@ GateOutput { forward_body, outcome, findings, action }
 | `security_redact_secrets` | **行为** | `false` | 独立于模式：开启后转发体高风险脱敏 |
 | `security_block_on_critical` | **行为** | `false` | 独立于模式：Critical 命中一律阻断 |
 
-> 与 waliapi 的关键对齐点：**脱敏/阻断是独立于模式的开关**，而非塞进模式里。仅 `unicode/tools/network` 三类可被独立开关控制；凭证/PII/支付/命令/提示注入规则 `toggle_key=NULL`，**始终扫描**（不可单独关闭），与 waliapi 一致。
+> 关键设计点：**脱敏/阻断是独立于模式的开关**，而非塞进模式里。仅 `unicode/tools/network` 三类可被独立开关控制；凭证/PII/支付/命令/提示注入规则 `toggle_key=NULL`，**始终扫描**（不可单独关闭）。
 
 **`decide_action` 真值表**（按本次请求命中的**最高**风险等级 `max` 决策；`action` 之外的发现仍全部记录）：
 
@@ -102,7 +102,7 @@ GateOutput { forward_body, outcome, findings, action }
 | `redact`（脱敏） | Allow | Allow | Redact | Redact | 高风险动作标记为 Redact |
 | `block`（阻断） | Allow | Allow | Block | Block | 高风险直接阻断 |
 
-- **跨模式覆盖 `block_on_critical`**：无论 `mode` 取值，只要 `max == Critical` 且开关开启 → 强制 `Block`（对齐 waliapi，避免"warn 模式漏掉私钥/云密钥"）。
+- **跨模式覆盖 `block_on_critical`**：无论 `mode` 取值，只要 `max == Critical` 且开关开启 → 强制 `Block`（避免"warn 模式漏掉私钥/云密钥"）。
 - 转发体脱敏由 **`security_redact_secrets` 独立控制**（与 `mode` 解耦）：开启即对所有请求体走 `redact::redact()`，上游只见 `[REDACTED]`；日志落库体则始终走脱敏副本（见 §4.4）。
 - `sanitized` 标记 = `security_redact_secrets`（真实反映转发体是否被脱敏）。
 - 风险评分 `risk_score` = 各发现 `RiskLevel::rank()` 之和，封顶 999，用于排序/展示。
@@ -195,13 +195,13 @@ let forward_body = gate.forward_body.clone();
 ```
 
 - `DispatchContext.request_body` 与 `ProxyRequest.body` 改用 `forward_body`。
-- `spawn_log` 签名尾部加 `sec: SecurityOutcome, findings: Vec<SecurityFinding>`：内部 `request_logs::insert` 传入 6 安全字段；落 `request_security_findings`（via `repository::security_findings::insert`）；findings 非空写 `suspicious` 审计（critical/high→critical，medium→warning，其余→info）。
+- `spawn_log` 签名尾部加 `sec: SecurityOutcome, findings: Vec<SecurityFinding>`：内部 `request_logs::insert` 传入 6 安全字段；落 `request_security_findings`（via `repository::security_findings::insert`）；findings 非空时落库（无独立审计事件流）。
 - 流路径 `serve_stream` / `build_stream_response` / `build_responses_stream_response` 同步透传 `sec, findings` 到 `spawn_log`。
 - `Responses` 路径因复用同一 `run_chat_pipeline` 自动覆盖，无需另插。
 
-### 4.6 设置项（实际落地，对齐 waliapi）
+### 4.6 设置项（实际落地）
 
-`settings` KV 表（键名与 waliapi 完全一致）：
+`settings` KV 表（键名如下）：
 
 | key | 类型 | 默认 | 说明 |
 |---|---|---|---|
@@ -214,7 +214,7 @@ let forward_body = gate.forward_body.clone();
 | `security_redact_secrets` | bool | `false` | 请求脱敏转发（独立于模式） |
 | `security_block_on_critical` | bool | `false` | 严重风险强制阻断（跨模式覆盖） |
 
-> **默认值说明**：waliapi 将所有扫描开关默认 `false`（opt-in）。DongX 作为**本地单用户网关**保留了「扫描默认开、强动作默认关」的本地化决策——`scan_*` 三类目默认 `true`（装上即有保护），`redact_secrets`/`block_on_critical`/`scan_response` 默认 `false`（需用户主动开启强动作）。模式默认 `audit` 与 waliapi 一致。
+> **默认值说明**：参考实现将所有扫描开关默认 `false`（opt-in）。DongX 作为**本地单用户网关**保留了「扫描默认开、强动作默认关」的本地化决策——`scan_*` 三类目默认 `true`（装上即有保护），`redact_secrets`/`block_on_critical`/`scan_response` 默认 `false`（需用户主动开启强动作）。模式默认 `audit` 与参考实现一致。
 
 前端：设置 → **安全审计** Tab（4 级模式下拉 + 启用开关 + 6 个检测开关卡片，键名与后端/DB 一致）。
 
@@ -229,26 +229,26 @@ let forward_body = gate.forward_body.clone();
 
 - **已完成（本次落地）**：
   - 迁移 `003_security_audit.sql`：3 张表 + 索引 + 21 条种子规则 + 6 开关默认 `true` + 旧 `balanced` → `warning` 迁移。
-  - 迁移 `004_security_alignment.sql`：规则 `toggle_key` 重映射 + 补 4 条 Unicode 规则 + 旧模式值映射 + 清理孤儿键（**对齐 waliapi**）。
+  - 迁移 `004_security_alignment.sql`：规则 `toggle_key` 重映射 + 补 4 条 Unicode 规则 + 旧模式值映射 + 清理孤儿键。
   - `security/mod.rs`：类型 + `is_switch_on` + `decide_action`（4 级模式真值表 + `block_on_critical` 跨模式覆盖）。
   - `security/rules.rs`：内置/自定义规则结构体 + `get_enabled` 仓储。
   - `security/scanner.rs`：全树 walk + `PATTERNS`（含 4 条 Unicode 正则）+ `OnceLock` 正则 + 1 MiB 预算 + 脱敏证据掩码 + `high_risk_regexes()`（15 条）。
   - `security/redact.rs`：`redact()` 全树高风险替换。
-  - `security/gate.rs`：`run_gate()` 编排（读 waliapi 键名 + `redact_secrets` 解耦脱敏）+ fail-open。
+  - `security/gate.rs`：`run_gate()` 编排（读 settings 键名 + `redact_secrets` 解耦脱敏）+ fail-open。
   - `db/repository.rs::security_findings`：`insert()` 落明细。
-  - `server/handler.rs`：闸门接线（chat+responses 共用）+ `spawn_log` 落 6 字段 + findings + suspicious 审计 + 日志体脱敏副本（G3 请求体）。
-  - `commands/settings.rs` + 前端 `types/index.ts` / `api.ts` / `SettingsPage.tsx`：6 开关键名与 4 级模式**对齐 waliapi**，开关真正生效（修正此前死键 bug）。
+  - `server/handler.rs`：闸门接线（chat+responses 共用）+ `spawn_log` 落 6 字段 + findings + 日志体脱敏副本（G3 请求体）。
+  - `commands/settings.rs` + 前端 `types/index.ts` / `api.ts` / `SettingsPage.tsx`：6 开关键名与 4 级模式一致，开关真正生效（修正此前死键 bug）。
   - **编译验证**：`cargo check --lib` 通过 + `cargo test --lib security` 单测通过。
 
 - **未做（后续）**：见 §8。
 
 ---
 
-## 6. 与 waliapi 对齐度对照
+## 6. 与参考实现对齐度对照
 
-本实现的安全审计设置模型（4 模式 + 6 开关）**已对齐 waliapi**：库表三件套（`security_builtin_rules`/`security_custom_rules`/`request_security_findings`）+ `request_logs` 6 安全字段 + 4 级模式 + 6 开关键名均一致。下表列出差异与保留的 DongX 本地化决策：
+本实现的安全审计设置模型（4 模式 + 6 开关）**已对齐参考实现的设计**：库表三件套（`security_builtin_rules`/`security_custom_rules`/`request_security_findings`）+ `request_logs` 6 安全字段 + 4 级模式 + 6 开关键名均一致。下表列出差异与保留的 DongX 本地化决策：
 
-| 维度 | waliapi | DongX | 是否对齐 |
+| 维度 | 参考实现 | DongX | 是否对齐 |
 |---|---|---|---|
 | 模式枚举 | `audit/warn/redact/block` | `audit/warn/redact/block` | ✅ 完全一致 |
 | 6 开关键名 | `security_scan_unicode/tools/network/response/redact_secrets/block_on_critical` | 同名 | ✅ 完全一致 |
@@ -293,4 +293,4 @@ let forward_body = gate.forward_body.clone();
 `003_security_audit.sql` 一旦被 sqlx 应用（应用首次启动跑过迁移即生效），**禁止再编辑**（sqlx 的 `_sqlx_migrations.checksum` = SHA-384(文件原始字节)，改了启动必 panic）。任何后续规则调整：
 - 改 `enabled` / 加规则 → 走新迁移文件（`004_*.sql`）或运行时编辑 DB，而非改 `003`。
 - 改正则 → 正则在 `scanner.rs` 的 `PATTERNS` 常量（代码层），与 DB 规则元数据解耦，改代码即可、无需动迁移。
-- **本次已踩的坑**：`003` 种下的 `scan_*` 类目键是"死键"（gate 从不读），前端拨的开关写的是另一套 `security_detect_*` 键——导致 6 个开关对闸门零作用。对齐 waliapi 后，所有键统一为 `security_scan_*` 等，并通过 `004` 清理了孤儿键。
+- **本次已踩的坑**：`003` 种下的 `scan_*` 类目键是"死键"（gate 从不读），前端拨的开关写的是另一套 `security_detect_*` 键——导致 6 个开关对闸门零作用。对齐参考实现的设计后，所有键统一为 `security_scan_*` 等，并通过 `004` 清理了孤儿键。

@@ -12,7 +12,7 @@ use serde_json::Value;
 
 use super::{decide_action, redact, scanner, SecurityAction, SecurityOutcome, SecuritySettings, SecurityFinding};
 use crate::db::repository::settings::get as settings_get;
-use crate::security::rules::{BuiltinRuleRepository, CustomRuleRepository};
+use crate::security::rules::{BuiltinRule, BuiltinRuleRepository, CustomRule, CustomRuleRepository};
 
 /// 闸门输出。
 pub struct GateOutput {
@@ -33,25 +33,18 @@ async fn bool_setting(pool: &SqlitePool, key: &str, default: bool) -> bool {
     }
 }
 
-/// 运行安全闸门。Err 表示子系统异常，调用方应 fail-open 放行。
-pub async fn run_gate(pool: &SqlitePool, body: Value) -> Result<GateOutput, sqlx::Error> {
+/// 加载扫描所需的（安全设置 + 启用内置规则 + 启用自定义规则）。
+///
+/// 请求闸门、非流式响应扫描、流式增量审计共用同一套上下文，避免三处各写一遍
+/// 设置/规则加载逻辑而产生分歧。
+pub async fn load_scan_context(
+    pool: &SqlitePool,
+) -> Result<(SecuritySettings, Vec<BuiltinRule>, Vec<CustomRule>), sqlx::Error> {
     let enabled = bool_setting(pool, "security_enabled", true).await;
-    if !enabled {
-        return Ok(GateOutput {
-            forward_body: body,
-            outcome: SecurityOutcome::allow(),
-            findings: Vec::new(),
-            action: SecurityAction::Allow,
-        });
-    }
-
     let mode = match settings_get(pool, "security_mode").await {
         Ok(Some(s)) => serde_json::from_str::<String>(&s).unwrap_or_else(|_| "audit".to_string()),
         _ => "audit".to_string(),
     };
-
-    // 对齐 waliapi 的 6 开关：3 个可切换扫描类目(默认开) + 响应扫描(默认关)
-    // + 2 个行为开关(redact_secrets/block_on_critical 默认关，与模式解耦)。
     let sec = SecuritySettings {
         enabled,
         mode,
@@ -62,17 +55,41 @@ pub async fn run_gate(pool: &SqlitePool, body: Value) -> Result<GateOutput, sqlx
         redact_secrets: bool_setting(pool, "security_redact_secrets", false).await,
         block_on_critical: bool_setting(pool, "security_block_on_critical", false).await,
     };
-
     let builtin = BuiltinRuleRepository::get_enabled(pool).await?;
     let custom = CustomRuleRepository::get_enabled(pool).await?;
+    Ok((sec, builtin, custom))
+}
 
-    let result = scanner::scan(&body, &sec, &builtin, &custom);
+/// 运行安全闸门。Err 表示子系统异常，调用方应 fail-open 放行。
+pub async fn run_gate(pool: &SqlitePool, body: Value) -> Result<GateOutput, sqlx::Error> {
+    let (sec, builtin, custom) = match load_scan_context(pool).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("安全设置/规则加载失败，fail-open 放行: {}", e);
+            return Ok(GateOutput {
+                forward_body: body,
+                outcome: SecurityOutcome::allow(),
+                findings: Vec::new(),
+                action: SecurityAction::Allow,
+            });
+        }
+    };
+    if !sec.enabled {
+        return Ok(GateOutput {
+            forward_body: body,
+            outcome: SecurityOutcome::allow(),
+            findings: Vec::new(),
+            action: SecurityAction::Allow,
+        });
+    }
+
+    let result = scanner::scan(&body, &sec, &builtin, &custom, "request");
     if result.budget_exceeded {
         tracing::warn!("安全扫描触发字节预算上限，已跳过剩余内容（未阻断）");
     }
 
     let (action, outcome) = decide_action(&result.findings, &sec);
-    // 转发体脱敏由独立开关 redact_secrets 控制（对齐 waliapi，与模式解耦）。
+    // 转发体脱敏由独立开关 redact_secrets 控制（与模式解耦）。
     let forward_body = if sec.redact_secrets {
         redact::redact(&body)
     } else {
@@ -87,15 +104,16 @@ pub async fn run_gate(pool: &SqlitePool, body: Value) -> Result<GateOutput, sqlx
     })
 }
 
-/// 扫描出站响应体（对齐 waliapi 的 security_scan_response 开关）。
+/// 扫描出站响应体（security_scan_response 开关）。
 ///
 /// 与 run_gate 的区别：
 /// - 仅当 `security_enabled` 且 `security_scan_response` 同时开启才扫描；否则返回空（无发现）。
 /// - 响应已发送给客户端，无需脱敏转发体，也不据此阻断；只产出发现与风险汇总供落库审计。
 /// - 发现统一标记 `phase = "response"`，落库 request_security_findings.phase 以区分请求阶段。
 pub async fn scan_response(pool: &SqlitePool, body: Value) -> Result<GateOutput, sqlx::Error> {
-    let enabled = bool_setting(pool, "security_enabled", true).await;
-    if !enabled {
+    let (mut sec, builtin, custom) = load_scan_context(pool).await?;
+    // 响应侧独立开关：关闭则不扫描响应（与请求扫描解耦）。
+    if !sec.enabled || !sec.scan_response {
         return Ok(GateOutput {
             forward_body: body,
             outcome: SecurityOutcome::allow(),
@@ -104,48 +122,21 @@ pub async fn scan_response(pool: &SqlitePool, body: Value) -> Result<GateOutput,
         });
     }
 
-    // 响应侧独立开关：关闭则不扫描响应（与请求扫描解耦，对齐 waliapi）。
-    let scan_response = bool_setting(pool, "security_scan_response", false).await;
-    if !scan_response {
-        return Ok(GateOutput {
-            forward_body: body,
-            outcome: SecurityOutcome::allow(),
-            findings: Vec::new(),
-            action: SecurityAction::Allow,
-        });
-    }
+    // 响应不触发阻断，模式固定 audit、关闭脱敏/强制阻断（仅记录风险等级/评分）。
+    sec.mode = "audit".to_string();
+    sec.redact_secrets = false;
+    sec.block_on_critical = false;
+    sec.scan_response = true;
 
-    // 响应扫描复用同样的 SecuritySettings（含各类目开关），但模式固定 audit：
-    // 响应不触发阻断，仅记录风险等级/评分供审计。
-    let mode = match settings_get(pool, "security_mode").await {
-        Ok(Some(s)) => serde_json::from_str::<String>(&s).unwrap_or_else(|_| "audit".to_string()),
-        _ => "audit".to_string(),
-    };
-    let sec = SecuritySettings {
-        enabled,
-        mode,
-        scan_unicode: bool_setting(pool, "security_scan_unicode", true).await,
-        scan_tools: bool_setting(pool, "security_scan_tools", true).await,
-        scan_network: bool_setting(pool, "security_scan_network", true).await,
-        scan_response: true,
-        redact_secrets: false,
-        block_on_critical: false,
-    };
-
-    let builtin = BuiltinRuleRepository::get_enabled(pool).await?;
-    let custom = CustomRuleRepository::get_enabled(pool).await?;
-    let result = scanner::scan(&body, &sec, &builtin, &custom);
+    // root="response"：scan 自动把 location 前缀与 phase 设为响应侧，落库正确区分。
+    let result = scanner::scan(&body, &sec, &builtin, &custom, "response");
 
     let (action, outcome) = decide_action(&result.findings, &sec);
-    let mut findings = result.findings;
-    for f in findings.iter_mut() {
-        f.phase = "response".to_string();
-    }
 
     Ok(GateOutput {
         forward_body: body,
         outcome,
-        findings,
+        findings: result.findings,
         action,
     })
 }
@@ -247,7 +238,7 @@ mod tests {
 
     #[tokio::test]
     async fn scan_unicode_key_is_wired_not_dead_key() {
-        // 证明 gate 读的是 waliapi 键 security_scan_unicode，而非旧死键 scan_*。
+        // 证明 gate 读的是 security_scan_unicode 键，而非旧死键 scan_*。
         let pool = test_pool().await;
         set(&pool, "security_mode", "\"audit\"").await;
 

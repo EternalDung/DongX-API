@@ -24,6 +24,8 @@ import type {
   ServerStatus,
   CustomRule,
   CustomRuleInput,
+  BuiltinRule,
+  BuiltinRuleUpdate,
 } from "@/types";
 
 // ============================================================
@@ -84,6 +86,8 @@ export interface SettingsUpdate {
   auto_start?: boolean;
   retry_enabled?: boolean;
   retry_times?: number;
+  enable_rate_limit?: boolean;
+  rate_limit_rpm?: number;
   log_retention_days?: number;
   log_raw_body?: boolean;
   security_enabled?: boolean;
@@ -217,6 +221,23 @@ export const customRuleApi = {
   /** 删除自定义规则 */
   remove: (id: string): Promise<void> =>
     invoke<void>("delete_custom_rule", { id }),
+};
+
+// ============================================================
+// 内置安全规则 API
+// 系统内置的敏感信息检测规则，可单独开关或调整严重等级
+// ============================================================
+
+export const builtinRuleApi = {
+  /** 列出全部内置规则（含已禁用） */
+  list: (): Promise<BuiltinRule[]> => invoke<BuiltinRule[]>("list_builtin_rules"),
+
+  /** 更新内置规则的启用状态与严重等级 */
+  update: (ruleId: string, input: BuiltinRuleUpdate): Promise<void> =>
+    invoke<void>("update_builtin_rule", { ruleId, input }),
+
+  /** 恢复全部内置规则到出厂默认配置 */
+  reset: (): Promise<void> => invoke<void>("reset_builtin_rules"),
 };
 
 // ============================================================

@@ -15,7 +15,7 @@ mod security;
 mod server;
 mod tray;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tauri::Manager;
 
 /// Application shared state (shared between Axum data plane and Tauri management plane)
@@ -28,6 +28,8 @@ pub struct AppState {
     pub server: server::ServerHandle,
     /// 关闭到托盘开关的运行态镜像（由设置页保存时更新，供窗口关闭钩子同步读取）。
     pub close_to_tray: std::sync::Arc<std::sync::Mutex<bool>>,
+    /// 请求限流器运行态：按网关密钥滑动窗口限速，设置变更时整体重建。
+    pub rate_limiter: Arc<Mutex<security::rate_limit::RateLimiterState>>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -76,11 +78,13 @@ pub fn run() {
             commands::log::get_log_security_findings,
             commands::log::clear_logs,
             commands::log::delete_log,
-            commands::audit::list_audit_events,
             commands::security::list_custom_rules,
             commands::security::create_custom_rule,
             commands::security::update_custom_rule,
             commands::security::delete_custom_rule,
+            commands::security::list_builtin_rules,
+            commands::security::update_builtin_rule,
+            commands::security::reset_builtin_rules,
             commands::settings::get_settings,
             commands::settings::update_settings,
             commands::settings::get_dashboard_stats,
@@ -130,10 +134,25 @@ pub fn run() {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
 
+            // 初始化请求限流器（启动即按设置构建；运行期改 RPM/开关由 update_settings 重建）。
+            let rl_enabled = startup_settings
+                .get("enable_rate_limit")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let rl_rpm = startup_settings
+                .get("rate_limit_rpm")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(60)
+                .max(1) as u32;
+            let rate_limiter = Arc::new(Mutex::new(
+                crate::security::rate_limit::RateLimiterState::new(rl_enabled, rl_rpm),
+            ));
+
             let app_state = Arc::new(AppState {
                 db: pool.clone(),
                 server: server::ServerHandle::new(),
                 close_to_tray: std::sync::Arc::new(std::sync::Mutex::new(close_to_tray)),
+                rate_limiter,
             });
             app.manage(app_state);
 

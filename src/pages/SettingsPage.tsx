@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { RefreshCw, Save, RotateCw, Play, Square, Plus, Pencil, Trash2 } from "lucide-react";
+import { RefreshCw, Save, RotateCw, Play, Square, Plus, Pencil, Trash2, ChevronUp, ChevronDown } from "lucide-react";
 import {
   Card,
   CardContent,
@@ -27,6 +27,7 @@ import {
   settingsApi,
   serverApi,
   customRuleApi,
+  builtinRuleApi,
   type SettingsUpdate,
 } from "@/lib/api";
 import { applyTheme } from "@/lib/theme";
@@ -41,6 +42,8 @@ import type {
   ServerStatus,
   CustomRule,
   CustomRuleInput,
+  BuiltinRule,
+  BuiltinRuleUpdate,
 } from "@/types";
 
 /** 安全审计 Tab 内 6 个检测项的复用卡片（标签 + 右上角开关） */
@@ -395,6 +398,297 @@ function CustomRulesCard() {
   );
 }
 
+/** 内置规则类目中文标签（与后端 category 对齐） */
+const BUILTIN_CATEGORY_LABEL: Record<BuiltinRule["category"], string> = {
+  credential: "凭证",
+  personal: "个人信息",
+  payment: "支付",
+  network: "网络外联",
+  tool: "工具 / 命令",
+  prompt: "提示注入",
+  unicode: "Unicode 隐写",
+};
+
+/** 内置规则严重度 → Badge 变体 / 中文标签（含 info） */
+const BUILTIN_SEVERITY_VARIANT: Record<
+  BuiltinRule["severity"],
+  "outline" | "secondary" | "warning" | "destructive"
+> = {
+  info: "outline",
+  low: "outline",
+  medium: "secondary",
+  high: "warning",
+  critical: "destructive",
+};
+const BUILTIN_SEVERITY_LABEL: Record<BuiltinRule["severity"], string> = {
+  info: "提示",
+  low: "低",
+  medium: "中",
+  high: "高",
+  critical: "严重",
+};
+
+/** 展示顺序（与设置页 6 个检测开关逻辑一致） */
+const BUILTIN_GROUP_ORDER: BuiltinRule["category"][] = [
+  "credential",
+  "personal",
+  "payment",
+  "network",
+  "tool",
+  "prompt",
+  "unicode",
+];
+
+/** toggle_key → 控制该类目的全局开关中文名（NULL = 常开） */
+const BUILTIN_TOGGLE_LABEL: Record<string, string> = {
+  security_scan_network: "外联 / 追踪风险检测",
+  security_scan_tools: "工具 / 命令风险检测",
+  security_scan_unicode: "Unicode 隐写检测",
+};
+
+/** 该类目当前是否受全局开关放行（用于门控提示） */
+const isGateOn = (toggleKey: string | null, s: Settings): boolean => {
+  if (toggleKey == null) return true;
+  if (toggleKey === "security_scan_network") return s.security_scan_network;
+  if (toggleKey === "security_scan_tools") return s.security_scan_tools;
+  if (toggleKey === "security_scan_unicode") return s.security_scan_unicode;
+  return true;
+};
+
+/**
+ * 安全审计 Tab 内的「内置安全规则」卡片（第一张）。
+ * 与「自定义规则」卡片互补：内置是系统能力清单（可单独开关 / 调严重度，不可删），
+ * 自定义是用户的补丁。分组展示 25 条规则，支持搜索与类目筛选、恢复默认。
+ */
+function BuiltinRulesCard({ settings }: { settings: Settings }) {
+  const toast = useToast();
+  const [rules, setRules] = useState<BuiltinRule[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [search, setSearch] = useState("");
+  const [cat, setCat] = useState<"all" | BuiltinRule["category"]>("all");
+  const [collapsed, setCollapsed] = useState(false);
+
+  const load = async () => {
+    setLoading(true);
+    try {
+      setRules(await builtinRuleApi.list());
+    } catch (e) {
+      console.error("Failed to load builtin rules:", e);
+      toast.error("加载内置规则失败");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    load();
+  }, []);
+
+  /** 单条规则的开关 / 严重度变更：发送当前完整 {enabled, severity} */
+  const patchRule = async (r: BuiltinRule, next: Partial<BuiltinRuleUpdate>) => {
+    try {
+      await builtinRuleApi.update(r.rule_id, {
+        enabled: next.enabled ?? r.enabled,
+        severity: next.severity ?? r.severity,
+      });
+      await load();
+    } catch (e) {
+      console.error(e);
+      toast.error(String(e));
+    }
+  };
+
+  const handleReset = async () => {
+    setBusy(true);
+    try {
+      await builtinRuleApi.reset();
+      toast.success("已恢复默认规则配置");
+      await load();
+    } catch (e) {
+      console.error(e);
+      toast.error(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const q = search.trim().toLowerCase();
+  const filtered = rules.filter((r) => {
+    const okCat = cat === "all" || r.category === cat;
+    const okQ =
+      q === "" ||
+      r.title.toLowerCase().includes(q) ||
+      (r.description ?? "").toLowerCase().includes(q) ||
+      r.rule_id.toLowerCase().includes(q);
+    return okCat && okQ;
+  });
+
+  const groups = BUILTIN_GROUP_ORDER.map((c) => ({
+    cat: c,
+    items: filtered.filter((r) => r.category === c),
+  })).filter((g) => g.items.length > 0);
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-start justify-between gap-2">
+          <div>
+            <CardTitle className="flex items-center gap-2">
+              内置安全规则
+              <Badge variant="secondary" className="text-[11px] font-normal">
+                {rules.filter((r) => r.enabled).length}/{rules.length} 已启用
+              </Badge>
+            </CardTitle>
+            <CardDescription>
+              系统内置的敏感信息检测规则，可单独开关或调整严重等级（共 {rules.length} 条）
+            </CardDescription>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => setCollapsed((c) => !c)}
+              aria-label={collapsed ? "展开内置规则" : "折叠内置规则"}
+            >
+              {collapsed ? <ChevronDown /> : <ChevronUp />}
+              {collapsed ? "展开" : "折叠"}
+            </Button>
+            <Button size="sm" variant="outline" onClick={handleReset} disabled={busy}>
+              <RotateCw className={busy ? "animate-spin" : ""} />
+              恢复默认
+            </Button>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="grid gap-4">
+        {!settings.security_enabled && !collapsed && (
+          <p className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
+            安全审计未启用，以下规则暂不在扫描阶段生效。
+          </p>
+        )}
+
+        {collapsed ? (
+          <button
+            type="button"
+            onClick={() => setCollapsed(false)}
+            className="w-full rounded-lg border border-dashed px-3 py-2.5 text-sm text-muted-foreground transition-colors hover:bg-accent/40 hover:text-foreground"
+          >
+            已折叠 · 点击展开全部 {rules.length} 条内置规则（
+            {rules.filter((r) => r.enabled).length} 已启用）
+          </button>
+        ) : (
+          <>
+            {/* 搜索 + 类目筛选 */}
+            <div className="grid gap-3 sm:grid-cols-[1fr_200px]">
+              <Input
+                placeholder="搜索规则名称 / 描述 / 规则 ID"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+              />
+              <Select value={cat} onChange={(e) => setCat(e.target.value as typeof cat)}>
+                <option value="all">全部类目</option>
+                {BUILTIN_GROUP_ORDER.map((c) => (
+                  <option key={c} value={c}>
+                    {BUILTIN_CATEGORY_LABEL[c]}
+                  </option>
+                ))}
+              </Select>
+            </div>
+
+            {loading ? (
+              <>
+                <Skeleton className="h-12 w-full rounded-lg" />
+                <Skeleton className="h-12 w-full rounded-lg" />
+              </>
+            ) : groups.length === 0 ? (
+              <p className="py-6 text-center text-sm text-muted-foreground">
+                没有匹配的规则。
+              </p>
+            ) : (
+              groups.map((g) => {
+                const gate = isGateOn(g.items[0].toggle_key, settings);
+                const locked = !gate;
+                const gateLabel =
+                  g.items[0].toggle_key == null
+                    ? null
+                    : (BUILTIN_TOGGLE_LABEL[g.items[0].toggle_key] ??
+                      g.items[0].toggle_key);
+                return (
+                  <div key={g.cat} className={`grid gap-2 ${locked ? "opacity-60" : ""}`}>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                        {BUILTIN_CATEGORY_LABEL[g.cat]}
+                      </h4>
+                      {gateLabel == null ? (
+                        <span className="text-[11px] text-muted-foreground">
+                          始终扫描（不可单独关闭）
+                        </span>
+                      ) : (
+                        <span
+                          className={`text-[11px] ${locked ? "text-warning" : "text-muted-foreground"}`}
+                        >
+                          {locked
+                            ? `受「${gateLabel}」开关控制 · 该开关已关闭，本组规则暂不参与扫描`
+                            : `受「${gateLabel}」开关控制`}
+                        </span>
+                      )}
+                    </div>
+                    {g.items.map((r) => (
+                      <div
+                        key={r.rule_id}
+                        className="flex items-center justify-between gap-3 rounded-lg border bg-card/40 px-3 py-2.5"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-sm font-medium">{r.title}</span>
+                            <Badge variant={BUILTIN_SEVERITY_VARIANT[r.severity]}>
+                              {BUILTIN_SEVERITY_LABEL[r.severity]}危
+                            </Badge>
+                          </div>
+                          {r.description && (
+                            <p className="mt-0.5 truncate text-xs text-muted-foreground">
+                              {r.description}
+                            </p>
+                          )}
+                        </div>
+                        <div className="flex shrink-0 items-center gap-2">
+                          <Select
+                            value={r.severity}
+                            disabled={locked}
+                            onChange={(e) =>
+                              patchRule(r, {
+                                severity: e.target.value as BuiltinRuleUpdate["severity"],
+                              })
+                            }
+                            aria-label="风险等级"
+                          >
+                            <option value="info">提示</option>
+                            <option value="low">低</option>
+                            <option value="medium">中</option>
+                            <option value="high">高</option>
+                            <option value="critical">严重</option>
+                          </Select>
+                          <Switch
+                            checked={r.enabled}
+                            disabled={locked}
+                            onCheckedChange={(v) => patchRule(r, { enabled: v })}
+                            aria-label="启用规则"
+                          />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })
+            )}
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 export function SettingsPage() {
   const toast = useToast();
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -452,6 +746,8 @@ export function SettingsPage() {
         auto_start: settings.auto_start,
         retry_enabled: settings.retry_enabled,
         retry_times: settings.retry_times,
+        enable_rate_limit: settings.enable_rate_limit,
+        rate_limit_rpm: settings.rate_limit_rpm,
         log_retention_days: settings.log_retention_days,
         log_raw_body: settings.log_raw_body,
         security_enabled: settings.security_enabled,
@@ -536,7 +832,7 @@ export function SettingsPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">设置</h1>
-          <p className="mt-1 text-sm text-muted-foreground">服务配置、通用设置、界面、重试策略</p>
+          <p className="mt-1 text-sm text-muted-foreground">服务配置、通用设置、界面、限流与重试</p>
         </div>
         <div className="flex gap-2">
           <Button variant="outline" size="sm" onClick={load} disabled={loading}>
@@ -555,7 +851,7 @@ export function SettingsPage() {
           <TabsTrigger value="server">服务配置</TabsTrigger>
           <TabsTrigger value="general">通用设置</TabsTrigger>
           <TabsTrigger value="appearance">界面设置</TabsTrigger>
-          <TabsTrigger value="retry">重试策略</TabsTrigger>
+          <TabsTrigger value="retry">限流与重试</TabsTrigger>
           <TabsTrigger value="security">安全审计</TabsTrigger>
         </TabsList>
 
@@ -764,16 +1060,46 @@ export function SettingsPage() {
           </Card>
         </TabsContent>
 
-        {/* ================= 重试策略 ================= */}
+        {/* ================= 限流与重试 ================= */}
         <TabsContent value="retry">
           <Card>
             <CardHeader>
-              <CardTitle>重试策略</CardTitle>
+              <CardTitle>限流与重试</CardTitle>
               <CardDescription>
-                上游请求失败时的自动重试与故障转移
+                按网关密钥限制每分钟请求数，并在上游失败时自动重试与故障转移
               </CardDescription>
             </CardHeader>
             <CardContent className="grid gap-4">
+              {/* 请求限流：开关 + 每分钟最大请求数 */}
+              <div className="flex items-center justify-between max-w-md">
+                <div>
+                  <p className="text-sm font-medium">启用请求限流</p>
+                  <p className="text-xs text-muted-foreground">
+                    按网关密钥滑动窗口限速，超出则返回 429
+                  </p>
+                </div>
+                <Switch
+                  checked={settings.enable_rate_limit}
+                  onCheckedChange={(v) => patch({ enable_rate_limit: v })}
+                />
+              </div>
+              <div className="grid max-w-sm grid-cols-[140px_1fr] items-center gap-4">
+                <Label htmlFor="rl-rpm">每分钟最大请求数</Label>
+                <Input
+                  id="rl-rpm"
+                  type="number"
+                  min={1}
+                  max={10000}
+                  disabled={!settings.enable_rate_limit}
+                  value={settings.rate_limit_rpm}
+                  onChange={(e) =>
+                    patch({ rate_limit_rpm: Number(e.target.value) || 1 })
+                  }
+                />
+              </div>
+
+              <div className="my-1 border-t border-border/60" />
+
               <div className="flex items-center justify-between max-w-md">
                 <div>
                   <p className="text-sm font-medium">启用自动重试</p>
@@ -893,6 +1219,9 @@ export function SettingsPage() {
               </p>
             </CardContent>
           </Card>
+
+          {/* 第一张卡片：内置安全规则（系统能力清单，可开关 / 调严重度） */}
+          <BuiltinRulesCard settings={settings} />
 
           {/* 第二张卡片：自定义安全规则（黑名单 CRUD） */}
           <CustomRulesCard />

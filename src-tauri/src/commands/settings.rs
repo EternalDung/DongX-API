@@ -3,8 +3,9 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 
-use crate::db::repository::{audit_events, settings as settings_repo, stats};
+use crate::db::repository::{settings as settings_repo, stats};
 use crate::error::AppResult;
+use crate::security::rate_limit::RateLimiterState;
 use crate::AppState;
 
 /// 应用开机自启动设置。
@@ -37,6 +38,8 @@ pub struct SettingsUpdate {
     pub auto_start: Option<bool>,
     pub retry_enabled: Option<bool>,
     pub retry_times: Option<i32>,
+    pub enable_rate_limit: Option<bool>,
+    pub rate_limit_rpm: Option<i32>,
     pub log_retention_days: Option<i32>,
     pub log_raw_body: Option<bool>,
     pub security_enabled: Option<bool>,
@@ -60,6 +63,8 @@ const DEFAULTS: &str = r#"{
     "auto_start": false,
     "retry_enabled": true,
     "retry_times": 3,
+    "enable_rate_limit": false,
+    "rate_limit_rpm": 60,
     "log_retention_days": 30,
     "log_raw_body": false,
     "security_enabled": true,
@@ -122,6 +127,8 @@ pub async fn update_settings(
     push!(auto_start, "auto_start");
     push!(retry_enabled, "retry_enabled");
     push!(retry_times, "retry_times");
+    push!(enable_rate_limit, "enable_rate_limit");
+    push!(rate_limit_rpm, "rate_limit_rpm");
     push!(log_retention_days, "log_retention_days");
     push!(log_raw_body, "log_raw_body");
     push!(security_enabled, "security_enabled");
@@ -135,19 +142,6 @@ pub async fn update_settings(
 
     if !entries.is_empty() {
         settings_repo::upsert_many(&state.db, &entries).await?;
-
-        // 审计：配置变更（记录本次改动了哪些键，便于事后追溯）。
-        let changed: Vec<&str> = entries.iter().map(|(k, _)| k.as_str()).collect();
-        let meta = serde_json::to_string(&serde_json::json!({ "changed": changed })).ok();
-        let _ = audit_events::insert(
-            &state.db,
-            "config_change",
-            "info",
-            Some("settings"),
-            "配置已更新",
-            meta.as_deref(),
-        )
-        .await;
     }
 
     // 自启动：保存即应用（开关与系统登录项保持同步）
@@ -157,6 +151,33 @@ pub async fn update_settings(
     // 关闭到托盘：更新运行态标志，供 on_window_event 同步读取
     if let Some(v) = update.close_to_tray {
         *state.close_to_tray.lock().unwrap() = v;
+    }
+
+    // 限流：开关或 RPM 变更时整体重建运行态限速器（RateLimiter 不支持运行时改限额，
+    // 故以整体替换方式生效；未提供的字段回退读取已存储值）。
+    if update.enable_rate_limit.is_some() || update.rate_limit_rpm.is_some() {
+        let enabled = if let Some(v) = update.enable_rate_limit {
+            v
+        } else {
+            settings_repo::get(&state.db, "enable_rate_limit")
+                .await
+                .ok()
+                .flatten()
+                .and_then(|s| serde_json::from_str::<bool>(&s).ok())
+                .unwrap_or(false)
+        };
+        let rpm = if let Some(v) = update.rate_limit_rpm {
+            v.max(1) as u32
+        } else {
+            settings_repo::get(&state.db, "rate_limit_rpm")
+                .await
+                .ok()
+                .flatten()
+                .and_then(|s| serde_json::from_str::<i32>(&s).ok())
+                .unwrap_or(60)
+                .max(1) as u32
+        };
+        *state.rate_limiter.lock().unwrap() = RateLimiterState::new(enabled, rpm);
     }
 
     // 回写后的完整 settings（不是 {status:"updated"}）：前端直接拿它做
