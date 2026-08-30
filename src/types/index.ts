@@ -202,7 +202,8 @@ export interface DashboardStats {
 // ============================================================
 
 export type ThemeMode = "light" | "dark" | "system";
-/** 安全审计模式 — 4 级风险响应策略 */
+/**
+ * 安全审计模式 — 4 级风险响应策略
  *  - audit:  只审计（记录风险，不影响请求）
  *  - warn:   中高风险标记告警
  *  - redact: 高风险脱敏转发（敏感值替换后转发）
