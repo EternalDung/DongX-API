@@ -101,7 +101,26 @@ pub struct RequestLogListItem {
     pub created_at: String,
     pub error_message: Option<String>,
     pub risk_level: String,
+    pub risk_score: i64,
     pub security_action: String,
+}
+
+/// 一次请求命中的安全审计发现明细（request_security_findings 一行）。
+/// 注意：不查询 evidence_hash 列（明文证据哈希仅用于后端去重/取证，不暴露给前端）。
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct RequestSecurityFindingRow {
+    pub id: String,
+    pub log_id: String,
+    pub phase: String, // request = 入站请求体 / response = 出站响应体
+    pub category: String,
+    pub rule_id: String,
+    pub severity: String, // low / medium / high / critical
+    pub title: String,
+    pub description: Option<String>,
+    pub location: Option<String>,
+    pub evidence_masked: Option<String>,
+    pub action: Option<String>,
+    pub created_at: String,
 }
 
 // ============================================================

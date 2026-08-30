@@ -129,7 +129,31 @@ export interface ApiKey {
 
 export type LogMode = "chat" | "completion" | "embedding" | "other";
 export type RiskLevel = "none" | "low" | "medium" | "high" | "critical";
-export type SecurityAction = "allow" | "sanitize" | "flag" | "block";
+/** 安全闸门对一次请求采取的动作（与后端 SecurityAction::as_str 一一对应） */
+export type SecurityAction = "allow" | "warn" | "redact" | "block";
+
+/**
+ * 单条安全审计发现（对应 request_security_findings 一行）。
+ * 与 RequestLog 上的 risk_level/risk_score 汇总字段的区别：
+ * 汇总只看最高等级，findings 是**全部**命中明细，每条自带自己的 severity。
+ */
+export interface SecurityFinding {
+  id: string;
+  log_id: string;
+  /** 扫描阶段：request = 入站请求体 / response = 出站响应体 */
+  phase: "request" | "response";
+  category: string;
+  rule_id: string;
+  severity: RiskLevel;
+  title: string;
+  description: string | null;
+  /** JSON 指针，定位命中字段 */
+  location: string | null;
+  /** 脱敏后的证据片段（不存明文） */
+  evidence_masked: string | null;
+  action: SecurityAction | null;
+  created_at: string;
+}
 
 export interface RequestLog {
   id: string;
@@ -156,28 +180,6 @@ export interface RequestLog {
   security_action: SecurityAction;
   sanitized: boolean;
   blocked_reason: string | null;
-}
-
-// ============================================================
-// Audit Event
-// ============================================================
-
-export type AuditEventType =
-  | "rate_limit"
-  | "invalid_key"
-  | "quota_exhaust"
-  | "suspicious"
-  | "config_change";
-export type AuditSeverity = "info" | "warning" | "critical";
-
-export interface AuditEvent {
-  id: string;
-  timestamp: string;
-  type: AuditEventType;
-  severity: AuditSeverity;
-  actor: string | null;
-  message: string;
-  meta: Record<string, unknown> | null;
 }
 
 // ============================================================

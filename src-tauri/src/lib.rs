@@ -73,6 +73,7 @@ pub fn run() {
             commands::key::set_api_key_status,
             commands::log::list_logs,
             commands::log::get_log_detail,
+            commands::log::get_log_security_findings,
             commands::log::clear_logs,
             commands::log::delete_log,
             commands::audit::list_audit_events,

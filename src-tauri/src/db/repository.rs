@@ -13,7 +13,7 @@ use sqlx::{QueryBuilder, Row, SqlitePool};
 
 use crate::models::{
     AuditEventRow, ChannelRow, DashboardStatsRow, GatewayKeyRow, RequestLogListItem,
-    RequestLogRow, SettingRow,
+    RequestLogRow, RequestSecurityFindingRow, SettingRow,
 };
 
 fn now() -> String {
@@ -424,7 +424,7 @@ pub mod request_logs {
         let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(
             "SELECT id, seq, api_key_name, channel_name, model, mode, status_code,
                     total_tokens, duration_ms, is_stream, is_retry, created_at,
-                    error_message, risk_level, security_action
+                    error_message, risk_level, risk_score, security_action
              FROM request_logs WHERE 1=1 ",
         );
 
@@ -798,5 +798,33 @@ pub mod security_findings {
         .execute(pool)
         .await?;
         Ok(())
+    }
+
+    /// 取某条日志的全部安全发现明细，供日志详情页展示。
+    ///
+    /// 排序：**按严重度降序**（critical→high→medium→low→info），同级按时间正序。
+    /// 参考实现（同类网关）此处用 `ORDER BY created_at ASC`，导致高危项被埋在
+    /// 滚动区下方；这里改为严重度优先，保证最严重的一条永远在第一行。
+    pub async fn list_by_log(
+        pool: &SqlitePool,
+        log_id: &str,
+    ) -> Result<Vec<RequestSecurityFindingRow>, sqlx::Error> {
+        sqlx::query_as::<_, RequestSecurityFindingRow>(
+            "SELECT id, log_id, phase, category, rule_id, severity, title,
+                    description, location, evidence_masked, action, created_at
+             FROM request_security_findings
+             WHERE log_id = ?
+             ORDER BY CASE severity
+                 WHEN 'critical' THEN 5
+                 WHEN 'high'     THEN 4
+                 WHEN 'medium'   THEN 3
+                 WHEN 'low'      THEN 2
+                 WHEN 'info'     THEN 1
+                 ELSE 0
+             END DESC, created_at ASC",
+        )
+        .bind(log_id)
+        .fetch_all(pool)
+        .await
     }
 }

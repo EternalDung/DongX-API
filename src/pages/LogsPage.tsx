@@ -13,6 +13,8 @@ import {
   User as UserIcon,
   Bot,
   Lightbulb,
+  ShieldAlert,
+  ShieldCheck,
 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -20,6 +22,7 @@ import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { EmptyState } from "@/components/ui/empty-state";
+import { Badge } from "@/components/ui/badge";
 import { StatusBadge, type StatusTone } from "@/components/ui/status-badge";
 import { useToast } from "@/components/ui/toast";
 import {
@@ -39,7 +42,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { logApi, channelApi } from "@/lib/api";
-import type { RequestLog, Channel } from "@/types";
+import { cn } from "@/lib/utils";
+import type { RequestLog, Channel, SecurityFinding } from "@/types";
 
 const PAGE_SIZE = 20;
 
@@ -47,6 +51,60 @@ function statusTone(code: number): StatusTone {
   if (code >= 500) return "destructive";
   if (code >= 400) return "warning";
   return "success";
+}
+
+// ─── 安全审计展示（列表行聚合 + 明细逐条） ────────────────────────────────────
+// 两层粒度：列表行只显示最高等级徽章；展开明细里逐条列出全部 findings，
+// 每条自带自己的 severity。MAX 只决定动作与汇总徽章，不决定展示条数。
+
+type RiskVariant = "destructive" | "warning" | "outline" | "secondary";
+
+/** 风险等级 → 徽章文案与样式。汇总头与逐条明细共用同一套色板。 */
+const RISK_META: Record<
+  string,
+  { label: string; variant: RiskVariant; className?: string }
+> = {
+  critical: { label: "严重", variant: "destructive" },
+  high: { label: "高风险", variant: "warning" },
+  medium: {
+    label: "中风险",
+    variant: "outline",
+    className: "border-warning/40 text-warning",
+  },
+  low: { label: "低风险", variant: "secondary" },
+  info: { label: "提示", variant: "secondary" },
+  none: { label: "安全", variant: "secondary" },
+};
+
+/** 闸门动作 → 徽章文案与样式（与后端 SecurityAction::as_str 对齐）。 */
+const ACTION_META: Record<string, { label: string; variant: RiskVariant }> = {
+  allow: { label: "放行", variant: "secondary" },
+  warn: { label: "告警", variant: "warning" },
+  redact: { label: "脱敏", variant: "warning" },
+  block: { label: "阻断", variant: "destructive" },
+};
+
+function riskMeta(level: string) {
+  return RISK_META[level] ?? RISK_META.none;
+}
+
+function RiskBadge({
+  level,
+  score,
+  className,
+}: {
+  level: string;
+  score?: number;
+  className?: string;
+}) {
+  const meta = riskMeta(level);
+  return (
+    <Badge variant={meta.variant} className={cn("gap-1", meta.className, className)}>
+      <ShieldAlert className="h-3 w-3" />
+      {meta.label}
+      {score ? ` ${score}` : ""}
+    </Badge>
+  );
 }
 
 function formatTime(iso: string): string {
@@ -289,6 +347,7 @@ export function LogsPage() {
                     <TableHead>上游</TableHead>
                     <TableHead>模型</TableHead>
                     <TableHead>状态</TableHead>
+                    <TableHead>风险</TableHead>
                     <TableHead className="text-right">Tokens</TableHead>
                     <TableHead className="text-right">耗时</TableHead>
                     <TableHead className="w-10 text-center">操作</TableHead>
@@ -326,6 +385,13 @@ export function LogsPage() {
                               {l.status_code}
                             </StatusBadge>
                           </TableCell>
+                          <TableCell>
+                            {l.risk_level && l.risk_level !== "none" ? (
+                              <RiskBadge level={l.risk_level} score={l.risk_score} />
+                            ) : (
+                              <span className="text-xs text-muted-foreground">-</span>
+                            )}
+                          </TableCell>
                           <TableCell className="text-right font-mono text-xs tabular-nums">
                             {l.total_tokens > 0 ? (
                               <span title={`P:${l.prompt_tokens} / C:${l.completion_tokens}`}>
@@ -354,7 +420,7 @@ export function LogsPage() {
                         </TableRow>
                         {expanded && (
                           <TableRow className="hover:bg-transparent">
-                            <TableCell colSpan={10} className="bg-muted/30 p-4">
+                            <TableCell colSpan={11} className="bg-muted/30 p-4">
                               <LogDetail id={l.id} />
                             </TableCell>
                           </TableRow>
@@ -510,8 +576,122 @@ function LogDetail({ id }: { id: string }) {
         </div>
       )}
 
+      {/* 安全审计：汇总头（只取最高等级）+ 逐条明细（全部 findings） */}
+      <SecurityAuditSection detail={detail} />
+
       {/* 请求/响应 tab + 缩略/JSON 双视图 */}
       <BodySection requestBody={detail.request_body} responseBody={detail.response_body} />
+    </div>
+  );
+}
+
+// ─── 安全审计明细区块 ────────────────────────────────────────────────────────
+// 汇总头展示 MAX 决策结果（risk_level / security_action / blocked_reason），
+// 下方逐条列出**全部** findings，每条自带独立 severity，不折叠、不取最高级。
+// findings 仅在 risk_score > 0 时懒加载，避免列表展开即触发 N+1 查询。
+
+function SecurityAuditSection({ detail }: { detail: RequestLog }) {
+  const [findings, setFindings] = useState<SecurityFinding[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  const hasRisk = detail.risk_score > 0 || !!detail.risk_summary;
+
+  useEffect(() => {
+    if (detail.risk_score <= 0) {
+      setFindings([]);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    logApi
+      .securityFindings(detail.id)
+      .then((fs) => {
+        if (!cancelled) setFindings(fs);
+      })
+      .catch(() => {
+        if (!cancelled) setFindings([]);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [detail.id, detail.risk_score]);
+
+  if (!hasRisk) {
+    return (
+      <div className="flex items-center gap-2 rounded-lg border bg-background px-3 py-2 text-sm text-muted-foreground">
+        <ShieldCheck className="h-4 w-4 text-success" />
+        安全审计：未发现风险
+      </div>
+    );
+  }
+
+  const actionMeta = ACTION_META[detail.security_action] ?? ACTION_META.allow;
+
+  return (
+    <div className="rounded-lg border bg-background p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <ShieldAlert className="h-4 w-4 text-warning" />
+        <span className="text-sm font-medium">安全审计</span>
+        <RiskBadge level={detail.risk_level} score={detail.risk_score} />
+        <Badge variant={actionMeta.variant}>动作：{actionMeta.label}</Badge>
+        {detail.sanitized && <Badge variant="secondary">已脱敏</Badge>}
+      </div>
+
+      {detail.risk_summary && (
+        <p className="mt-2 text-xs text-muted-foreground">{detail.risk_summary}</p>
+      )}
+      {detail.blocked_reason && (
+        <p className="mt-1 text-xs text-destructive">
+          阻断原因：{detail.blocked_reason}
+        </p>
+      )}
+
+      <div className="mt-3">
+        {loading ? (
+          <Skeleton className="h-16 w-full" />
+        ) : findings.length > 0 ? (
+          <div className="max-h-[240px] space-y-2 overflow-y-auto pr-1">
+            {findings.map((f) => (
+              <FindingRow key={f.id} finding={f} />
+            ))}
+          </div>
+        ) : (
+          <p className="text-xs text-muted-foreground">无命中明细</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** 单条 finding：用自己的 severity（不是汇总的最高等级）+ 阶段 + 规则 + 证据。 */
+function FindingRow({ finding }: { finding: SecurityFinding }) {
+  const meta = riskMeta(finding.severity);
+  return (
+    <div className="rounded-lg border bg-muted/30 px-3 py-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge variant={meta.variant} className={cn(meta.className)}>
+          {meta.label}
+        </Badge>
+        <span className="text-sm font-medium">{finding.title}</span>
+        <Badge variant="outline" className="text-xs">
+          {finding.phase === "response" ? "响应侧" : "请求侧"}
+        </Badge>
+        <span className="font-mono text-xs text-muted-foreground">
+          {finding.rule_id}
+        </span>
+      </div>
+      {finding.description && (
+        <p className="mt-1 text-xs text-muted-foreground">{finding.description}</p>
+      )}
+      {(finding.location || finding.evidence_masked) && (
+        <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
+          {finding.location && <span>位置：{finding.location}</span>}
+          {finding.evidence_masked && <span>证据：{finding.evidence_masked}</span>}
+        </div>
+      )}
     </div>
   );
 }

@@ -18,7 +18,7 @@ import type {
   ChannelProtocolPresetGroup,
   ApiKey,
   RequestLog,
-  AuditEvent,
+  SecurityFinding,
   DashboardStats,
   Settings,
   ServerStatus,
@@ -67,16 +67,6 @@ export interface LogQuery {
   channel_name?: string;
   model?: string;
   status_code?: number;
-  start_time?: string;
-  end_time?: string;
-  page?: number;
-  page_size?: number;
-}
-
-/** 审计事件查询过滤 — 对应 Rust AuditQuery */
-export interface AuditQuery {
-  severity?: string;
-  event_type?: string;
   start_time?: string;
   end_time?: string;
   page?: number;
@@ -191,6 +181,13 @@ export const logApi = {
   detail: (id: string): Promise<RequestLog> =>
     invoke<RequestLog>("get_log_detail", { id }),
 
+  /**
+   * 获取单条日志的安全审计发现明细（严重度降序，返回全部命中）。
+   * 调用方应仅在 risk_score > 0 时请求，避免列表页 N+1 查询。
+   */
+  securityFindings: (id: string): Promise<SecurityFinding[]> =>
+    invoke<SecurityFinding[]>("get_log_security_findings", { id }),
+
   /** 清空日志，可选只清理 N 天前的记录 */
   clear: (olderThanDays?: number): Promise<void> =>
     invoke<void>("clear_logs", { olderThanDays }),
@@ -198,17 +195,6 @@ export const logApi = {
   /** 删除单条日志 */
   delete: (id: string): Promise<number> =>
     invoke<number>("delete_log", { id }),
-};
-
-// ============================================================
-// 安全审计 API
-// 查询安全事件：限流触发、无效密钥、配额耗尽、可疑请求等
-// ============================================================
-
-export const auditApi = {
-  /** 查询审计事件（支持按严重级别、事件类型、时间范围过滤） */
-  list: (query?: AuditQuery): Promise<AuditEvent[]> =>
-    invoke<AuditEvent[]>("list_audit_events", { query }),
 };
 
 // ============================================================

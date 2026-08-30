@@ -5,7 +5,6 @@ import {
   Network,
   KeyRound,
   ScrollText,
-  ShieldAlert,
   Settings,
   Boxes,
   Monitor,
@@ -24,7 +23,6 @@ const NAV_ITEMS = [
   { to: "/channels", label: "渠道管理", icon: Network },
   { to: "/api-keys", label: "密钥管理", icon: KeyRound },
   { to: "/logs", label: "请求日志", icon: ScrollText },
-  { to: "/audit", label: "安全审计", icon: ShieldAlert },
   { to: "/settings", label: "设置", icon: Settings },
 ];
 

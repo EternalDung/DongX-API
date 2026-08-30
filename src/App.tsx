@@ -6,7 +6,6 @@ import { UsagePage } from "./pages/UsagePage";
 import { ChannelsPage } from "./pages/ChannelsPage";
 import { ApiKeysPage } from "./pages/ApiKeysPage";
 import { LogsPage } from "./pages/LogsPage";
-import { AuditPage } from "./pages/AuditPage";
 import { SettingsPage } from "./pages/SettingsPage";
 
 const router = createHashRouter([
@@ -19,7 +18,6 @@ const router = createHashRouter([
       { path: "channels", element: <ChannelsPage /> },
       { path: "api-keys", element: <ApiKeysPage /> },
       { path: "logs", element: <LogsPage /> },
-      { path: "audit", element: <AuditPage /> },
       { path: "settings", element: <SettingsPage /> },
     ],
   },
