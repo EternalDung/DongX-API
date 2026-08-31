@@ -92,6 +92,10 @@ pub fn run() {
             commands::server::start_gateway_server,
             commands::server::stop_gateway_server,
             commands::server::restart_gateway_server,
+            commands::client_config::get_client_configs,
+            commands::client_config::apply_client_config,
+            commands::client_config::restore_client_config,
+            commands::client_config::get_client_config_content,
         ])
         .setup(|app| {
             // Initialize logging before anything else

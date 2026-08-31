@@ -26,9 +26,10 @@ import { Select } from "@/components/ui/select";
 import { EmptyState } from "@/components/ui/empty-state";
 import { useToast } from "@/components/ui/toast";
 import { Skeleton } from "@/components/ui/skeleton";
-import { channelApi, keyApi, settingsApi } from "@/lib/api";
+import { channelApi, keyApi, settingsApi, clientConfigApi } from "@/lib/api";
 import { cn } from "@/lib/utils";
-import type { ApiKey, Channel, Settings } from "@/types";
+import { ClientConfigView } from "@/components/ClientConfigView";
+import type { ApiKey, Channel, ClientInfo, Settings } from "@/types";
 
 // ============================================================
 // 协议卡片数据（OpenAI / Anthropic / 本地 3 协议设计）
@@ -72,18 +73,6 @@ const PROTOCOLS: ProtocolDef[] = [
     icon: Zap,
   },
 ];
-
-// ============================================================
-// 顶部「客户端」pill tabs（仅 API 接口可用，其他后续支持）
-// ============================================================
-const CLIENT_TABS = [
-  { id: "api", label: "API 接口", enabled: true },
-  { id: "codex", label: "Codex", enabled: false },
-  { id: "claude-code", label: "Claude Code", enabled: false },
-  { id: "opencode", label: "OpenCode", enabled: false },
-  { id: "openclaw", label: "OpenClaw", enabled: false },
-  { id: "hermes", label: "Hermes", enabled: false },
-] as const;
 
 // ============================================================
 // 代码示例（4 个平台 × 仅 OpenAI Chat 可用）
@@ -276,6 +265,7 @@ export function UsagePage() {
   const [channels, setChannels] = useState<Channel[]>([]);
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [settings, setSettings] = useState<Settings | null>(null);
+  const [clientConfigs, setClientConfigs] = useState<ClientInfo[]>([]);
   const [dataLoading, setDataLoading] = useState(true);
 
   // 选择
@@ -330,15 +320,17 @@ export function UsagePage() {
     let cancelled = false;
     (async () => {
       try {
-        const [c, k, s] = await Promise.all([
+        const [c, k, s, clients] = await Promise.all([
           channelApi.list().catch(() => []),
           keyApi.list().catch(() => []),
           settingsApi.get().catch(() => null),
+          clientConfigApi.list().catch(() => []),
         ]);
         if (cancelled) return;
         setChannels(c);
         setKeys(k);
         setSettings(s);
+        setClientConfigs(clients);
       } finally {
         if (!cancelled) setDataLoading(false);
       }
@@ -347,6 +339,25 @@ export function UsagePage() {
       cancelled = true;
     };
   }, []);
+
+  // 重新拉取客户端安装/接入状态（供子页「刷新」后回写）
+  const refreshClients = async () => {
+    try {
+      const clients = await clientConfigApi.list().catch(() => []);
+      setClientConfigs(clients);
+    } catch {
+      /* 忽略刷新失败 */
+    }
+  };
+
+  // 顶部 tabs：API 接口固定首位 + 后端下发的各客户端
+  const allTabs = useMemo(
+    () => [
+      { id: "api", label: "API 接口" },
+      ...clientConfigs.map((c) => ({ id: c.name, label: c.label })),
+    ],
+    [clientConfigs],
+  );
 
   // 默认选第一个 model
   useEffect(() => {
@@ -520,33 +531,36 @@ export function UsagePage() {
 
       {/* ── 客户端 tabs（pill row） ────────────────────────── */}
       <div className="flex flex-wrap gap-2">
-        {CLIENT_TABS.map((t) => {
+        {allTabs.map((t) => {
           const active = t.id === activeClient;
+          const installed =
+            t.id !== "api" &&
+            clientConfigs.find((c) => c.name === t.id)?.available;
           return (
             <button
               key={t.id}
-              onClick={() => t.enabled && setActiveClient(t.id)}
-              disabled={!t.enabled}
+              onClick={() => setActiveClient(t.id)}
               className={cn(
-                "rounded-full border px-4 py-1.5 text-sm font-medium transition-colors",
+                "flex items-center gap-1.5 rounded-full border px-4 py-1.5 text-sm font-medium transition-colors",
                 active
                   ? "border-primary bg-primary text-primary-foreground shadow-sm"
-                  : t.enabled
-                    ? "border-border bg-background text-foreground hover:bg-accent"
-                    : "border-border bg-muted/40 text-muted-foreground/60 cursor-not-allowed",
+                  : "border-border bg-background text-foreground hover:bg-accent",
               )}
             >
               {t.label}
-              {!t.enabled && (
-                <span className="ml-1.5 text-[10px] opacity-70">soon</span>
+              {installed && (
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
               )}
             </button>
           );
         })}
       </div>
 
-      {/* ── 协议卡片 ──────────────────────────────────────── */}
-      <div className="grid gap-4 md:grid-cols-3">
+      {/* ── API 接口页（仅 api tab 显示） ─────────────────── */}
+      {activeClient === 'api' && (
+        <>
+          {/* ── 协议卡片 ──────────────────────────────────────── */}
+          <div className="grid gap-4 md:grid-cols-3">
         {PROTOCOLS.map((p) => {
           const Icon = p.icon;
           const selected = p.id === activeProtocol;
@@ -829,6 +843,24 @@ export function UsagePage() {
           </CardContent>
         )}
       </Card>
+        </>
+      )}
+
+      {/* ── 客户端接入配置页（非 api tab） ─────────────────── */}
+      {activeClient !== 'api' &&
+        (() => {
+          const c = clientConfigs.find((x) => x.name === activeClient);
+          return c ? (
+            <ClientConfigView
+              key={c.name}
+              client={c}
+              gatewayUrl={baseUrl}
+              keys={keys}
+              modelOptions={modelOptions}
+              onRefresh={refreshClients}
+            />
+          ) : null;
+        })()}
     </div>
   );
 }

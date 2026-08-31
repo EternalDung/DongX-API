@@ -26,6 +26,9 @@ import type {
   CustomRuleInput,
   BuiltinRule,
   BuiltinRuleUpdate,
+  ClientInfo,
+  ApplyResult,
+  ConfigContent,
 } from "@/types";
 
 // ============================================================
@@ -284,4 +287,34 @@ export const statsApi = {
   /** 获取仪表盘统计数据（今日请求量、token 用量、活跃渠道等） */
   getDashboard: (): Promise<DashboardStats> =>
     invoke<DashboardStats>("get_dashboard_stats"),
+};
+
+// ============================================================
+// 客户端接入配置 API
+// 使用页「API接口 / CodeX / Claude Code / OpenCode ...」切换，
+// 把本网关的 base_url + 密钥 + 模型合并写入各 AI 客户端配置文件。
+// ============================================================
+
+export const clientConfigApi = {
+  /** 列出所有支持的 AI 客户端及其安装/接入状态 */
+  list: (): Promise<ClientInfo[]> => invoke<ClientInfo[]>("get_client_configs"),
+
+  /** 读取某客户端的配置文件内容（用于展示/刷新） */
+  content: (name: string): Promise<ConfigContent> =>
+    invoke<ConfigContent>("get_client_config_content", { appName: name }),
+
+  /**
+   * 一键写入：把网关 base_url + 选中的密钥 + 模型合并进客户端配置。
+   * 密钥由前端从下拉框选中的网关密钥明文传入（本地明文，可直接写入）。
+   */
+  apply: (name: string, apiKey: string, model: string): Promise<ApplyResult> =>
+    invoke<ApplyResult>("apply_client_config", {
+      appName: name,
+      apiKey,
+      model,
+    }),
+
+  /** 恢复该客户端被本网关修改前的原始配置（依赖写入时生成的 .dongx-backup） */
+  restore: (name: string): Promise<ApplyResult> =>
+    invoke<ApplyResult>("restore_client_config", { appName: name }),
 };

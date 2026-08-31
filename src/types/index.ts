@@ -304,3 +304,36 @@ export interface ServerStatus {
   /** 配置与运行态不一致 → 需重启服务才生效 */
   restart_required: boolean;
 }
+
+// ============================================================
+// 客户端接入配置（使用页 CodeX/Claude Code/OpenCode 等切换）
+// ============================================================
+
+/** 单个 AI 客户端接入信息（对应 Rust ClientInfo） */
+export interface ClientInfo {
+  /** 客户端标识：codex / claude-code / opencode / openclaw / hermes */
+  name: string;
+  label: string;
+  icon: string;
+  description: string;
+  config_path: string;
+  config_format: string;
+  /** 是否已安装（方案 B：配置目录存在即视为已安装） */
+  available: boolean;
+  /** 是否已接入本网关（配置中含 _dongx 标记 / DongX provider） */
+  applied: boolean;
+  download_url: string;
+}
+
+/** 一键写入结果（对应 Rust ApplyResult） */
+export interface ApplyResult {
+  success: boolean;
+  message: string;
+}
+
+/** 配置文件内容读取结果（对应 Rust ConfigContent） */
+export interface ConfigContent {
+  exists: boolean;
+  content: string;
+  error: string | null;
+}
