@@ -61,5 +61,5 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: 'DongX ${{ github.ref_name }}'
           releaseBody: 'Prebuilt installers. Windows may show SmartScreen — click "Run anyway". macOS is unsigned — first run `xattr -cr /Applications/DongX.app` then open from Finder. Linux: use .AppImage or .deb.'
-          releaseDraft: true     # 先存草稿，你确认后到 Release 页 Publish
+          releaseDraft: false    # 构建完成后自动公开发布，无需手动 Publish
           prerelease: false
