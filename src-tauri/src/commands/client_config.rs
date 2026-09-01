@@ -75,9 +75,9 @@ fn hermes_dir() -> PathBuf {
 fn dir_exists(dir: &PathBuf) -> bool {
     dir.exists()
 }
-// Claude Code 额外看 ~/.claude.json
+// Claude Code 配置目录（~/.claude）存在即视为已安装；不再误判桌面端 .claude.json
 fn claude_installed(dir: &PathBuf) -> bool {
-    dir.exists() || home_dir().join(".claude.json").exists()
+    dir.exists()
 }
 
 const APPS: &[AppDef] = &[
