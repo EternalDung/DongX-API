@@ -659,6 +659,260 @@ pub async fn responses(
     chat_resp
 }
 
+/// POST /v1/messages — Anthropic Messages API bridge.
+///
+/// Translates the Anthropic request (`system` / `messages` / `max_tokens`) into
+/// an OpenAI Chat request, delegates to the shared chat pipeline
+/// (`run_chat_pipeline`, which performs auth + dispatch + adapt + log — the
+/// internal representation is always OpenAI Chat, so the gateway key carried in
+/// the `x-api-key` header is the DongX *gateway* key, validated exactly like
+/// the OpenAI `Authorization: Bearer` one), and translates the Chat response
+/// back into the Anthropic Messages shape. Both streaming and non-streaming are
+/// supported: the outbound Chat SSE stream is converted frame-by-frame into
+/// Anthropic Messages SSE events. DongX's `/v1/messages` reuses the same chat
+/// executor and only the entry (request) and exit (response) translation
+/// differs.
+pub async fn messages(
+    State(app): State<AppHandle>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    // 1. Parse Anthropic request.
+    let req: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => return error_response(StatusCode::BAD_REQUEST, "invalid_json", &e.to_string()),
+    };
+    let model = req
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if model.is_empty() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "missing_model",
+            "请求体缺少 model 字段",
+        );
+    }
+    let is_stream = req.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    // 2. Translate Anthropic `system`/`messages`/`max_tokens` -> Chat `messages`.
+    let chat_body = anthropic_to_chat_request(&req);
+    let chat_bytes = match serde_json::to_vec(&chat_body) {
+        Ok(b) => b,
+        Err(e) => {
+            return error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal", &e.to_string())
+        }
+    };
+
+    // 3. Delegate to the shared chat pipeline (auth/dispatch/adapt/log reused).
+    //    `mode = "messages"` so the request log records this entry as a
+    //    Messages call. The downstream `x-api-key` header (carrying the DongX
+    //    gateway key) is recognised by `auth::extract_gateway_key`.
+    let chat_resp =
+        run_chat_pipeline(app, headers, axum::body::Bytes::from(chat_bytes), "messages").await;
+
+    // 4. Translate the Chat response back into Anthropic shape.
+    if !is_stream {
+        let (parts, resp_body) = chat_resp.into_parts();
+        let bytes = match to_bytes(resp_body, usize::MAX).await {
+            Ok(b) => b,
+            Err(_) => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal",
+                    "读取上游响应失败",
+                )
+            }
+        };
+        if !parts.status.is_success() {
+            // Translate the upstream OpenAI-shaped error into Anthropic's error
+            // shape so Anthropic SDK clients parse it correctly.
+            if let Ok(j) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                if let Some(err) = j.get("error") {
+                    let msg = err
+                        .get("message")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("gateway error");
+                    let kind = err
+                        .get("code")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("api_error");
+                    let anthropic_err = json!({
+                        "type": "error",
+                        "error": { "type": kind, "message": msg }
+                    });
+                    return (parts.status, Json(anthropic_err)).into_response();
+                }
+            }
+            // Non-JSON / unrecognised error — forward as-is.
+            return (parts.status, bytes).into_response();
+        }
+        let cc: serde_json::Value = match serde_json::from_slice(&bytes) {
+            Ok(v) => v,
+            // Non-JSON 200 — forward as-is rather than guessing.
+            Err(_) => return (parts.status, bytes).into_response(),
+        };
+        let anthropic = chat_completion_to_anthropic(&cc);
+        return (StatusCode::OK, Json(anthropic)).into_response();
+    }
+
+    // 4b. Streaming: `serve_stream` (invoked inside `run_chat_pipeline`) already
+    //     converted the upstream Chat SSE into Anthropic Messages SSE events
+    //     AND wrote the request log (with the full Anthropic-shaped body). Pass
+    //     it through unchanged.
+    chat_resp
+}
+
+/// Convert an Anthropic Messages request into an OpenAI Chat request.
+///
+/// Handles `system` (string or `[{type:"text",text}]` blocks), `messages`
+/// (string or `[{type:"text",text}]` blocks; tool_result text is extracted
+/// best-effort), and forwards common sampler params (`temperature`, `top_p`,
+/// `max_tokens`, `stop`, `top_k`, `seed`). `max_tokens` is `required` by
+/// Anthropic and maps directly onto the same-named Chat field.
+fn anthropic_to_chat_request(req: &serde_json::Value) -> serde_json::Value {
+    let mut messages: Vec<serde_json::Value> = Vec::new();
+
+    // system -> Chat system message
+    if let Some(sys) = req.get("system") {
+        let text = match sys {
+            serde_json::Value::String(s) => serde_json::Value::String(s.clone()),
+            serde_json::Value::Array(arr) => blocks_to_text(arr),
+            _ => serde_json::Value::Null,
+        };
+        if let serde_json::Value::String(t) = &text {
+            if !t.is_empty() {
+                messages.push(json!({ "role": "system", "content": t }));
+            }
+        }
+    }
+
+    if let Some(msgs) = req.get("messages").and_then(|v| v.as_array()) {
+        for m in msgs {
+            let role = m.get("role").and_then(|v| v.as_str()).unwrap_or("user");
+            let content = m.get("content");
+            let text = match content {
+                Some(serde_json::Value::String(s)) => serde_json::Value::String(s.clone()),
+                Some(serde_json::Value::Array(arr)) => {
+                    let t = blocks_to_text(arr);
+                    if let serde_json::Value::String(s) = &t {
+                        if s.is_empty() {
+                            serde_json::Value::Null
+                        } else {
+                            t
+                        }
+                    } else {
+                        serde_json::Value::Null
+                    }
+                }
+                _ => serde_json::Value::Null,
+            };
+            if text.is_null() {
+                // Fall back to passing the raw content through (e.g. tool_use
+                // blocks) — best effort; the upstream adapts what it can.
+                messages.push(json!({ "role": role, "content": content }));
+            } else {
+                messages.push(json!({ "role": role, "content": text }));
+            }
+        }
+    }
+
+    let mut chat = json!({
+        "model": req.get("model").cloned().unwrap_or(json!("")),
+        "messages": messages,
+        "stream": req.get("stream").cloned().unwrap_or(json!(false)),
+    });
+    for f in [
+        "temperature",
+        "top_p",
+        "top_k",
+        "max_tokens",
+        "stop",
+        "seed",
+    ] {
+        if let Some(v) = req.get(f) {
+            chat[f] = v.clone();
+        }
+    }
+    chat
+}
+
+/// Concatenate the text of `[{type:"text",text}, ...]` content blocks.
+fn blocks_to_text(blocks: &[serde_json::Value]) -> serde_json::Value {
+    let mut buf = String::new();
+    for b in blocks {
+        let t = b.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        match t {
+            "text" => {
+                if let Some(s) = b.get("text").and_then(|v| v.as_str()) {
+                    buf.push_str(s);
+                }
+            }
+            "tool_result" => {
+                if let Some(c) = b.get("content").and_then(|v| v.as_str()) {
+                    buf.push_str(c);
+                }
+            }
+            _ => {}
+        }
+    }
+    serde_json::Value::String(buf)
+}
+
+/// Convert an OpenAI Chat completion into the Anthropic Messages shape.
+fn chat_completion_to_anthropic(cc: &serde_json::Value) -> serde_json::Value {
+    let id = cc.get("id").and_then(|v| v.as_str()).unwrap_or("msg_unknown");
+    // OpenAI ids look like "chatcmpl-xxx"; Anthropic message ids are "msg_...".
+    let anthropic_id = if let Some(core) = id.strip_prefix("chatcmpl-") {
+        format!("msg_{}", core)
+    } else {
+        id.to_string()
+    };
+    let model = cc.get("model").and_then(|v| v.as_str()).unwrap_or("");
+    let created = cc.get("created").and_then(|v| v.as_i64()).unwrap_or(0);
+    let message = cc
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"));
+    let content_text = message
+        .and_then(|m| m.get("content"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let reasoning = message
+        .and_then(|m| m.get("reasoning_content"))
+        .and_then(|v| v.as_str());
+
+    let mut content_blocks: Vec<serde_json::Value> = Vec::new();
+    if let Some(r) = reasoning {
+        if !r.is_empty() {
+            content_blocks.push(json!({ "type": "thinking", "thinking": r }));
+        }
+    }
+    content_blocks.push(json!({ "type": "text", "text": content_text }));
+
+    let usage = cc.get("usage");
+    let (in_t, out_t) = match usage {
+        Some(u) => (
+            u.get("prompt_tokens").and_then(|v| v.as_i64()).unwrap_or(0),
+            u.get("completion_tokens").and_then(|v| v.as_i64()).unwrap_or(0),
+        ),
+        None => (0, 0),
+    };
+
+    json!({
+        "id": anthropic_id,
+        "type": "message",
+        "role": "assistant",
+        "model": model,
+        "created_at": created,
+        "content": content_blocks,
+        "stop_reason": "end_turn",
+        "stop_sequence": null,
+        "usage": { "input_tokens": in_t, "output_tokens": out_t },
+    })
+}
+
 /// Convert a Responses `input` (plus optional top-level `instructions`) into
 /// OpenAI Chat `messages`.
 fn responses_input_to_messages(req: &serde_json::Value) -> Vec<serde_json::Value> {
@@ -971,6 +1225,55 @@ async fn serve_stream(
             return (parts.status, body).into_response();
         }
         return build_responses_stream_response(
+            body,
+            state,
+            gw_key_name,
+            Some(gw_key_id),
+            channel_name,
+            model,
+            upstream_model,
+            start,
+            raw_request,
+            log_raw_body,
+            is_retry,
+            mode,
+            sec,
+            findings,
+        );
+    }
+
+    // Messages streaming: same as the Responses branch — the shared pipeline
+    // produced a Chat SSE stream (OpenAI Chat SSE, always), which is converted
+    // into Anthropic Messages SSE events here. This pass owns the log (with the
+    // full Anthropic-shaped body) AND the gateway-key quota debit; the relay
+    // pass below runs with do_log=false to avoid a duplicate, empty-body row.
+    if mode == "messages" {
+        let chat_resp = build_stream_response(
+            state.clone(),
+            gw_key_name.clone(),
+            Some(gw_key_id.clone()),
+            channel_name.clone(),
+            model.clone(),
+            upstream_model.clone(),
+            is_stream,
+            start,
+            raw_request.clone(),
+            resp,
+            converter,
+            // do_log=false: this pass is a pure Chat->Chat relay; the Messages
+            // converter below owns the log AND the quota debit.
+            false,
+            log_raw_body,
+            is_retry,
+            "messages",
+            sec.clone(),
+            findings.clone(),
+        );
+        let (parts, body) = chat_resp.into_parts();
+        if !parts.status.is_success() {
+            return (parts.status, body).into_response();
+        }
+        return build_messages_stream_response(
             body,
             state,
             gw_key_name,
@@ -1454,6 +1757,214 @@ fn build_responses_stream_response(
         let duration_ms = start.elapsed().as_millis() as i64;
         if acc.total_tokens > 0 {
             if let Some(ref key_id) = gw_key_id {
+                let _ = gateway_keys::add_quota_used(&state.db, key_id, acc.total_tokens).await;
+            }
+        }
+
+        // 流式增量审计：把响应侧逐块发现并入请求侧发现，重算风险汇总（与主行一致）。
+        let (sec_final, findings_final) = if do_stream_audit && !stream_findings.is_empty() {
+            let mut all = findings;
+            all.append(&mut stream_findings);
+            let (rl, rs, summ, _t) = security::compute_risk_metrics(&all);
+            let mut s = sec;
+            s.risk_level = rl;
+            s.risk_score = rs;
+            s.risk_summary = summ;
+            (s, all)
+        } else {
+            (sec, findings)
+        };
+
+        spawn_log(
+            state,
+            Some(gw_key_name),
+            Some(channel_name),
+            model,
+            Some(upstream_model),
+            if had_error { 502 } else { 200 },
+            acc.prompt_tokens,
+            acc.completion_tokens,
+            acc.total_tokens,
+            duration_ms,
+            if had_error {
+                Some("stream interrupted".to_string())
+            } else {
+                None
+            },
+            true, // is_stream
+            is_retry,
+            raw_request,
+            if log_raw_body {
+                let s = if sec_redact {
+                    redact::redact_text(&response_body_acc)
+                } else {
+                    response_body_acc
+                };
+                Some(s)
+            } else {
+                None
+            },
+            mode,
+            sec_final,
+            findings_final,
+        );
+    });
+
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, "text/event-stream")
+        .header(axum::http::header::CACHE_CONTROL, "no-cache")
+        .header(axum::http::header::CONNECTION, "keep-alive")
+        .body(Body::from_stream(stream))
+        .unwrap()
+}
+
+/// Build the Anthropic Messages SSE `Response` for `/v1/messages` streaming.
+///
+/// The upstream (normalized to OpenAI Chat SSE by the shared pipeline) is fed
+/// through a converter (`crate::messages_stream`) that turns each Chat
+/// `chat.completion.chunk` frame into the Anthropic Messages event stream
+/// (message_start -> content_block_start -> content_block_delta ->
+/// content_block_stop -> message_delta -> message_stop). Like
+/// `build_responses_stream_response`, the conversion runs on a spawned task and
+/// frames are pushed through an `mpsc` channel; this pass owns the request log
+/// and the gateway-key quota debit (the relay pass in `build_stream_response`
+/// runs with `do_log=false`).
+fn build_messages_stream_response(
+    body: Body,
+    state: Arc<AppState>,
+    gw_key_name: String,
+    gw_key_id: Option<String>,
+    channel_name: String,
+    model: String,
+    upstream_model: String,
+    start: std::time::Instant,
+    raw_request: Option<String>,
+    log_raw_body: bool,
+    is_retry: bool,
+    mode: &'static str,
+    sec: SecurityOutcome,
+    findings: Vec<SecurityFinding>,
+) -> Response {
+    use futures_util::StreamExt;
+    use tokio::sync::mpsc;
+
+    let message_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
+    let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(64);
+    // Accumulate the Anthropic-shaped events so the request log can record the
+    // full response body (only when `log_raw_body` is enabled).
+    let mut response_body_acc = String::new();
+
+    tokio::spawn(async move {
+        let mut data_stream = body.into_data_stream();
+        let mut st = crate::messages_stream::AnthropicStreamState::new(model.clone(), message_id);
+        let mut acc = crate::adapter::StreamUsage::default();
+        let mut had_error = false;
+
+        // 流式响应增量审计上下文（与 gate::scan_response 同口径）。
+        let scan_ctx = security::gate::load_scan_context(&state.db).await;
+        let do_stream_audit =
+            matches!(&scan_ctx, Ok((sec, _, _)) if sec.enabled && sec.scan_response);
+        let mut stream_findings: Vec<SecurityFinding> = Vec::new();
+
+        // 响应体日志脱敏开关（与请求体同一开关 security_redact_secrets）。
+        let sec_redact = match settings::get(&state.db, "security_redact_secrets").await {
+            Ok(Some(s)) => serde_json::from_str::<bool>(&s).unwrap_or(false),
+            _ => false,
+        };
+
+        while let Some(chunk) = data_stream.next().await {
+            let chunk = match chunk {
+                Ok(c) => c,
+                Err(e) => {
+                    had_error = true;
+                    let err_frame = format!(
+                        "event: error\ndata: {}\n\n",
+                        json!({ "type": "error", "error": { "type": "api_error", "message": e.to_string() } })
+                    );
+                    if log_raw_body {
+                        response_body_acc.push_str(&err_frame);
+                    }
+                    let _ = tx
+                        .send(Ok::<_, std::io::Error>(Bytes::from(err_frame)))
+                        .await;
+                    break;
+                }
+            };
+            let text = String::from_utf8_lossy(&chunk);
+            crate::adapter::scan_openai_usage(&text, &mut acc);
+            if do_stream_audit {
+                if let Ok(ctx) = &scan_ctx {
+                    for sf in security::scanner::scan_text_chunk(
+                        &text,
+                        &ctx.0,
+                        &ctx.1,
+                        &ctx.2,
+                    ) {
+                        stream_findings.push(sf);
+                    }
+                }
+            }
+            // Parse each frame (separated by blank lines). A frame may carry
+            // `event:` + `data:` (Anthropic) or just `data:` (Chat / Responses);
+            // in both cases the JSON we care about lives on the `data:` line.
+            // Skip `[DONE]`, which triggers finalize instead.
+            for frame in text.split("\n\n") {
+                let data_line = frame.lines().find(|l| l.starts_with("data:"));
+                let Some(data_line) = data_line else {
+                    continue;
+                };
+                let data_str = data_line.trim_start_matches("data:").trim();
+                if data_str.is_empty() || data_str == "[DONE]" {
+                    continue;
+                }
+                if let Ok(j) = serde_json::from_str::<serde_json::Value>(data_str) {
+                    let mut out = String::new();
+                    st.on_chat_chunk(&j, &mut out);
+                    if !out.is_empty() {
+                        if log_raw_body {
+                            response_body_acc.push_str(&out);
+                        }
+                        if do_stream_audit {
+                            if let Ok(ctx) = &scan_ctx {
+                                for sf in security::scanner::scan_text_chunk(
+                                    &out,
+                                    &ctx.0,
+                                    &ctx.1,
+                                    &ctx.2,
+                                ) {
+                                    stream_findings.push(sf);
+                                }
+                            }
+                        }
+                        let _ = tx.send(Ok::<_, std::io::Error>(Bytes::from(out))).await;
+                    }
+                }
+            }
+        }
+
+        // Finalize: close any open block + message_delta + message_stop.
+        if !had_error {
+            let mut closing = String::new();
+            st.finalize(&acc, &mut closing);
+            if log_raw_body {
+                response_body_acc.push_str(&closing);
+            }
+            let _ = tx
+                .send(Ok::<_, std::io::Error>(Bytes::from(closing)))
+                .await;
+        }
+
+        // End-of-stream: debit the gateway key quota, then write the request log
+        // with the full Anthropic-shaped body. The relay pass in
+        // `build_stream_response` runs with do_log=false, so this is the single
+        // place the quota is charged for a Messages call.
+        let duration_ms = start.elapsed().as_millis() as i64;
+        if acc.total_tokens > 0 {
+            if let Some(ref key_id) = gw_key_id {
+                // 配额超限自动禁用由 add_quota_used 的 SQL 层完成。
                 let _ = gateway_keys::add_quota_used(&state.db, key_id, acc.total_tokens).await;
             }
         }

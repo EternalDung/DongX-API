@@ -4,16 +4,36 @@ use sqlx::SqlitePool;
 use crate::db::repository::gateway_keys;
 use crate::models::GatewayKeyRow;
 
-/// Extract the gateway key from the `Authorization: Bearer sk-dongapi-xxxx` header.
+/// Extract the gateway key from the request headers.
+///
+/// Two client styles are accepted so the same `sk-dongapi-*` gateway key works
+/// across every protocol the data plane exposes:
+/// - OpenAI-style: `Authorization: Bearer sk-dongapi-xxxx`
+/// - Anthropic-style: `x-api-key: sk-dongapi-xxxx` (Claude SDKs send this)
+///
+/// The key is DongX's *gateway* key (not the upstream provider key) — it is
+/// validated against the local DB the same way regardless of which header
+/// carried it.
 pub fn extract_gateway_key(headers: &HeaderMap) -> Option<String> {
-    let auth_header = headers.get(axum::http::header::AUTHORIZATION)?;
-    let auth_str = auth_header.to_str().ok()?;
-    let key = auth_str.strip_prefix("Bearer ")?;
-    if key.starts_with("sk-dongapi-") {
-        Some(key.to_string())
-    } else {
-        None
+    // OpenAI-style: `Authorization: Bearer sk-dongapi-xxxx`
+    if let Some(auth_header) = headers.get(axum::http::header::AUTHORIZATION) {
+        if let Ok(auth_str) = auth_header.to_str() {
+            if let Some(key) = auth_str.strip_prefix("Bearer ") {
+                if key.starts_with("sk-dongapi-") {
+                    return Some(key.to_string());
+                }
+            }
+        }
     }
+    // Anthropic-style: `x-api-key: sk-dongapi-xxxx`
+    if let Some(key_header) = headers.get("x-api-key") {
+        if let Ok(key) = key_header.to_str() {
+            if key.starts_with("sk-dongapi-") {
+                return Some(key.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Validate a gateway key against the database.

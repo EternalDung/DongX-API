@@ -1,4 +1,6 @@
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import Prism from "prismjs";
+import "prismjs/components/prism-json";
 import {
   Search,
   RefreshCw,
@@ -15,6 +17,7 @@ import {
   Lightbulb,
   ShieldAlert,
   ShieldCheck,
+  X,
 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -580,7 +583,7 @@ function LogDetail({ id }: { id: string }) {
       <SecurityAuditSection detail={detail} />
 
       {/* 请求/响应 tab + 缩略/JSON 双视图 */}
-      <BodySection requestBody={detail.request_body} responseBody={detail.response_body} />
+      <BodySection mode={detail.mode} requestBody={detail.request_body} responseBody={detail.response_body} />
     </div>
   );
 }
@@ -637,7 +640,7 @@ function SecurityAuditSection({ detail }: { detail: RequestLog }) {
         <span className="text-sm font-medium">安全审计</span>
         <RiskBadge level={detail.risk_level} score={detail.risk_score} />
         <Badge variant={actionMeta.variant}>动作：{actionMeta.label}</Badge>
-        {detail.sanitized && <Badge variant="secondary">已脱敏</Badge>}
+        {!!detail.sanitized && <Badge variant="secondary">已脱敏</Badge>}
       </div>
 
       {detail.risk_summary && (
@@ -677,7 +680,7 @@ function FindingRow({ finding }: { finding: SecurityFinding }) {
         </Badge>
         <span className="text-sm font-medium">{finding.title}</span>
         <Badge variant="outline" className="text-xs">
-          {finding.phase === "response" ? "响应侧" : "请求侧"}
+          {finding.phase === "request" ? "请求侧" : "响应侧"}
         </Badge>
         <span className="font-mono text-xs text-muted-foreground">
           {finding.rule_id}
@@ -724,6 +727,10 @@ function modeLabel(mode: string): string {
   switch (mode) {
     case "chat":
       return "对话 (chat)";
+    case "responses":
+      return "Responses";
+    case "messages":
+      return "Anthropic (messages)";
     case "completion":
       return "补全 (completion)";
     case "embedding":
@@ -739,20 +746,28 @@ type BodyTab = "request" | "response";
 type ViewMode = "preview" | "json";
 
 function BodySection({
+  mode,
   requestBody,
   responseBody,
 }: {
+  mode: string;
   requestBody: string | null;
   responseBody: string | null;
 }) {
   const [tab, setTab] = useState<BodyTab>("response");
   const [view, setView] = useState<ViewMode>("preview");
-  const reqMessages = useMemo(() => parseRequestMessages(requestBody), [requestBody]);
-  const respChoices = useMemo(() => parseResponseChoices(responseBody), [responseBody]);
+  const isAnthropic = mode === "messages";
+  const reqMessages = useMemo(
+    () => (isAnthropic ? parseAnthropicRequest(requestBody) : parseRequestMessages(requestBody)),
+    [isAnthropic, requestBody],
+  );
+  const respChoices = useMemo(
+    () => (isAnthropic ? parseAnthropicResponse(responseBody) : parseResponseChoices(responseBody)),
+    [isAnthropic, responseBody],
+  );
 
   const currentBody = tab === "request" ? requestBody : responseBody;
   const currentList = tab === "request" ? reqMessages : respChoices;
-  const currentCount = currentList.length;
 
   return (
     <div className="overflow-hidden rounded-md border bg-background">
@@ -790,7 +805,7 @@ function BodySection({
             )}
           </TabButton>
         </div>
-        {currentCount > 0 && (
+        {currentBody && (
           <button
             type="button"
             onClick={() => setView(view === "preview" ? "json" : "preview")}
@@ -815,8 +830,11 @@ function BodySection({
               <ChoiceList choices={currentList as ParsedChoice[]} />
             )
           ) : (
-            <div className="rounded-md border border-dashed p-3 text-xs italic text-muted-foreground">
-              无法解析对话结构，自动回退 JSON 视图
+            <div className="space-y-2">
+              <div className="rounded-md border border-dashed p-2 text-xs italic text-muted-foreground">
+                无法解析为对话结构，已回退原始 JSON 视图
+              </div>
+              <JsonBlock body={currentBody} />
             </div>
           )
         ) : (
@@ -1051,6 +1069,122 @@ function aggregateFrames(frames: Record<string, unknown>[]): ParsedChoice | null
   return { role: "assistant", content, reasoning };
 }
 
+// ─── Anthropic Messages 解析（mode === "messages" 时启用） ──────────────────
+// waliapi 在后端把响应归一化为 response_choices 列，前端直接 JSON.parse 即可渲染；
+// DongX 当前把原始 Anthropic 报文（非流式单条 JSON / 流式 event:/data: SSE）存入
+// response_body，因此这里在前端按 mode 选解析器，思路与 waliapi 用 log.mode 选解析器一致。
+
+// 解析 Anthropic 风格 SSE：每帧由 `event:` 与 `data:` 两行组成，data 内已含 type 字段。
+function extractAnthropicSse(body: string): Record<string, unknown>[] {
+  const out: Record<string, unknown>[] = [];
+  for (const frame of body.split("\n\n")) {
+    let dataStr = "";
+    for (const line of frame.split("\n")) {
+      const t = line.trim();
+      if (t.startsWith("data:")) dataStr = t.slice(5).trim();
+    }
+    if (!dataStr) continue;
+    try {
+      const j = JSON.parse(dataStr) as Record<string, unknown>;
+      out.push(j);
+    } catch {
+      /* 忽略无法解析的帧 */
+    }
+  }
+  return out;
+}
+
+// 单个 Anthropic content block 转可读文本（text / thinking / tool_use / tool_result / image）
+function anthropicBlockToText(b: Record<string, unknown>): string {
+  const type = b.type as string | undefined;
+  if (type === "text" && typeof b.text === "string") return b.text;
+  if (type === "thinking" && typeof b.thinking === "string") return b.thinking;
+  if (type === "tool_use") {
+    const name = (b.name as string) ?? "tool";
+    const input = b.input ? JSON.stringify(b.input) : "";
+    return `[调用工具 ${name}]${input ? "\n" + input : ""}`;
+  }
+  if (type === "tool_result") {
+    const rc = b.content;
+    const txt = typeof rc === "string" ? rc : JSON.stringify(rc);
+    return `[工具结果] ${txt ?? ""}`;
+  }
+  if (type === "image") return "[图片]";
+  return JSON.stringify(b);
+}
+
+// 响应：支持非流式单条 message 对象与流式 SSE，聚合 text_delta / thinking_delta
+function parseAnthropicResponse(body: string | null): ParsedChoice[] {
+  if (!body) return [];
+  // 1) 单条 JSON（非流式 message 对象）
+  try {
+    const parsed = JSON.parse(body);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const isAnthropicMsg =
+        parsed.type === "message" || Array.isArray(parsed.content) || parsed.role === "assistant";
+      if (isAnthropicMsg) {
+        const blocks = Array.isArray(parsed.content) ? (parsed.content as Record<string, unknown>[]) : [];
+        let content = "";
+        let reasoning = "";
+        for (const b of blocks) {
+          if (b.type === "text" && typeof b.text === "string") content += b.text as string;
+          else if (b.type === "thinking" && typeof b.thinking === "string") reasoning += b.thinking as string;
+        }
+        if (content || reasoning) return [{ role: "assistant", content, reasoning }];
+      }
+    }
+  } catch {
+    /* 非单条 JSON，尝试 SSE */
+  }
+  // 2) 流式 SSE
+  const frames = extractAnthropicSse(body);
+  if (frames.length > 0) {
+    let content = "";
+    let reasoning = "";
+    let role = "assistant";
+    for (const f of frames) {
+      const type = f.type as string | undefined;
+      if (type === "message_start") {
+        const m = f.message as Record<string, unknown> | undefined;
+        if (m && typeof m.role === "string") role = m.role as string;
+      } else if (type === "content_block_delta") {
+        const d = (f.delta ?? {}) as Record<string, unknown>;
+        if (d.type === "text_delta" && typeof d.text === "string") content += d.text as string;
+        else if (d.type === "thinking_delta" && typeof d.thinking === "string") reasoning += d.thinking as string;
+      }
+      // message_delta / message_stop 等控制帧不贡献文本
+    }
+    if (content || reasoning) return [{ role, content, reasoning }];
+  }
+  return [];
+}
+
+// 请求：Anthropic messages[]，content 可为字符串或 content block 数组（含 system 前缀）
+function parseAnthropicRequest(body: string | null): ParsedMessage[] {
+  if (!body) return [];
+  try {
+    const parsed = JSON.parse(body);
+    const msgs = parsed?.messages;
+    if (!Array.isArray(msgs)) return [];
+    const out: ParsedMessage[] = [];
+    if (typeof parsed?.system === "string" && parsed.system) {
+      out.push({ role: "system", content: parsed.system });
+    }
+    for (const m of msgs as Record<string, unknown>[]) {
+      const role = (m.role as string) ?? "user";
+      const c = m.content;
+      let content = "";
+      if (typeof c === "string") content = c;
+      else if (Array.isArray(c)) content = (c as Record<string, unknown>[]).map(anthropicBlockToText).join("\n");
+      else if (c) content = JSON.stringify(c);
+      out.push({ role, content });
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 // ─── 对话视图（请求） ────────────────────────────────────────────────────────
 
 function MessageList({ messages }: { messages: ParsedMessage[] }) {
@@ -1192,22 +1326,190 @@ function CopyButton({ value }: { value: string }) {
   );
 }
 
+// 在格式化的文本中按命中下标把匹配串包成 <mark>；激活项高亮更强。
+// 返回 string（无命中）或节点数组（有命中）。
+function renderHighlighted(
+  text: string,
+  matches: number[],
+  qlen: number,
+  active: number,
+): ReactNode {
+  if (matches.length === 0) return text;
+  const nodes: ReactNode[] = [];
+  let cursor = 0;
+  matches.forEach((start, k) => {
+    if (start > cursor) nodes.push(text.slice(cursor, start));
+    const isActive = k === active;
+    nodes.push(
+      <mark
+        key={k}
+        data-active={isActive ? "true" : "false"}
+        style={{
+          background: isActive ? "rgba(250,204,21,0.85)" : "rgba(250,204,21,0.32)",
+          color: isActive ? "#1a1a1a" : "inherit",
+          borderRadius: 2,
+        }}
+      >
+        {text.slice(start, start + qlen)}
+      </mark>,
+    );
+    cursor = start + qlen;
+  });
+  if (cursor < text.length) nodes.push(text.slice(cursor));
+  return nodes;
+}
+
 function JsonBlock({ body }: { body: string }) {
-  const pretty = useMemo(() => {
+  // 1) 单条 JSON：直接美化
+  // 2) SSE 报文：逐帧拆出 data: 行，各自 JSON 美化（兼容 Chat / Responses / Anthropic 流）
+  // 3) 兜底：原文
+  const formatted = useMemo(() => {
     try {
       return JSON.stringify(JSON.parse(body), null, 2);
     } catch {
-      return body;
+      /* 不是单条 JSON，尝试按 SSE 拆帧 */
     }
+    const frames = extractSsePayloads(body);
+    if (frames.length > 0) {
+      return frames.map((f) => JSON.stringify(f, null, 2)).join("\n\n");
+    }
+    return body;
   }, [body]);
+
+  const html = useMemo(() => {
+    const grammar = Prism.languages.json ?? Prism.languages.clike;
+    return Prism.highlight(formatted, grammar, "json");
+  }, [formatted]);
+
+  // ── 查找功能 ──────────────────────────────────────────────
+  const [findOpen, setFindOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [activeIdx, setActiveIdx] = useState(0);
+  const containerRef = useRef<HTMLPreElement>(null);
+
+  const q = query.trim();
+  const searching = findOpen && q.length > 0;
+
+  const matches = useMemo(() => {
+    if (!q) return [];
+    const lower = formatted.toLowerCase();
+    const needle = q.toLowerCase();
+    const res: number[] = [];
+    let i = 0;
+    while ((i = lower.indexOf(needle, i)) !== -1) {
+      res.push(i);
+      i += needle.length;
+    }
+    return res;
+  }, [formatted, q]);
+
+  const active =
+    matches.length > 0 ? ((activeIdx % matches.length) + matches.length) % matches.length : 0;
+
+  useEffect(() => {
+    if (!searching || matches.length === 0) return;
+    const el = containerRef.current?.querySelector('mark[data-active="true"]');
+    el?.scrollIntoView({ block: "center", behavior: "smooth" });
+  }, [active, searching, matches.length]);
+
+  const highlightNodes =
+    searching && matches.length > 0
+      ? renderHighlighted(formatted, matches, q.length, active)
+      : null;
+
   return (
     <div className="relative">
-      <pre className="max-h-96 overflow-auto rounded-md bg-muted/40 p-3 font-mono text-xs whitespace-pre-wrap break-words">
-        {pretty}
-      </pre>
-      <div className="absolute top-2 right-2">
-        <CopyButton value={pretty} />
+      <div className="mb-2 flex items-center gap-2">
+        {findOpen ? (
+          <>
+            <div className="flex items-center gap-1 rounded-md border bg-background px-2 py-1">
+              <Search className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+              <input
+                autoFocus
+                value={query}
+                onChange={(e) => {
+                  setQuery(e.target.value);
+                  setActiveIdx(0);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    if (matches.length)
+                      setActiveIdx((i) => (i + 1) % matches.length);
+                  } else if (e.key === "Escape") {
+                    setFindOpen(false);
+                    setQuery("");
+                  }
+                }}
+                placeholder="查找…"
+                className="w-44 bg-transparent text-xs outline-none placeholder:text-muted-foreground"
+              />
+            </div>
+            <button
+              type="button"
+              title="上一个匹配"
+              disabled={!matches.length}
+              onClick={() =>
+                matches.length && setActiveIdx((i) => (i - 1 + matches.length) % matches.length)
+              }
+              className="rounded-md border p-1 text-muted-foreground transition-colors hover:bg-muted disabled:opacity-40"
+            >
+              <ChevronUp className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              title="下一个匹配"
+              disabled={!matches.length}
+              onClick={() =>
+                matches.length && setActiveIdx((i) => (i + 1) % matches.length)
+              }
+              className="rounded-md border p-1 text-muted-foreground transition-colors hover:bg-muted disabled:opacity-40"
+            >
+              <ChevronDown className="h-3.5 w-3.5" />
+            </button>
+            <span className="font-mono text-[11px] tabular-nums text-muted-foreground">
+              {matches.length ? `${active + 1}/${matches.length}` : "0/0"}
+            </span>
+            <button
+              type="button"
+              title="关闭查找"
+              onClick={() => {
+                setFindOpen(false);
+                setQuery("");
+              }}
+              className="rounded-md border p-1 text-muted-foreground transition-colors hover:bg-muted"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setFindOpen(true)}
+            title="在报文中查找"
+            className="flex items-center gap-1 rounded-md border px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted"
+          >
+            <Search className="h-3.5 w-3.5" />
+            查找
+          </button>
+        )}
+        <div className="ml-auto">
+          <CopyButton value={formatted} />
+        </div>
       </div>
+
+      {searching && highlightNodes ? (
+        <pre
+          ref={containerRef}
+          className="max-h-96 overflow-auto rounded-md bg-zinc-950 p-3 font-mono text-xs whitespace-pre-wrap break-words text-zinc-100"
+        >
+          {highlightNodes}
+        </pre>
+      ) : (
+        <pre className="max-h-96 overflow-auto rounded-md bg-zinc-950 p-3 font-mono text-xs whitespace-pre-wrap break-words">
+          <code className="text-zinc-100" dangerouslySetInnerHTML={{ __html: html }} />
+        </pre>
+      )}
     </div>
   );
 }

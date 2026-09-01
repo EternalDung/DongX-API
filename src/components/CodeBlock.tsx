@@ -2,16 +2,21 @@ import { useMemo } from "react";
 import Prism from "prismjs";
 import "prismjs/components/prism-json";
 import "prismjs/components/prism-toml";
+// 代码示例用的多语言（注意：typescript 依赖 javascript，须在之后导入）
+import "prismjs/components/prism-bash";
+import "prismjs/components/prism-javascript";
+import "prismjs/components/prism-typescript";
+import "prismjs/components/prism-python";
 import "prismjs/themes/prism-tomorrow.css";
 
 interface Props {
   code: string;
-  /** 根据配置文件扩展名推断：.toml 或 .json */
-  lang: "json" | "toml";
+  /** 语言标识：json / toml / bash / javascript / typescript / python 等 */
+  lang: string;
 }
 
 /**
- * 语法高亮代码块（JSON / TOML）。
+ * 语法高亮代码块（JSON / TOML / Bash / JS / TS / Python 等）。
  * 沿用 prism-tomorrow 暗色主题，与配置文件预览区黑底风格一致。
  */
 export function CodeBlock({ code, lang }: Props) {

@@ -29,14 +29,15 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { channelApi, keyApi, settingsApi, clientConfigApi } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { ClientConfigView } from "@/components/ClientConfigView";
+import { CodeBlock } from "@/components/CodeBlock";
 import type { ApiKey, Channel, ClientInfo, Settings } from "@/types";
 
 // ============================================================
-// 协议卡片数据（OpenAI / Anthropic / 本地 3 协议设计）
-// 前端：chat / responses 可选；anthropic 暂未开放。
-// 注意：当前后端数据面仅注册了 /v1/chat/completions 等路由，
-// 尚未实现 /v1/responses，故 Responses 选项可选中但实测会 404，
-// 需后端补桥接（Responses ↔ Chat 格式互转）后才真正可用。
+// 协议卡片数据（OpenAI Chat / OpenAI Responses / Anthropic Messages）
+// 三个协议均已开放：后端数据面分别注册 /v1/chat/completions、
+// /v1/responses、/v1/messages，且 Responses 与 Messages 都通过「请求转
+// Chat → 共享管道 → 响应转回」的桥接实现，与 Chat 共用同一套鉴权/
+// 分发/熔断/日志逻辑。下游可按自身 SDK 选择任一协议接入。
 // ============================================================
 interface ProtocolDef {
   id: "chat" | "responses" | "anthropic";
@@ -69,13 +70,13 @@ const PROTOCOLS: ProtocolDef[] = [
     label: "Anthropic Messages",
     desc: "Claude Messages 协议，支持 Claude Code",
     endpoint: "/messages",
-    enabled: false,
+    enabled: true,
     icon: Zap,
   },
 ];
 
 // ============================================================
-// 代码示例（4 个平台 × 仅 OpenAI Chat 可用）
+// 代码示例（4 个平台 × 按所选协议生成）
 // ============================================================
 type CodeLang = "curl" | "javascript" | "typescript" | "python";
 
@@ -85,6 +86,22 @@ const CODE_LANGS: { id: CodeLang; label: string }[] = [
   { id: "typescript", label: "TypeScript" },
   { id: "python", label: "Python" },
 ];
+
+/** 把代码示例的下拉语言映射到 prism 语法标识 */
+function codeLangToPrism(lang: CodeLang): string {
+  switch (lang) {
+    case "curl":
+      return "bash";
+    case "javascript":
+      return "javascript";
+    case "typescript":
+      return "typescript";
+    case "python":
+      return "python";
+    default:
+      return "clike";
+  }
+}
 
 /** 下拉框里以「名称」为主、密钥掩码显示，避免长明文把名称挤没了 */
 function maskKeyForDisplay(full: string): string {
@@ -101,39 +118,54 @@ function buildCodeSamples(
   protocolId: ProtocolDef["id"],
 ): Record<CodeLang, string> {
   const isResponses = protocolId === "responses";
-  const url = `${baseUrl}${isResponses ? "/responses" : "/chat/completions"}`;
+  const isAnthropic = protocolId === "anthropic";
+  const path = isAnthropic
+    ? "/messages"
+    : isResponses
+      ? "/responses"
+      : "/chat/completions";
+  const url = `${baseUrl}${path}`;
   // 直接把当前下拉选中的密钥内联进示例代码（本地网关，密钥即明文），
   // 这样复制后即可直接运行，无需再手动替换占位符。
   const keyLiteral = apiKey.trim() || "sk-dongapi-你的密钥";
-  const reqField = isResponses ? "input" : "messages";
-  const sampleBody = {
-    model: model || "MODEL_NAME",
-    [reqField]: [{ role: "user", content: "Say hello in one sentence" }],
-    stream: !!stream,
-  };
+  const modelLiteral = model || "MODEL_NAME";
+
+  // 请求体：三种协议字段不同（anthropic 还需 max_tokens）。
+  const sampleBody: Record<string, unknown> = isAnthropic
+    ? {
+        model: modelLiteral,
+        max_tokens: 1024,
+        messages: [{ role: "user", content: "Say hello in one sentence" }],
+        stream: !!stream,
+      }
+    : isResponses
+      ? {
+          model: modelLiteral,
+          input: [{ role: "user", content: "Say hello in one sentence" }],
+          stream: !!stream,
+        }
+      : {
+          model: modelLiteral,
+          messages: [{ role: "user", content: "Say hello in one sentence" }],
+          stream: !!stream,
+        };
   const bodyLiteral = JSON.stringify(sampleBody, null, 2);
   const bodyLiteralPy = JSON.stringify(sampleBody, null, 4).replace(/\n/g, "\n    ");
   const streamFlag = stream ? "True" : "False";
 
-  // 回复提取：chat 取 choices[0].message.content；responses 取 output[0].content[0].text
-  const jsContent = isResponses
-    ? "data.output[0].content[0].text"
-    : "data.choices[0].message.content";
-  const pyContent = isResponses
-    ? 'resp.json()["output"][0]["content"][0]["text"]'
-    : 'resp.json()["choices"][0]["message"]["content"]';
+  // 鉴权头：anthropic 用 x-api-key + anthropic-version；其余用 Bearer。
+  const curlAuth = isAnthropic
+    ? `  -H "x-api-key: ${keyLiteral}" \\\n  -H "anthropic-version: 2023-06-01" \\`
+    : `  -H "Authorization: Bearer ${keyLiteral}" \\`;
+  const jsAuth = isAnthropic
+    ? `    "x-api-key": "${keyLiteral}",\n    "anthropic-version": "2023-06-01",`
+    : `    "Authorization": "Bearer ${keyLiteral}",`;
+  const pyAuth = isAnthropic
+    ? `        "x-api-key": "${keyLiteral}",\n        "anthropic-version": "2023-06-01",`
+    : `        "Authorization": "Bearer ${keyLiteral}",`;
 
-  const jsBody = stream
-    ? `const res = await fetch("${url}", {
-  method: "POST",
-  headers: {
-    "Authorization": "Bearer ${keyLiteral}",
-    "Content-Type": "application/json",
-  },
-  body: JSON.stringify(${bodyLiteral}),
-});
-// 流式：逐帧读取 SSE（网关按所选协议输出 Chat / Responses 事件，此处自动适配）
-const reader = res.body.getReader();
+  // 流式 SSE 解析：统一兼容 Chat / Responses / Anthropic 三种事件形状。
+  const jsStreamParse = `const reader = res.body.getReader();
 const decoder = new TextDecoder();
 let text = "";
 while (true) {
@@ -141,29 +173,23 @@ while (true) {
   if (done) break;
   const chunk = decoder.decode(value, { stream: true });
   for (const frame of chunk.split("\\n\\n")) {
-    const m = frame.match(/^data: (.+)$/m);
-    if (!m || m[1] === "[DONE]") continue;
+    const dataLine = frame.split("\\n").find((l) => l.startsWith("data:"));
+    if (!dataLine) continue;
+    const payload = dataLine.slice(5).trim();
+    if (!payload || payload === "[DONE]") continue;
     try {
-      const j = JSON.parse(m[1]);
-      const d = j?.choices?.[0]?.delta?.content ?? (j?.type === "response.output_text.delta" ? j.delta : "");
+      const j = JSON.parse(payload);
+      const d =
+        j?.choices?.[0]?.delta?.content ??
+        (j?.type === "response.output_text.delta" ? j.delta : "") ??
+        (j?.type === "content_block_delta" ? (j.delta?.text || j.delta?.thinking || "") : "");
       text += d || "";
     } catch {}
   }
 }
-console.log(text);`
-    : `const res = await fetch("${url}", {
-  method: "POST",
-  headers: {
-    "Authorization": "Bearer ${keyLiteral}",
-    "Content-Type": "application/json",
-  },
-  body: JSON.stringify(${bodyLiteral}),
-});
-const data = await res.json();
-console.log(${jsContent});`;
+console.log(text);`;
 
-  const pythonBody = stream
-    ? `text = ""
+  const pyStreamParse = `text = ""
 for line in resp.iter_lines():
     if not line or not line.startswith(b"data:"):
         continue
@@ -176,18 +202,61 @@ for line in resp.iter_lines():
             d = j["choices"][0]["delta"].get("content") or ""
         elif j.get("type") == "response.output_text.delta":
             d = j.get("delta") or ""
+        elif j.get("type") == "content_block_delta":
+            d = (j.get("delta") or {}).get("text") or (j.get("delta") or {}).get("thinking") or ""
         else:
             d = ""
         text += d
     except Exception:
         pass
-print(text)`
-    : `print(${pyContent})`;
+print(text)`;
+
+  // 非流式：anthropic 回复体是 { content:[{type:"text",text}] }，直接打印整体。
+  const jsNonStream = isAnthropic
+    ? `const data = await res.json();
+console.log(data?.content?.[0]?.text ?? data);`
+    : isResponses
+      ? `const data = await res.json();
+console.log(data.output[0].content[0].text);`
+      : `const data = await res.json();
+console.log(data.choices[0].message.content);`;
+
+  const pyNonStream = isAnthropic
+    ? `data = resp.json()
+print(data.get("content", [{}])[0].get("text", data))`
+    : isResponses
+      ? `data = resp.json()
+print(data["output"][0]["content"][0]["text"])`
+      : `data = resp.json()
+print(data["choices"][0]["message"]["content"])`;
+
+  const jsBody = stream
+    ? `const res = await fetch("${url}", {
+  method: "POST",
+  headers: {
+    ${jsAuth}
+    "Content-Type": "application/json",
+  },
+  body: JSON.stringify(${bodyLiteral}),
+});
+// 流式：逐帧读取 SSE（网关按所选协议输出 Chat / Responses / Anthropic 事件）
+${jsStreamParse}`
+    : `const res = await fetch("${url}", {
+  method: "POST",
+  headers: {
+    ${jsAuth}
+    "Content-Type": "application/json",
+  },
+  body: JSON.stringify(${bodyLiteral}),
+});
+${jsNonStream}`;
+
+  const pythonBody = stream ? pyStreamParse : pyNonStream;
 
   return {
     curl: `# 网关监听 127.0.0.1，仅本机可达${stream ? "（stream 模式下 curl 会逐帧打印 SSE）" : ""}
 curl -X POST "${url}" \\
-  -H "Authorization: Bearer ${keyLiteral}" \\
+${curlAuth}
   -H "Content-Type: application/json" \\
   -d '${JSON.stringify(sampleBody)}'`,
     javascript: `// 浏览器 fetch — 网关监听 127.0.0.1，仅本机可达
@@ -200,7 +269,7 @@ import requests
 resp = requests.post(
     "${url}",
     headers={
-        "Authorization": "Bearer ${keyLiteral}",
+${pyAuth}
         "Content-Type": "application/json",
     },
     json=${bodyLiteralPy},
@@ -424,8 +493,9 @@ export function UsagePage() {
         return;
       }
 
-      // 流式模式：逐帧读取 SSE（网关已统一转换为 OpenAI 兼容格式）
-      if (effectiveStream && !isAnthropic && resp.body) {
+      // 流式模式：逐帧读取 SSE（网关按所选协议输出 Chat / Responses /
+      // Anthropic 三种事件形状，此处统一解析）。
+      if (effectiveStream && resp.body) {
         const reader = resp.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
@@ -447,12 +517,16 @@ export function UsagePage() {
             if (payload === "[DONE]") continue;
             try {
               const json = JSON.parse(payload);
-              // 兼容两种 SSE 形状：
+              // 兼容三种 SSE 形状：
               //  - Chat: choices[0].delta.content
               //  - Responses: event=response.output_text.delta 的 delta 字段
+              //  - Anthropic: event=content_block_delta 的 delta.text / thinking
               const d =
                 json?.choices?.[0]?.delta?.content ??
-                (json?.type === "response.output_text.delta" ? json.delta : "");
+                (json?.type === "response.output_text.delta" ? json.delta : "") ??
+                (json?.type === "content_block_delta"
+                  ? json.delta?.text || json.delta?.thinking || ""
+                  : "");
               if (typeof d === "string") content += d;
             } catch {
               /* 跳过非 JSON 帧 */
@@ -827,9 +901,7 @@ export function UsagePage() {
               ))}
             </div>
             <div className="relative">
-              <pre className="max-h-96 overflow-auto rounded-xl border bg-zinc-950 p-4 font-mono text-[12px] leading-relaxed text-zinc-100">
-                {codeSamples[codeLang]}
-              </pre>
+              <CodeBlock code={codeSamples[codeLang]} lang={codeLangToPrism(codeLang)} />
               <Button
                 variant="outline"
                 size="sm"
