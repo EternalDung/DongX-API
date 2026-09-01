@@ -26,6 +26,18 @@ pub struct GateOutput {
     pub action: SecurityAction,
 }
 
+impl GateOutput {
+    /// fail-open 放行：原样返回请求体，不扫描、不阻断、不留发现。
+    pub fn allow(body: Value) -> Self {
+        GateOutput {
+            forward_body: body,
+            outcome: SecurityOutcome::allow(),
+            findings: Vec::new(),
+            action: SecurityAction::Allow,
+        }
+    }
+}
+
 async fn bool_setting(pool: &SqlitePool, key: &str, default: bool) -> bool {
     match settings_get(pool, key).await {
         Ok(Some(s)) => serde_json::from_str::<bool>(&s).unwrap_or(default),
@@ -33,62 +45,102 @@ async fn bool_setting(pool: &SqlitePool, key: &str, default: bool) -> bool {
     }
 }
 
-/// 加载扫描所需的（安全设置 + 启用内置规则 + 启用自定义规则）。
+/// 安全扫描上下文：设置 + 启用内置规则 + 启用自定义规则。
 ///
-/// 请求闸门、非流式响应扫描、流式增量审计共用同一套上下文，避免三处各写一遍
-/// 设置/规则加载逻辑而产生分歧。
-pub async fn load_scan_context(
-    pool: &SqlitePool,
-) -> Result<(SecuritySettings, Vec<BuiltinRule>, Vec<CustomRule>), sqlx::Error> {
-    let enabled = bool_setting(pool, "security_enabled", true).await;
-    let mode = match settings_get(pool, "security_mode").await {
-        Ok(Some(s)) => serde_json::from_str::<String>(&s).unwrap_or_else(|_| "audit".to_string()),
-        _ => "audit".to_string(),
-    };
-    let sec = SecuritySettings {
-        enabled,
-        mode,
-        scan_unicode: bool_setting(pool, "security_scan_unicode", true).await,
-        scan_tools: bool_setting(pool, "security_scan_tools", true).await,
-        scan_network: bool_setting(pool, "security_scan_network", true).await,
-        scan_response: bool_setting(pool, "security_scan_response", false).await,
-        redact_secrets: bool_setting(pool, "security_redact_secrets", false).await,
-        block_on_critical: bool_setting(pool, "security_block_on_critical", false).await,
-    };
-    let builtin = BuiltinRuleRepository::get_enabled(pool).await?;
-    let custom = CustomRuleRepository::get_enabled(pool).await?;
-    Ok((sec, builtin, custom))
+/// 由 `load_security_context` 一次性加载，run_gate / scan_response / 流式增量审计
+/// 三处共用同一份镜像，避免各读一遍 settings/rules 产生分歧，也便于上层的
+/// 单请求内缓存（AppSettings.security）直接传入，跳过热路径上的重复读库。
+#[derive(Debug, Clone)]
+pub struct SecurityContext {
+    pub settings: SecuritySettings,
+    pub builtin_rules: Vec<BuiltinRule>,
+    pub custom_rules: Vec<CustomRule>,
 }
 
-/// 运行安全闸门。Err 表示子系统异常，调用方应 fail-open 放行。
+impl SecurityContext {
+    /// 从数据库加载完整安全扫描上下文。
+    pub async fn load(
+        pool: &SqlitePool,
+    ) -> Result<SecurityContext, sqlx::Error> {
+        let enabled = bool_setting(pool, "security_enabled", true).await;
+        let mode = match settings_get(pool, "security_mode").await {
+            Ok(Some(s)) => {
+                serde_json::from_str::<String>(&s).unwrap_or_else(|_| "audit".to_string())
+            }
+            _ => "audit".to_string(),
+        };
+        let sec = SecuritySettings {
+            enabled,
+            mode,
+            scan_unicode: bool_setting(pool, "security_scan_unicode", true).await,
+            scan_tools: bool_setting(pool, "security_scan_tools", true).await,
+            scan_network: bool_setting(pool, "security_scan_network", true).await,
+            scan_response: bool_setting(pool, "security_scan_response", false).await,
+            redact_secrets: bool_setting(pool, "security_redact_secrets", false).await,
+            block_on_critical: bool_setting(pool, "security_block_on_critical", false).await,
+        };
+        let builtin = BuiltinRuleRepository::get_enabled(pool).await?;
+        let custom = CustomRuleRepository::get_enabled(pool).await?;
+        Ok(SecurityContext {
+            settings: sec,
+            builtin_rules: builtin,
+            custom_rules: custom,
+        })
+    }
+
+    /// 极端降级：安全上下文为空（disabled + 无规则），等同不扫描、fail-open 放行。
+    pub fn disabled() -> SecurityContext {
+        SecurityContext {
+            settings: SecuritySettings {
+                enabled: false,
+                mode: "audit".to_string(),
+                scan_unicode: true,
+                scan_tools: true,
+                scan_network: true,
+                scan_response: false,
+                redact_secrets: false,
+                block_on_critical: false,
+            },
+            builtin_rules: Vec::new(),
+            custom_rules: Vec::new(),
+        }
+    }
+}
+
+/// 运行安全闸门（池版本）。Err 表示子系统异常，调用方应 fail-open 放行。
+///
+/// 内部加载一次安全上下文后委派给 [`run_gate_ctx`]，后者无 DB 读，供数据面
+/// 热路径在已持有缓存上下文（AppState.settings_cache.security）时直接调用。
 pub async fn run_gate(pool: &SqlitePool, body: Value) -> Result<GateOutput, sqlx::Error> {
-    let (sec, builtin, custom) = match load_scan_context(pool).await {
+    let ctx = match SecurityContext::load(pool).await {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!("安全设置/规则加载失败，fail-open 放行: {}", e);
-            return Ok(GateOutput {
-                forward_body: body,
-                outcome: SecurityOutcome::allow(),
-                findings: Vec::new(),
-                action: SecurityAction::Allow,
-            });
+            return Ok(GateOutput::allow(body));
         }
     };
+    if !ctx.settings.enabled {
+        return Ok(GateOutput::allow(body));
+    }
+    Ok(run_gate_ctx(&ctx, body))
+}
+
+/// 运行安全闸门（使用预加载上下文，无 DB 读）。
+///
+/// 仅在 `settings.enabled` 时扫描；禁用时直接 fail-open 放行。脱敏由独立开关
+/// `redact_secrets` 控制（与模式解耦）。
+pub fn run_gate_ctx(ctx: &SecurityContext, body: Value) -> GateOutput {
+    let sec = &ctx.settings;
     if !sec.enabled {
-        return Ok(GateOutput {
-            forward_body: body,
-            outcome: SecurityOutcome::allow(),
-            findings: Vec::new(),
-            action: SecurityAction::Allow,
-        });
+        return GateOutput::allow(body);
     }
 
-    let result = scanner::scan(&body, &sec, &builtin, &custom, "request");
+    let result = scanner::scan(&body, sec, &ctx.builtin_rules, &ctx.custom_rules, "request");
     if result.budget_exceeded {
         tracing::warn!("安全扫描触发字节预算上限，已跳过剩余内容（未阻断）");
     }
 
-    let (action, outcome) = decide_action(&result.findings, &sec);
+    let (action, outcome) = decide_action(&result.findings, sec);
     // 转发体脱敏由独立开关 redact_secrets 控制（与模式解耦）。
     let forward_body = if sec.redact_secrets {
         redact::redact(&body)
@@ -96,12 +148,12 @@ pub async fn run_gate(pool: &SqlitePool, body: Value) -> Result<GateOutput, sqlx
         body
     };
 
-    Ok(GateOutput {
+    GateOutput {
         forward_body,
         outcome,
         findings: result.findings,
         action,
-    })
+    }
 }
 
 /// 扫描出站响应体（security_scan_response 开关）。
@@ -111,15 +163,21 @@ pub async fn run_gate(pool: &SqlitePool, body: Value) -> Result<GateOutput, sqlx
 /// - 响应已发送给客户端，无需脱敏转发体，也不据此阻断；只产出发现与风险汇总供落库审计。
 /// - 发现统一标记 `phase = "response"`，落库 request_security_findings.phase 以区分请求阶段。
 pub async fn scan_response(pool: &SqlitePool, body: Value) -> Result<GateOutput, sqlx::Error> {
-    let (mut sec, builtin, custom) = load_scan_context(pool).await?;
+    let ctx = SecurityContext::load(pool).await?;
+    Ok(scan_response_ctx(&ctx, body))
+}
+
+/// 扫描出站响应体（security_scan_response 开关，使用预加载上下文，无 DB 读）。
+///
+/// 与 run_gate 的区别：
+/// - 仅当 `security_enabled` 且 `security_scan_response` 同时开启才扫描；否则返回空（无发现）。
+/// - 响应已发送给客户端，无需脱敏转发体，也不据此阻断；只产出发现与风险汇总供落库审计。
+/// - 发现统一标记 `phase = "response"`，落库 request_security_findings.phase 以区分请求阶段。
+pub fn scan_response_ctx(ctx: &SecurityContext, body: Value) -> GateOutput {
+    let mut sec = ctx.settings.clone();
     // 响应侧独立开关：关闭则不扫描响应（与请求扫描解耦）。
     if !sec.enabled || !sec.scan_response {
-        return Ok(GateOutput {
-            forward_body: body,
-            outcome: SecurityOutcome::allow(),
-            findings: Vec::new(),
-            action: SecurityAction::Allow,
-        });
+        return GateOutput::allow(body);
     }
 
     // 响应不触发阻断，模式固定 audit、关闭脱敏/强制阻断（仅记录风险等级/评分）。
@@ -129,16 +187,16 @@ pub async fn scan_response(pool: &SqlitePool, body: Value) -> Result<GateOutput,
     sec.scan_response = true;
 
     // root="response"：scan 自动把 location 前缀与 phase 设为响应侧，落库正确区分。
-    let result = scanner::scan(&body, &sec, &builtin, &custom, "response");
+    let result = scanner::scan(&body, &sec, &ctx.builtin_rules, &ctx.custom_rules, "response");
 
     let (action, outcome) = decide_action(&result.findings, &sec);
 
-    Ok(GateOutput {
+    GateOutput {
         forward_body: body,
         outcome,
         findings: result.findings,
         action,
-    })
+    }
 }
 
 #[cfg(test)]

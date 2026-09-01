@@ -16,10 +16,11 @@ use crate::adapter::{
 };
 use crate::core::{dispatcher, failover};
 use crate::db::repository::{
-    channel_health, channels, gateway_keys, request_logs, security_findings, settings,
+    channel_health, channels, gateway_keys, request_logs, security_findings,
 };
 use crate::security::{self, redact, SecurityAction, SecurityFinding, SecurityOutcome};
 use crate::server::auth;
+use crate::app_settings::AppSettings;
 use crate::AppState;
 
 /// Health check endpoint.
@@ -64,17 +65,30 @@ async fn run_chat_pipeline(
     let state: Arc<AppState> = app.state::<Arc<AppState>>().inner().clone();
     let start = std::time::Instant::now();
 
-    // Read the "log raw request/response body" toggle (default off).
-    let log_raw_body = match settings::get(&state.db, "log_raw_body").await {
-        Ok(Some(s)) => serde_json::from_str::<bool>(&s).unwrap_or(false),
-        _ => false,
+    // 单请求内设置/规则缓存：启动与设置变更时由 AppState.settings_cache 加载，
+    // 这里只读一次本地镜像，避免每条请求 20+ 次 settings/rules 的重复读库。
+    // 注意：必须先把 guard 的结果取出来再 await。若直接在 `match state.settings_cache.read()`
+    // 的 Err 分支里 await，guard 临时值会存活到整个 match 结束，跨 await 持有非 Send 的
+    // 锁守卫会让 handler 的 future 失去 Send，axum 的 Handler 约束随之不满足。
+    let cached: Option<AppSettings> = match state.settings_cache.read() {
+        Ok(g) => Some(g.clone()),
+        Err(_) => None,
     };
+    let app_settings = match cached {
+        Some(s) => s,
+        None => {
+            // 锁中毒（理论不可能）：降级即时读库，保证 fail-open 不丢功能。
+            tracing::warn!("settings_cache 读锁中毒，降级即时读库");
+            AppSettings::load(&state.db)
+                .await
+                .unwrap_or_else(|_| AppSettings::conservative_default())
+        }
+    };
+    // Read the "log raw request/response body" toggle (default off).
+    let log_raw_body = app_settings.log_raw_body;
     // 响应体日志脱敏开关（security_redact_secrets）：开启时落库的
     // 响应体(非流式 JSON / 流式 SSE 文本)统一掩高风险明文，闭合 G3 响应半边。
-    let sec_redact = match settings::get(&state.db, "security_redact_secrets").await {
-        Ok(Some(s)) => serde_json::from_str::<bool>(&s).unwrap_or(false),
-        _ => false,
-    };
+    let sec_redact = app_settings.security.settings.redact_secrets;
     // 日志请求体在请求 JSON 解析后构造（见 body_json 之后），统一走脱敏副本，确保 DB 不落明文。
 
     // 1. Auth
@@ -154,18 +168,8 @@ async fn run_chat_pipeline(
         .unwrap_or(false);
 
     // 2.5 安全审计闸门：解析后、分发前对原始请求体扫描。
-    let gate = match security::gate::run_gate(&state.db, body_json.clone()).await {
-        Ok(g) => g,
-        Err(e) => {
-            tracing::warn!("安全闸门执行失败，fail-open 放行: {}", e);
-            security::GateOutput {
-                forward_body: body_json.clone(),
-                outcome: SecurityOutcome::allow(),
-                findings: Vec::new(),
-                action: SecurityAction::Allow,
-            }
-        }
-    };
+    // 使用缓存的安全上下文（无 DB 读）；上下文为空/禁用时 gate 内部 fail-open 放行。
+    let gate = security::gate::run_gate_ctx(&app_settings.security, body_json.clone());
     let sec_outcome = gate.outcome.clone();
     let sec_findings = gate.findings.clone();
 
@@ -204,14 +208,9 @@ async fn run_chat_pipeline(
 
     // 3. Load retry settings (defaults: enabled, 3 retries).
     //    retry_times = 「额外重试次数」; max_attempts = retry_times + 1（含首次）。
-    let retry_enabled: bool = match settings::get(&state.db, "retry_enabled").await {
-        Ok(Some(s)) => serde_json::from_str::<bool>(&s).unwrap_or(true),
-        _ => true,
-    };
-    let retry_times: usize = match settings::get(&state.db, "retry_times").await {
-        Ok(Some(s)) => serde_json::from_str::<i32>(&s).unwrap_or(3).max(0) as usize,
-        _ => 3,
-    };
+    //    取自缓存镜像，避免重复读库。
+    let retry_enabled: bool = app_settings.retry_enabled;
+    let retry_times: usize = app_settings.retry_times.max(0) as usize;
     let max_attempts = if retry_enabled { retry_times + 1 } else { 1 };
 
     // 4. Dispatch + forward, wrapped in an automatic channel-failover state
@@ -447,12 +446,24 @@ async fn run_chat_pipeline(
             }
 
             let duration_ms = start.elapsed().as_millis() as i64;
+            // 日志落库的响应体须与「用户实际收到的形态」一致：
+            // - chat / responses 模式：上游返回即 OpenAI / Responses 形态，直接落库；
+            // - messages 模式：上游返回 OpenAI Chat 完成体，handler 随后会转成
+            //   Anthropic Messages 形态回给客户端（见 `messages()` 的
+            //   `chat_completion_to_anthropic`）。此处先转成 Anthropic 形态再落库，
+            //   否则日志响应仍是 OpenAI 结构，LogsPage 按 mode="messages" 用
+            //   parseAnthropicResponse 解析会失败、回退原始 JSON 视图。
+            let logged_resp_body = if mode == "messages" {
+                chat_completion_to_anthropic(&resp_body)
+            } else {
+                resp_body.clone()
+            };
             // 响应体日志脱敏：security_redact_secrets 开启时掩高风险明文（与请求体一致）。
             let raw_response = if log_raw_body {
                 let body = if sec_redact {
-                    redact::redact(&resp_body)
+                    redact::redact(&logged_resp_body)
                 } else {
-                    resp_body.clone()
+                    logged_resp_body.clone()
                 };
                 serde_json::to_string(&body).ok()
             } else {
@@ -466,18 +477,19 @@ async fn run_chat_pipeline(
             // 三者互不对应——修复见 security::compute_risk_metrics）。
             let mut sec_outcome = sec_outcome.clone();
             let mut sec_findings = sec_findings.clone();
-            if let Ok(resp_gate) = security::gate::scan_response(&state.db, resp_body.clone()).await {
-                if !resp_gate.findings.is_empty() {
-                    for f in &resp_gate.findings {
-                        sec_findings.push(f.clone());
-                    }
-                    // 合并全部发现后重算风险汇总（保留请求阶段已定的
-                    // 动作/脱敏/拦截原因，仅刷新风险指标字段）。
-                    let (rl, rs, summ, _top_title) = security::compute_risk_metrics(&sec_findings);
-                    sec_outcome.risk_level = rl;
-                    sec_outcome.risk_score = rs;
-                    sec_outcome.risk_summary = summ;
+            // 使用缓存的安全上下文（无 DB 读）。
+            let resp_gate =
+                security::gate::scan_response_ctx(&app_settings.security, resp_body.clone());
+            if !resp_gate.findings.is_empty() {
+                for f in &resp_gate.findings {
+                    sec_findings.push(f.clone());
                 }
+                // 合并全部发现后重算风险汇总（保留请求阶段已定的
+                // 动作/脱敏/拦截原因，仅刷新风险指标字段）。
+                let (rl, rs, summ, _top_title) = security::compute_risk_metrics(&sec_findings);
+                sec_outcome.risk_level = rl;
+                sec_outcome.risk_score = rs;
+                sec_outcome.risk_summary = summ;
             }
 
             spawn_log(
@@ -1386,16 +1398,26 @@ fn build_stream_response(
         // 每块转发前扫其文本，命中累积，流末与请求侧发现合并、重算风险汇总写主行。
         // 仅记录不阻断（流式内容已实时发往客户端）。do_log=false 的中继路径
         // （Responses 模式）不在此审计，避免与 build_responses_stream_response 重复。
-        let scan_ctx = security::gate::load_scan_context(&state.db).await;
-        let do_stream_audit =
-            do_log && matches!(&scan_ctx, Ok((sec, _, _)) if sec.enabled && sec.scan_response);
+        // 单请求内设置/规则缓存镜像（来自 AppState.settings_cache，无 DB 读）。
+        let app_settings = state
+            .settings_cache
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_else(|_| AppSettings::conservative_default());
+        // 沿用原 (settings, builtin, custom) 元组形态，下游 scan_text_chunk 调用不变。
+        // 缓存读取失败已降级为 conservative_default，故恒为 Some（不会失败）。
+        let scan_ctx = Some((
+            app_settings.security.settings.clone(),
+            app_settings.security.builtin_rules.clone(),
+            app_settings.security.custom_rules.clone(),
+        ));
+        let do_stream_audit = do_log
+            && app_settings.security.settings.enabled
+            && app_settings.security.settings.scan_response;
         let mut stream_findings: Vec<SecurityFinding> = Vec::new();
 
         // 响应体日志脱敏开关（与请求体同一开关 security_redact_secrets）。
-        let sec_redact = match settings::get(&state.db, "security_redact_secrets").await {
-            Ok(Some(s)) => serde_json::from_str::<bool>(&s).unwrap_or(false),
-            _ => false,
-        };
+        let sec_redact = app_settings.security.settings.redact_secrets;
 
         while let Some(chunk) = upstream.next().await {
             let chunk = match chunk {
@@ -1420,7 +1442,7 @@ fn build_stream_response(
                             response_body_acc.push_str(s);
                         }
                         if do_stream_audit {
-                            if let Ok(ctx) = &scan_ctx {
+                            if let Some(ctx) = &scan_ctx {
                                 for sf in security::scanner::scan_text_chunk(
                                     s,
                                     &ctx.0,
@@ -1444,7 +1466,7 @@ fn build_stream_response(
                                 response_body_acc.push_str(&f);
                             }
                             if do_stream_audit {
-                                if let Ok(ctx) = &scan_ctx {
+                                if let Some(ctx) = &scan_ctx {
                                     for sf in security::scanner::scan_text_chunk(
                                         &f,
                                         &ctx.0,
@@ -1469,7 +1491,7 @@ fn build_stream_response(
                                 response_body_acc.push_str(&f);
                             }
                             if do_stream_audit {
-                                if let Ok(ctx) = &scan_ctx {
+                                if let Some(ctx) = &scan_ctx {
                                     for sf in security::scanner::scan_text_chunk(
                                         &f,
                                         &ctx.0,
@@ -1498,7 +1520,7 @@ fn build_stream_response(
                                 response_body_acc.push_str(&f);
                             }
                             if do_stream_audit {
-                                if let Ok(ctx) = &scan_ctx {
+                                if let Some(ctx) = &scan_ctx {
                                     for sf in security::scanner::scan_text_chunk(
                                         &f,
                                         &ctx.0,
@@ -1520,7 +1542,7 @@ fn build_stream_response(
                                 response_body_acc.push_str(&f);
                             }
                             if do_stream_audit {
-                                if let Ok(ctx) = &scan_ctx {
+                                if let Some(ctx) = &scan_ctx {
                                     for sf in security::scanner::scan_text_chunk(
                                         &f,
                                         &ctx.0,
@@ -1685,16 +1707,25 @@ fn build_responses_stream_response(
         // 流式响应增量审计上下文：与 gate::scan_response 同口径。
         // Responses 模式由 build_stream_response 中继（do_log=false）转交此处，
         // 故审计只在此处做一次，避免与 Chat 中继路径重复扫描。
-        let scan_ctx = security::gate::load_scan_context(&state.db).await;
-        let do_stream_audit =
-            matches!(&scan_ctx, Ok((sec, _, _)) if sec.enabled && sec.scan_response);
+        // 单请求内设置/规则缓存镜像（来自 AppState.settings_cache，无 DB 读）。
+        let app_settings = state
+            .settings_cache
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_else(|_| AppSettings::conservative_default());
+        // 沿用原 (settings, builtin, custom) 元组形态，下游 scan_text_chunk 调用不变。
+        // 缓存读取失败已降级为 conservative_default，故恒为 Some（不会失败）。
+        let scan_ctx = Some((
+            app_settings.security.settings.clone(),
+            app_settings.security.builtin_rules.clone(),
+            app_settings.security.custom_rules.clone(),
+        ));
+        let do_stream_audit = app_settings.security.settings.enabled
+            && app_settings.security.settings.scan_response;
         let mut stream_findings: Vec<SecurityFinding> = Vec::new();
 
         // 响应体日志脱敏开关（与请求体同一开关 security_redact_secrets）。
-        let sec_redact = match settings::get(&state.db, "security_redact_secrets").await {
-            Ok(Some(s)) => serde_json::from_str::<bool>(&s).unwrap_or(false),
-            _ => false,
-        };
+        let sec_redact = app_settings.security.settings.redact_secrets;
 
         while let Some(chunk) = data_stream.next().await {
             let chunk = match chunk {
@@ -1717,7 +1748,7 @@ fn build_responses_stream_response(
             let text = String::from_utf8_lossy(&chunk);
             crate::adapter::scan_openai_usage(&text, &mut acc);
             if do_stream_audit {
-                if let Ok(ctx) = &scan_ctx {
+                if let Some(ctx) = &scan_ctx {
                     for sf in security::scanner::scan_text_chunk(
                         &text,
                         &ctx.0,
@@ -1864,16 +1895,25 @@ fn build_messages_stream_response(
         let mut had_error = false;
 
         // 流式响应增量审计上下文（与 gate::scan_response 同口径）。
-        let scan_ctx = security::gate::load_scan_context(&state.db).await;
-        let do_stream_audit =
-            matches!(&scan_ctx, Ok((sec, _, _)) if sec.enabled && sec.scan_response);
+        // 单请求内设置/规则缓存镜像（来自 AppState.settings_cache，无 DB 读）。
+        let app_settings = state
+            .settings_cache
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_else(|_| AppSettings::conservative_default());
+        // 沿用原 (settings, builtin, custom) 元组形态，下游 scan_text_chunk 调用不变。
+        // 缓存读取失败已降级为 conservative_default，故恒为 Some（不会失败）。
+        let scan_ctx = Some((
+            app_settings.security.settings.clone(),
+            app_settings.security.builtin_rules.clone(),
+            app_settings.security.custom_rules.clone(),
+        ));
+        let do_stream_audit = app_settings.security.settings.enabled
+            && app_settings.security.settings.scan_response;
         let mut stream_findings: Vec<SecurityFinding> = Vec::new();
 
         // 响应体日志脱敏开关（与请求体同一开关 security_redact_secrets）。
-        let sec_redact = match settings::get(&state.db, "security_redact_secrets").await {
-            Ok(Some(s)) => serde_json::from_str::<bool>(&s).unwrap_or(false),
-            _ => false,
-        };
+        let sec_redact = app_settings.security.settings.redact_secrets;
 
         while let Some(chunk) = data_stream.next().await {
             let chunk = match chunk {
@@ -1896,7 +1936,7 @@ fn build_messages_stream_response(
             let text = String::from_utf8_lossy(&chunk);
             crate::adapter::scan_openai_usage(&text, &mut acc);
             if do_stream_audit {
-                if let Ok(ctx) = &scan_ctx {
+                if let Some(ctx) = &scan_ctx {
                     for sf in security::scanner::scan_text_chunk(
                         &text,
                         &ctx.0,
@@ -1928,7 +1968,7 @@ fn build_messages_stream_response(
                             response_body_acc.push_str(&out);
                         }
                         if do_stream_audit {
-                            if let Ok(ctx) = &scan_ctx {
+                            if let Some(ctx) = &scan_ctx {
                                 for sf in security::scanner::scan_text_chunk(
                                     &out,
                                     &ctx.0,

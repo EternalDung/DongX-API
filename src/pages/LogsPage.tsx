@@ -10,8 +10,6 @@ import {
   ChevronDown,
   ChevronRight,
   ChevronUp,
-  Copy,
-  Check,
   User as UserIcon,
   Bot,
   Lightbulb,
@@ -28,6 +26,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { Badge } from "@/components/ui/badge";
 import { StatusBadge, type StatusTone } from "@/components/ui/status-badge";
 import { useToast } from "@/components/ui/toast";
+import { CopyButton } from "@/components/ui/copy-button";
 import {
   Table,
   TableBody,
@@ -959,17 +958,10 @@ function parseRequestMessages(body: string | null): ParsedMessage[] {
 }
 
 // 响应体：同时支持 Chat 与 Responses，流式 SSE 与单条 JSON
-function parseResponseChoices(body: string | null): ParsedChoice[] {
-  if (!body) return [];
-
-  // 1) 先尝试按 SSE 流式帧解析（Chat 与 Responses 流式都走这里）
-  const frames = extractSsePayloads(body);
-  if (frames.length > 0) {
-    const choice = aggregateFrames(frames);
-    return choice ? [choice] : [];
-  }
-
-  // 2) 单条 JSON
+// 单条 JSON 的 OpenAI Chat 完成体 / Responses 输出 解析（不含 SSE）。
+// chat / responses 模式共用；messages 模式在 Anthropic 形态解析失败时也兜底到此
+// （历史日志里 messages 非流式响应曾以 OpenAI 形态落库，见 handler 的修复）。
+function parseChatCompletionJson(body: string): ParsedChoice[] {
   try {
     const parsed = JSON.parse(body);
     // Chat 格式
@@ -991,9 +983,23 @@ function parseResponseChoices(body: string | null): ParsedChoice[] {
       return parseResponsesOutput(parsed.output as Record<string, unknown>[]);
     }
   } catch {
-    return [];
+    /* 非单条 JSON */
   }
   return [];
+}
+
+function parseResponseChoices(body: string | null): ParsedChoice[] {
+  if (!body) return [];
+
+  // 1) 先尝试按 SSE 流式帧解析（Chat 与 Responses 流式都走这里）
+  const frames = extractSsePayloads(body);
+  if (frames.length > 0) {
+    const choice = aggregateFrames(frames);
+    return choice ? [choice] : [];
+  }
+
+  // 2) 单条 JSON（OpenAI Chat / Responses 形态）
+  return parseChatCompletionJson(body);
 }
 
 // 把解析出的 Responses output 数组转成对话视图（支持 text / reasoning）
@@ -1156,6 +1162,10 @@ function parseAnthropicResponse(body: string | null): ParsedChoice[] {
     }
     if (content || reasoning) return [{ role, content, reasoning }];
   }
+  // 3) 兜底：历史日志里 messages 非流式响应曾以 OpenAI 完成体形态落库
+  //    （handler 修复前），此处按 Chat/Responses 形态解析，避免回退原始 JSON。
+  const chatLike = parseChatCompletionJson(body);
+  if (chatLike.length > 0) return chatLike;
   return [];
 }
 
@@ -1269,7 +1279,7 @@ function ReasoningBlock({ reasoning }: { reasoning: string }) {
           推理内容
         </div>
         <div className="flex items-center gap-1">
-          <CopyButton value={reasoning} />
+          <CopyButton value={reasoning} variant="pill" />
           {shouldFold && (
             <button
               type="button"
@@ -1298,33 +1308,7 @@ function ReasoningBlock({ reasoning }: { reasoning: string }) {
   );
 }
 
-// ─── 通用：复制按钮 / JSON 块 ────────────────────────────────────────────────
-
-function CopyButton({ value }: { value: string }) {
-  const [copied, setCopied] = useState(false);
-  return (
-    <button
-      type="button"
-      onClick={async () => {
-        try {
-          await navigator.clipboard.writeText(value);
-          setCopied(true);
-          setTimeout(() => setCopied(false), 1200);
-        } catch {
-          /* clipboard unavailable */
-        }
-      }}
-      className={`flex items-center gap-0.5 rounded-full px-2 py-0.5 text-[10px] font-medium transition-colors ${
-        copied
-          ? "bg-emerald-100 text-emerald-700"
-          : "text-muted-foreground hover:bg-muted hover:text-foreground"
-      }`}
-    >
-      {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
-      {copied ? "已复制" : "复制"}
-    </button>
-  );
-}
+// ─── 通用：JSON 块 ──────────────────────────────────────────────────────────
 
 // 在格式化的文本中按命中下标把匹配串包成 <mark>；激活项高亮更强。
 // 返回 string（无命中）或节点数组（有命中）。
@@ -1494,7 +1478,7 @@ function JsonBlock({ body }: { body: string }) {
           </button>
         )}
         <div className="ml-auto">
-          <CopyButton value={formatted} />
+          <CopyButton value={formatted} variant="pill" />
         </div>
       </div>
 

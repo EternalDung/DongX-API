@@ -65,6 +65,9 @@ pub async fn create_custom_rule(
         input.description.as_deref(),
     )
     .await?;
+    // 规则是安全扫描上下文的一部分（缓存在 AppState.settings_cache），
+    // 增删改后必须重建，否则数据面仍按旧规则集扫描。
+    state.reload_settings_cache().await;
     Ok(serde_json::json!({ "id": id, "status": "created" }))
 }
 
@@ -91,6 +94,8 @@ pub async fn update_custom_rule(
     if n == 0 {
         return Err(AppError::NotFound(format!("自定义规则 {} 不存在", id)));
     }
+    // 见 create_custom_rule：规则变更需重建安全扫描上下文缓存。
+    state.reload_settings_cache().await;
     Ok(serde_json::json!({ "status": "updated" }))
 }
 
@@ -104,6 +109,7 @@ pub async fn delete_custom_rule(
     if n == 0 {
         return Err(AppError::NotFound(format!("自定义规则 {} 不存在", id)));
     }
+    state.reload_settings_cache().await;
     Ok(())
 }
 
@@ -177,6 +183,7 @@ pub async fn update_builtin_rule(
     if n1 == 0 && n2 == 0 {
         return Err(AppError::NotFound(format!("内置规则 {} 不存在", rule_id)));
     }
+    state.reload_settings_cache().await;
     Ok(())
 }
 
@@ -184,5 +191,6 @@ pub async fn update_builtin_rule(
 #[tauri::command]
 pub async fn reset_builtin_rules(state: State<'_, Arc<AppState>>) -> AppResult<()> {
     BuiltinRuleRepository::reset_to_defaults(&state.db).await?;
+    state.reload_settings_cache().await;
     Ok(())
 }

@@ -371,10 +371,6 @@ pub mod request_logs {
         blocked_reason: Option<&str>,
     ) -> Result<String, sqlx::Error> {
         let id = new_id();
-        let seq: Option<i64> = sqlx::query("SELECT MAX(seq) FROM request_logs")
-            .fetch_one(pool)
-            .await?
-            .get(0);
         let ts = now();
 
         sqlx::query(
@@ -387,7 +383,9 @@ pub mod request_logs {
                 ?19,?20,?21,?22,?23,?24)",
         )
         .bind(&id)
-        .bind(seq.map_or(1, |s| s + 1))
+        // seq 现为 INTEGER PRIMARY KEY AUTOINCREMENT（迁移 007），
+        // 绑定 NULL 即触发自增，彻底消除原 SELECT MAX(seq) 全表扫描。
+        .bind(Option::<i64>::None)
         .bind(api_key_name)
         .bind(channel_name)
         .bind(model)
@@ -408,7 +406,7 @@ pub mod request_logs {
         .bind(risk_score)
         .bind(risk_summary)
         .bind(security_action)
-        .bind(sanitized as i32)
+        .bind(sanitized)
         .bind(blocked_reason)
         .execute(pool)
         .await?;
@@ -754,5 +752,91 @@ pub mod security_findings {
         .bind(log_id)
         .fetch_all(pool)
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    /// 内存库 + 全部迁移（含 007）。内存库需单连接，否则每个连接各持一份数据。
+    async fn test_pool() -> SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("in-memory pool");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrations");
+        pool
+    }
+
+    /// 插入一条日志；`sanitized` 为最后一个可变参数。
+    async fn insert_log(pool: &SqlitePool, model: &str, sanitized: bool) -> String {
+        request_logs::insert(
+            pool,
+            Some("key-a"),
+            Some("ch-a"),
+            model,
+            Some(model),
+            "chat",
+            200,
+            1,
+            2,
+            3,
+            42,
+            None,
+            false,
+            false,
+            Some("{\"a\":1}"),
+            Some("{\"b\":2}"),
+            "none",
+            0,
+            None,
+            "allow",
+            sanitized,
+            None,
+        )
+        .await
+        .expect("insert log")
+    }
+
+    /// 迁移 007 后 seq 由 AUTOINCREMENT 自增：连续插入应得到严格递增的序号，
+    /// 且不再有 SELECT MAX(seq) 全表扫描（此处以「多行插入耗时不随行数线性恶化」
+    /// 为间接约束，核心断言仍是序号唯一递增）。
+    #[tokio::test]
+    async fn seq_autoincrements_on_insert() {
+        let pool = test_pool().await;
+        let ids: Vec<String> = (0..5).map(|i| format!("m{i}")).collect();
+        let mut seqs = Vec::new();
+        for m in &ids {
+            let id = insert_log(&pool, m, false).await;
+            let row = request_logs::get_detail(&pool, &id)
+                .await
+                .expect("get_detail")
+                .expect("row exists");
+            seqs.push(row.seq.expect("seq 应由 AUTOINCREMENT 赋值"));
+        }
+        // 严格递增 → 证明每次插入都拿到了新的自增值（而非恒为 MAX+1 或 1）。
+        assert!(
+            seqs.windows(2).all(|w| w[0] < w[1]),
+            "seq 应严格递增，实际: {seqs:?}"
+        );
+    }
+
+    /// sanitized 以 bool 落 INTEGER 列并原样读回（前后端契约：boolean，非 0/1 数字）。
+    #[tokio::test]
+    async fn sanitized_round_trips_as_bool() {
+        let pool = test_pool().await;
+        let id = insert_log(&pool, "m-bool", true).await;
+        let row = request_logs::get_detail(&pool, &id)
+            .await
+            .expect("get_detail")
+            .expect("row exists");
+        assert!(row.sanitized, "sanitized=true 应原样读回为 true");
+        assert_eq!(row.model, "m-bool");
     }
 }

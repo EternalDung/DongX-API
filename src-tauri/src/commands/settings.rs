@@ -111,6 +111,21 @@ pub async fn update_settings(
 ) -> AppResult<serde_json::Value> {
     let mut entries: Vec<(String, String)> = Vec::new();
 
+    // 变更是否触及数据面缓存覆盖的设置（日志体 / 重试 / 安全）。
+    // 必须在下面的 push! 之前算完：push! 用 `if let Some(v) = update.$field`
+    // 会把 Option<String> 字段（如 security_mode）移出 update，之后再读取就是「移动后借用」。
+    let touches_cache = update.log_raw_body.is_some()
+        || update.retry_enabled.is_some()
+        || update.retry_times.is_some()
+        || update.security_enabled.is_some()
+        || update.security_mode.is_some()
+        || update.security_scan_unicode.is_some()
+        || update.security_scan_tools.is_some()
+        || update.security_scan_network.is_some()
+        || update.security_scan_response.is_some()
+        || update.security_redact_secrets.is_some()
+        || update.security_block_on_critical.is_some();
+
     macro_rules! push {
         ($field:ident, $key:literal) => {
             if let Some(v) = update.$field {
@@ -178,6 +193,11 @@ pub async fn update_settings(
                 .max(1) as u32
         };
         *state.rate_limiter.lock().unwrap() = RateLimiterState::new(enabled, rpm);
+    }
+
+    // 仅当本次变更涉及缓存覆盖的设置/规则时重建（见上方 touches_cache 的取值时机说明）。
+    if touches_cache {
+        state.reload_settings_cache().await;
     }
 
     // 回写后的完整 settings（不是 {status:"updated"}）：前端直接拿它做

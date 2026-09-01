@@ -3,6 +3,7 @@
 #![recursion_limit = "1024"]
 
 mod adapter;
+mod app_settings;
 mod channel_presets;
 mod responses_stream;
 mod messages_stream;
@@ -16,8 +17,10 @@ mod security;
 mod server;
 mod tray;
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use tauri::Manager;
+
+use crate::app_settings::AppSettings;
 
 /// Application shared state (shared between Axum data plane and Tauri management plane)
 ///
@@ -31,6 +34,29 @@ pub struct AppState {
     pub close_to_tray: std::sync::Arc<std::sync::Mutex<bool>>,
     /// 请求限流器运行态：按网关密钥滑动窗口限速，设置变更时整体重建。
     pub rate_limiter: Arc<Mutex<security::rate_limit::RateLimiterState>>,
+    /// 设置/规则缓存：启动与设置变更时重建，数据面热路径只读一次本地镜像，
+    /// 消除每条请求 20+ 次 settings/rules 重复读库。
+    pub settings_cache: Arc<RwLock<AppSettings>>,
+}
+
+impl AppState {
+    /// 重建 settings/rules 缓存。
+    ///
+    /// 数据面热路径读的是这份镜像，因此**任何**影响以下内容的写操作都必须调用它，
+    /// 否则数据面会一直读到旧值：
+    /// - settings：`log_raw_body` / `retry_enabled` / `retry_times` / `security_*`
+    /// - 规则：内置规则启用与严重度、自定义规则增删改
+    ///
+    /// 失败只告警不中断：缓存保持旧值，下次变更时重试（不会让设置保存失败）。
+    pub async fn reload_settings_cache(&self) {
+        match AppSettings::load(&self.db).await {
+            Ok(next) => match self.settings_cache.write() {
+                Ok(mut g) => *g = next,
+                Err(_) => tracing::warn!("settings_cache 写锁中毒，缓存未刷新（下次变更时重试）"),
+            },
+            Err(e) => tracing::warn!("设置缓存重建失败，暂用旧值: {}", e),
+        }
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -153,11 +179,20 @@ pub fn run() {
                 crate::security::rate_limit::RateLimiterState::new(rl_enabled, rl_rpm),
             ));
 
+            // 初始化设置/规则缓存（启动即加载；运行期改设置由 update_settings 重建）。
+            let settings_cache = Arc::new(RwLock::new(
+                tauri::async_runtime::block_on(AppSettings::load(&pool)).unwrap_or_else(|e| {
+                    tracing::warn!("设置缓存加载失败，使用保守默认: {}", e);
+                    AppSettings::conservative_default()
+                }),
+            ));
+
             let app_state = Arc::new(AppState {
                 db: pool.clone(),
                 server: server::ServerHandle::new(),
                 close_to_tray: std::sync::Arc::new(std::sync::Mutex::new(close_to_tray)),
                 rate_limiter,
+                settings_cache,
             });
             app.manage(app_state);
 

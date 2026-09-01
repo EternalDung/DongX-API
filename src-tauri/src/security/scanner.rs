@@ -423,12 +423,15 @@ mod tests {
     #[test]
     fn custom_blacklist_matches_substring() {
         let rule = CustomRule {
+            id: "test-custom-1".to_string(),
             rule_type: "blacklist".to_string(),
             category: "keyword".to_string(),
             pattern: "forbidden-phrase".to_string(),
             severity: "low".to_string(),
             action: "warn".to_string(),
             enabled: 1,
+            description: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
         };
         let body = json!({"text":"this contains forbidden-phrase inside"});
         let res = scan(&body, &settings(), &[], &[rule], "request");

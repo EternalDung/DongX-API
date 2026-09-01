@@ -5,6 +5,8 @@ dist/
 # Rust / Tauri
 src-tauri/target/
 src-tauri/target_old/
+# 临时编译目录：CARGO_TARGET_DIR=.tmpcheck cargo check（避开默认 target 的锁竞争）
+.tmpcheck/
 # Note: Cargo.lock IS committed for binary applications
 
 # Data

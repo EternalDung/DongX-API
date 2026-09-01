@@ -80,7 +80,7 @@ pub struct RequestLogRow {
     pub risk_score: i64,
     pub risk_summary: Option<String>,
     pub security_action: String,
-    pub sanitized: i32,
+    pub sanitized: bool,
     pub blocked_reason: Option<String>,
 }
 
@@ -103,6 +103,15 @@ pub struct RequestLogListItem {
     pub risk_level: String,
     pub risk_score: i64,
     pub security_action: String,
+}
+
+/// 日志清理结果（日志主行 + 安全发现明细各自删除的行数）。
+///
+/// 由 `request_logs::purge_older_than` 返回，供后台保留期任务记录审计日志。
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct PurgeResult {
+    pub logs: u64,
+    pub findings: u64,
 }
 
 /// 一次请求命中的安全审计发现明细（request_security_findings 一行）。

@@ -18,9 +18,6 @@ pub mod rules;
 pub mod scanner;
 pub mod rate_limit;
 
-// 闸门输出结构，供 handler 直接以 security::GateOutput 引用。
-pub use gate::GateOutput;
-
 use serde::Serialize;
 
 /// 风险等级（由低到高）。用于阈值判断与落库 risk_level。

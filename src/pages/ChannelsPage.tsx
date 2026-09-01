@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { EmptyState } from "@/components/ui/empty-state";
 import { StatusBadge, type StatusTone } from "@/components/ui/status-badge";
+import { useCopyToClipboard } from "@/components/ui/copy-button";
 import { useToast } from "@/components/ui/toast";
 import {
   Dialog,
@@ -454,14 +455,8 @@ export function ChannelsPage() {
 
   const presetOptions = presetGroups.find((g) => g.protocol === form.protocol)?.presets ?? [];
 
-  const copyText = async (text: string, label: string) => {
-    try {
-      await navigator.clipboard.writeText(text);
-      toast.success(`${label}已复制`);
-    } catch {
-      toast.error("复制失败");
-    }
-  };
+  // 复制逻辑复用共享 hook（三处页面同一份实现：剪贴板 + toast + copied 态）。
+  const { copy: copyText } = useCopyToClipboard();
 
   return (
     <div>

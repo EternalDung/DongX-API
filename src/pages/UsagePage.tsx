@@ -4,7 +4,6 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronUp,
-  Copy,
   Loader2,
   MessageSquare,
   Plug,
@@ -25,6 +24,7 @@ import { Badge } from "@/components/ui/badge";
 import { Select } from "@/components/ui/select";
 import { EmptyState } from "@/components/ui/empty-state";
 import { useToast } from "@/components/ui/toast";
+import { CopyButton } from "@/components/ui/copy-button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { channelApi, keyApi, settingsApi, clientConfigApi } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -447,15 +447,6 @@ export function UsagePage() {
     model.trim().length > 0 &&
     settings != null;
 
-  const copyText = async (text: string, what: string) => {
-    try {
-      await navigator.clipboard.writeText(text);
-      toast.success(`已复制${what}`);
-    } catch {
-      toast.error("复制失败");
-    }
-  };
-
   const handleTest = async () => {
     if (!canTest) return;
     setTestState("running");
@@ -712,10 +703,7 @@ export function UsagePage() {
                     value={baseUrl}
                     className="flex-1 font-mono text-xs"
                   />
-                  <CopyButton
-                    copied={false}
-                    onCopy={() => copyText(baseUrl, "BASE URL")}
-                  />
+                  <CopyButton value={baseUrl} label="BASE URL" />
                 </div>
               )}
             </FieldRow>
@@ -727,10 +715,7 @@ export function UsagePage() {
                   value={fullEndpoint}
                   className="flex-1 font-mono text-xs"
                 />
-                <CopyButton
-                  copied={false}
-                  onCopy={() => copyText(fullEndpoint, "协议端点")}
-                />
+                <CopyButton value={fullEndpoint} label="协议端点" />
               </div>
             </FieldRow>
 
@@ -902,15 +887,12 @@ export function UsagePage() {
             </div>
             <div className="relative">
               <CodeBlock code={codeSamples[codeLang]} lang={codeLangToPrism(codeLang)} />
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => copyText(codeSamples[codeLang], "代码")}
+              <CopyButton
+                value={codeSamples[codeLang]}
+                label="代码"
+                variant="button"
                 className="absolute top-3 right-3 h-7 gap-1.5 border-zinc-700 bg-zinc-900/80 text-xs text-zinc-200 hover:bg-zinc-800 hover:text-zinc-100"
-              >
-                <Copy className="h-3 w-3" />
-                复制
-              </Button>
+              />
             </div>
           </CardContent>
         )}
@@ -959,30 +941,6 @@ function FieldRow({
       </div>
       {children}
     </div>
-  );
-}
-
-function CopyButton({
-  copied,
-  onCopy,
-}: {
-  copied: boolean;
-  onCopy: () => void;
-}) {
-  return (
-    <Button
-      variant="outline"
-      size="icon"
-      onClick={onCopy}
-      className="h-9 w-9 shrink-0"
-      title="复制"
-    >
-      {copied ? (
-        <CheckCircle2 className="h-3.5 w-3.5 text-success" />
-      ) : (
-        <Copy className="h-3.5 w-3.5" />
-      )}
-    </Button>
   );
 }
 
