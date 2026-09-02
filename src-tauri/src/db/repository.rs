@@ -133,17 +133,6 @@ pub mod channels {
         Ok(())
     }
 
-    /// Update only enable/disable status (0=disabled 1=enabled).
-    pub async fn set_status(pool: &SqlitePool, id: &str, status: i32) -> Result<(), sqlx::Error> {
-        sqlx::query("UPDATE channels SET status=?2, updated_at=?3 WHERE id=?1")
-            .bind(id)
-            .bind(status)
-            .bind(now())
-            .execute(pool)
-            .await?;
-        Ok(())
-    }
-
     pub async fn delete(pool: &SqlitePool, id: &str) -> Result<u64, sqlx::Error> {
         let res = sqlx::query("DELETE FROM channels WHERE id = ?")
             .bind(id)
@@ -473,23 +462,46 @@ pub mod request_logs {
     }
 
     /// Clear all logs, or only those older than N days (None = all).
+    ///
+    /// Also removes the security findings attached to any purged log so they
+    /// don't linger as orphans — `request_security_findings` has no FK cascade
+    /// back to `request_logs`.
     pub async fn clear(
         pool: &SqlitePool,
         older_than_days: Option<i32>,
     ) -> Result<u64, sqlx::Error> {
-        let res = match older_than_days {
-            Some(days) => {
+        match older_than_days {
+            // Compute the cutoff as an RFC3339 string so the comparison matches
+            // the RFC3339 `created_at` we store (to_rfc3339()). SQLite's
+            // datetime('now', '-N days') uses a different layout and would sort
+            // incorrectly against RFC3339 on sub-day boundaries.
+            Some(days) if days > 0 => {
+                let cutoff =
+                    (Utc::now() - chrono::Duration::days(days as i64)).to_rfc3339();
+                // Drop findings of logs that are about to be deleted (exact,
+                // independent of any time-format subtlety).
                 sqlx::query(
-                    "DELETE FROM request_logs
-                     WHERE created_at < datetime('now', '-' || ?1 || ' days')",
+                    "DELETE FROM request_security_findings
+                     WHERE log_id IN (SELECT id FROM request_logs WHERE created_at < ?1)",
                 )
-                .bind(days)
+                .bind(&cutoff)
                 .execute(pool)
-                .await?
+                .await?;
+                let res = sqlx::query("DELETE FROM request_logs WHERE created_at < ?1")
+                    .bind(&cutoff)
+                    .execute(pool)
+                    .await?;
+                Ok(res.rows_affected())
             }
-            None => sqlx::query("DELETE FROM request_logs").execute(pool).await?,
-        };
-        Ok(res.rows_affected())
+            _ => {
+                // Clear all: drop every finding, then every log.
+                sqlx::query("DELETE FROM request_security_findings")
+                    .execute(pool)
+                    .await?;
+                let res = sqlx::query("DELETE FROM request_logs").execute(pool).await?;
+                Ok(res.rows_affected())
+            }
+        }
     }
 
     /// Delete a single log entry by id.
@@ -525,17 +537,6 @@ pub mod settings {
         Ok(row.map(|(v,)| v))
     }
 
-    /// Upsert a single setting. Value must be JSON-encoded by the caller
-    /// (e.g. serde_json::to_string(&v)).
-    pub async fn upsert(pool: &SqlitePool, key: &str, value: &str) -> Result<(), sqlx::Error> {
-        sqlx::query("INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = ?2")
-            .bind(key)
-            .bind(value)
-            .execute(pool)
-            .await?;
-        Ok(())
-    }
-
     /// Batch upsert — one transaction, all-or-nothing.
     pub async fn upsert_many(
         pool: &SqlitePool,
@@ -551,6 +552,24 @@ pub mod settings {
             .bind(v)
             .execute(&mut *tx)
             .await?;
+        }
+        tx.commit().await
+    }
+
+    /// Insert keys that are missing, without overwriting existing values.
+    /// Used to backfill defaults so a single source of truth (DEFAULTS in
+    /// commands/settings.rs) governs which keys exist.
+    pub async fn ensure_many(
+        pool: &SqlitePool,
+        entries: &[(String, String)],
+    ) -> Result<(), sqlx::Error> {
+        let mut tx = pool.begin().await?;
+        for (k, v) in entries {
+            sqlx::query("INSERT OR IGNORE INTO settings (key, value) VALUES (?1, ?2)")
+                .bind(k)
+                .bind(v)
+                .execute(&mut *tx)
+                .await?;
         }
         tx.commit().await
     }

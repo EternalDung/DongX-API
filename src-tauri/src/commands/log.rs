@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+use sqlx::SqlitePool;
 use tauri::State;
 
-use crate::db::repository::{request_logs, security_findings, LogFilter};
+use crate::db::repository::{request_logs, security_findings, settings, LogFilter};
 use crate::error::{AppError, AppResult};
 use crate::AppState;
 
@@ -82,6 +83,36 @@ pub async fn clear_logs(
 ) -> AppResult<()> {
     request_logs::clear(&state.db, older_than_days).await?;
     Ok(())
+}
+
+/// Spawn a background task that periodically purges request logs older than
+/// the configured `log_retention_days` (default 30). Runs every 6 hours so
+/// logs can't grow unbounded even if the user never clears them manually.
+///
+/// The retention value is read fresh from the DB each cycle (not from the
+/// settings cache) so a change takes effect on the next sweep without any
+/// extra invalidation wiring.
+pub fn spawn_log_retention_sweeper(pool: SqlitePool) {
+    tauri::async_runtime::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(6 * 3600));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            let days = settings::get(&pool, "log_retention_days")
+                .await
+                .ok()
+                .flatten()
+                .and_then(|s| serde_json::from_str::<i32>(&s).ok())
+                .filter(|d| *d > 0);
+            if let Some(days) = days {
+                if let Err(e) = request_logs::clear(&pool, Some(days)).await {
+                    tracing::warn!("日志保留清理失败: {}", e);
+                } else {
+                    tracing::debug!("日志保留清理完成（保留 {} 天）", days);
+                }
+            }
+        }
+    });
 }
 
 /// Delete a single log entry by id.

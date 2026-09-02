@@ -55,8 +55,3 @@ pub async fn init_pool(db_path: &Path) -> Result<SqlitePool, sqlx::Error> {
     );
     Ok(pool)
 }
-
-/// Gracefully close the pool on app shutdown.
-pub async fn close_pool(pool: SqlitePool) {
-    pool.close().await;
-}

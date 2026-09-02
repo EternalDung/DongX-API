@@ -48,7 +48,10 @@ impl GeminiAdaptor {
             let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("user");
             let content = msg.get("content");
             match role {
-                "system" => {
+                "system" | "developer" => {
+                    // OpenAI's `developer` role is a more stable variant of
+                    // `system` (emitted by Codex/o-series); fold it into the
+                    // Gemini system instruction.
                     if let Some(text) = content.and_then(|c| c.as_str()) {
                         system_instruction = Some(json!({ "parts": [{ "text": text }] }));
                     }

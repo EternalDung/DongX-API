@@ -40,15 +40,6 @@ pub struct SelectedChannel {
 /// This is the single-attempt convenience form. The data-plane
 /// `run_chat_pipeline` instead drives a `Failover` (core/failover.rs) which
 /// loops over `candidate_channels` + `pick_one` to provide automatic channel
-/// switching on failure — so a momentary bad channel does not fail the request.
-pub async fn select_channel(
-    pool: &SqlitePool,
-    ctx: &DispatchContext,
-) -> AppResult<SelectedChannel> {
-    let cands = candidate_channels(pool, ctx, &HashSet::new()).await?;
-    pick_one(&cands)
-}
-
 /// Return the candidate channels for `ctx.model`: those that serve the model,
 /// are not currently in circuit-breaker cooldown, and are not in `exclude`.
 ///

@@ -1,6 +1,6 @@
 use crate::adapter::{
-    build_client, extract_usage, map_model, Adaptor, ChannelConfig, ProxyRequest, TestResult,
-    TokenUsage,
+    build_client, extract_usage, map_model, normalize_developer_role, Adaptor, ChannelConfig,
+    ProxyRequest, TestResult, TokenUsage,
 };
 use async_trait::async_trait;
 use serde_json::json;
@@ -16,10 +16,13 @@ impl OpenAIAdaptor {
         format!("{}/chat/completions", base)
     }
 
-    /// Shared request body builder (model mapping applied here).
+    /// Shared request body builder (model mapping + role normalization).
     fn build_body(&self, request: &ProxyRequest, config: &ChannelConfig) -> serde_json::Value {
         let mut body = request.body.clone();
         body["model"] = json!(map_model(request, config));
+        // Upstreams that don't accept OpenAI's `developer` role would reject the
+        // request (e.g. Codex sends developer-role messages). Map to `system`.
+        normalize_developer_role(&mut body);
         body
     }
 }

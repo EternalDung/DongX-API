@@ -1,6 +1,6 @@
 use crate::adapter::{
-    build_client, extract_usage, map_model, Adaptor, ChannelConfig, ProxyRequest, TestResult,
-    TokenUsage,
+    build_client, extract_usage, map_model, normalize_developer_role, Adaptor, ChannelConfig,
+    ProxyRequest, TestResult, TokenUsage,
 };
 use async_trait::async_trait;
 use serde_json::json;
@@ -101,6 +101,9 @@ impl Adaptor for CustomAdaptor {
         let client = build_client(config)?;
         let mut body = request.body.clone();
         body["model"] = json!(map_model(request, config));
+        // Upstreams that don't accept OpenAI's `developer` role would reject the
+        // request (e.g. Codex sends developer-role messages). Map to `system`.
+        normalize_developer_role(&mut body);
 
         let resp = client
             .post(self.request_url(config))
@@ -123,6 +126,9 @@ impl Adaptor for CustomAdaptor {
         let client = build_client(config)?;
         let mut body = request.body.clone();
         body["model"] = json!(map_model(request, config));
+        // Upstreams that don't accept OpenAI's `developer` role would reject the
+        // request (e.g. Codex sends developer-role messages). Map to `system`.
+        normalize_developer_role(&mut body);
         body["stream"] = json!(true);
 
         let resp = client

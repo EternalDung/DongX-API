@@ -31,8 +31,10 @@ impl ClaudeAdaptor {
             let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("user");
             let content = msg.get("content");
             match role {
-                "system" => {
-                    // Anthropic takes system prompt as a top-level field
+                "system" | "developer" => {
+                    // Anthropic takes system prompt as a top-level field.
+                    // OpenAI's `developer` role is a more stable variant of
+                    // `system` (emitted by Codex/o-series); fold it in here.
                     if let Some(text) = content.and_then(|c| c.as_str()) {
                         system = text.to_string();
                     }

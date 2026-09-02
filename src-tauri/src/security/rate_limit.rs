@@ -62,14 +62,6 @@ impl RateLimiter {
             });
         }
     }
-
-    /// Update the RPM limit at runtime
-    pub fn set_rpm(&self, rpm: u32) {
-        // Note: This requires interior mutability.
-        // For simplicity, we recreate the limiter in the caller when settings change.
-        // A full implementation would use AtomicU32 or RwLock<u32> here.
-        let _ = rpm;
-    }
 }
 
 /// 运行态限速器：随设置启停 / 改 RPM 时整体替换。

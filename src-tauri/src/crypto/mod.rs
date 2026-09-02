@@ -54,19 +54,6 @@ pub fn decrypt(ciphertext_b64: &str) -> Result<String, String> {
     String::from_utf8(plaintext).map_err(|e| format!("UTF-8 decode failed: {}", e))
 }
 
-/// Hash a string using SHA-256 (for API key lookup)
-///
-/// Java comparison: MessageDigest.getInstance("SHA-256")
-pub fn sha256(input: &str) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    // Placeholder: use std hasher. Replace with proper SHA-256 (sha2 crate).
-    let mut hasher = DefaultHasher::new();
-    input.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
-}
-
 /// Generate a random API key with prefix
 pub fn generate_api_key() -> String {
     let mut bytes = [0u8; 24];

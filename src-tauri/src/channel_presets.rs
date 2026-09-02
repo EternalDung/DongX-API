@@ -80,19 +80,6 @@ pub enum NativeEndpoint {
     ApiChat,
 }
 
-impl NativeEndpoint {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            NativeEndpoint::ChatCompletions => "chat_completions",
-            NativeEndpoint::Responses => "responses",
-            NativeEndpoint::Messages => "messages",
-            NativeEndpoint::CountTokens => "count_tokens",
-            NativeEndpoint::Embeddings => "embeddings",
-            NativeEndpoint::ApiChat => "api_chat",
-        }
-    }
-}
-
 /// 鉴权方案：各厂商接受不同的凭据放置方式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -616,15 +603,6 @@ fn ollama_presets() -> Vec<ChannelPreset> {
         ModelEnumStrategy::SyncOnly,
         EndpointTestStrategy::ProbeFirstModel,
     )]
-}
-
-/// 全部 preset，顺序为每个协议的 custom 置顶，其后 international → domestic → local。
-pub fn all_channel_presets() -> Vec<ChannelPreset> {
-    let mut all = Vec::new();
-    all.extend(presets_for_protocol(ChannelProtocol::OpenAI));
-    all.extend(presets_for_protocol(ChannelProtocol::Anthropic));
-    all.extend(presets_for_protocol(ChannelProtocol::Ollama));
-    all
 }
 
 /// 指定协议的全部 preset：custom 置顶，其后 international → domestic → local。

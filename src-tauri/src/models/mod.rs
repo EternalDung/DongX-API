@@ -107,13 +107,6 @@ pub struct RequestLogListItem {
 
 /// 日志清理结果（日志主行 + 安全发现明细各自删除的行数）。
 ///
-/// 由 `request_logs::purge_older_than` 返回，供后台保留期任务记录审计日志。
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
-pub struct PurgeResult {
-    pub logs: u64,
-    pub findings: u64,
-}
-
 /// 一次请求命中的安全审计发现明细（request_security_findings 一行）。
 /// 注意：不查询 evidence_hash 列（明文证据哈希仅用于后端去重/取证，不暴露给前端）。
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]

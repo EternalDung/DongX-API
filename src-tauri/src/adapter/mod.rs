@@ -236,6 +236,22 @@ pub(crate) fn map_model(request: &ProxyRequest, config: &ChannelConfig) -> Strin
         .unwrap_or_else(|| request.model.clone())
 }
 
+/// OpenAI's `developer` role (a more stable variant of `system`, emitted by
+/// clients such as Codex and o-series models) is rejected by most
+/// OpenAI-compatible upstreams (DeepSeek, local vLLM/llama.cpp servers, older
+/// OpenAI models). Rewrite any `developer` message role to `system` before
+/// forwarding so the request is accepted. The original role is preserved in the
+/// request log — this normalization happens only at the upstream boundary.
+pub(crate) fn normalize_developer_role(body: &mut serde_json::Value) {
+    if let Some(msgs) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
+        for m in msgs.iter_mut() {
+            if m.get("role").and_then(|v| v.as_str()) == Some("developer") {
+                m["role"] = serde_json::json!("system");
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Streaming SSE helpers (shared by the proxy layer)
 // ---------------------------------------------------------------------------
@@ -334,5 +350,39 @@ pub fn scan_openai_usage(text: &str, acc: &mut StreamUsage) {
                     .unwrap_or(acc.total_tokens);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn normalize_developer_role_maps_to_system() {
+        let mut body = json!({
+            "model": "gpt-4o",
+            "messages": [
+                { "role": "system", "content": "sys" },
+                { "role": "developer", "content": "dev instruction" },
+                { "role": "user", "content": "hi" },
+                { "role": "developer", "content": "more dev" },
+            ]
+        });
+        normalize_developer_role(&mut body);
+        let roles: Vec<&str> = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(roles, vec!["system", "system", "user", "system"]);
+    }
+
+    #[test]
+    fn normalize_developer_role_no_messages_is_noop() {
+        let mut body = json!({ "model": "x" });
+        normalize_developer_role(&mut body);
+        assert!(body.get("messages").is_none());
     }
 }

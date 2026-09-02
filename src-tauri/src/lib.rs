@@ -146,6 +146,15 @@ pub fn run() {
                     e
                 })?;
 
+            // 启动即把 DEFAULTS（commands/settings.rs）声明的所有设置键回填进库，
+            // 使 DEFAULTS 成为「存在哪些设置」的唯一真源。INSERT OR IGNORE 不覆盖
+            // 已有值，故不改变任何生效行为；失败仅告警、不阻断启动（fail-open）。
+            if let Err(e) = tauri::async_runtime::block_on(
+                commands::settings::ensure_default_settings(&pool),
+            ) {
+                tracing::warn!("回填默认设置失败（已忽略，沿用库内现有值）: {}", e);
+            }
+
             // AppState managed here; commands access it via
             // State<'_, Arc<AppState>> and clone the pool handle freely.
 
@@ -203,6 +212,10 @@ pub fn run() {
                     tracing::error!("Axum server error: {}", e);
                 }
             });
+
+            // 后台日志保留清理：按 log_retention_days 定期清理过期日志
+            // （含关联的 request_security_findings），避免日志无限增长。
+            commands::log::spawn_log_retention_sweeper(pool.clone());
 
             // 系统托盘 + 窗口关闭钩子（最小化/关闭到托盘的前置条件）
             tray::create(app)?;

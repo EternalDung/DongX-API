@@ -68,7 +68,7 @@ const DEFAULTS: &str = r#"{
     "log_retention_days": 30,
     "log_raw_body": false,
     "security_enabled": true,
-    "security_mode": "audit",
+    "security_mode": "warn",
     "security_scan_unicode": true,
     "security_scan_tools": true,
     "security_scan_network": true,
@@ -94,6 +94,24 @@ pub async fn load_all_settings(pool: &sqlx::SqlitePool) -> AppResult<serde_json:
     }
 
     Ok(serde_json::Value::Object(obj))
+}
+
+/// Idempotently seed every key declared in `DEFAULTS` into the store.
+///
+/// Makes `DEFAULTS` (this file) the single source of truth for *which* settings
+/// exist: SQL migrations (001/003) may pre-seed some rows, but this guarantees
+/// all keys declared here are present. Adding a new setting only requires editing
+/// `DEFAULTS` — no migration change needed. Existing stored values are never
+/// overwritten (`INSERT OR IGNORE`), so this cannot change effective behavior.
+pub async fn ensure_default_settings(pool: &sqlx::SqlitePool) -> AppResult<()> {
+    let defaults: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(DEFAULTS).unwrap_or_default();
+    let entries: Vec<(String, String)> = defaults
+        .into_iter()
+        .map(|(k, v)| (k, v.to_string()))
+        .collect();
+    settings_repo::ensure_many(pool, &entries).await?;
+    Ok(())
 }
 
 /// Get all settings (stored values override built-in defaults).
