@@ -68,3 +68,24 @@ async fn int_setting(pool: &SqlitePool, key: &str, default: i32) -> i32 {
         _ => default,
     }
 }
+
+/// 读取任意 settings KV 的原始字符串值（无默认值逻辑）。
+///
+/// 供服务注册表等「非标准设置键」使用（如 `service.<id>.enabled`）。
+pub async fn get_setting_raw(pool: &SqlitePool, key: &str) -> Option<String> {
+    settings_get(pool, key).await.ok().flatten()
+}
+
+/// 写入任意 settings KV（INSERT OR REPLACE，幂等）。
+///
+/// 注意：这不触发 `settings_cache` 重建，仅用于服务注册表这类「管理面低频、
+/// 运行期不依赖缓存」的持久化状态。
+pub async fn set_setting_raw(pool: &SqlitePool, key: &str, value: &str) -> Result<(), String> {
+    sqlx::query("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)")
+        .bind(key)
+        .bind(value)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}

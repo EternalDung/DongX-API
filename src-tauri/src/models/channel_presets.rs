@@ -244,8 +244,8 @@ fn model(id: &str, verified_at: &str, source_url: &str) -> ModelSuggestion {
 fn custom_preset(protocol: ChannelProtocol) -> ChannelPreset {
     let (native_endpoints, default_checked, auth, strategy) = match protocol {
         ChannelProtocol::OpenAI => (
-            vec![NativeEndpoint::ChatCompletions, NativeEndpoint::Responses],
-            vec![NativeEndpoint::ChatCompletions],
+            vec![NativeEndpoint::ChatCompletions, NativeEndpoint::Responses, NativeEndpoint::Embeddings],
+            vec![NativeEndpoint::ChatCompletions, NativeEndpoint::Embeddings],
             AuthScheme::Bearer,
             EndpointTestStrategy::ProbeFirstModel,
         ),
@@ -296,8 +296,8 @@ fn openai_presets() -> Vec<ChannelPreset> {
             "https://api.openai.com/v1",
             "https://api.openai.com/v1",
             "openai",
-            vec![NativeEndpoint::ChatCompletions, NativeEndpoint::Responses],
-            vec![NativeEndpoint::ChatCompletions, NativeEndpoint::Responses],
+            vec![NativeEndpoint::ChatCompletions, NativeEndpoint::Responses, NativeEndpoint::Embeddings],
+            vec![NativeEndpoint::ChatCompletions, NativeEndpoint::Responses, NativeEndpoint::Embeddings],
             AuthScheme::Bearer,
             vec![
                 model("gpt-5.2", PRESET_REVISION, SRC_OPENAI),

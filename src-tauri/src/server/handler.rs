@@ -558,15 +558,227 @@ pub async fn completions(
 }
 
 /// POST /v1/embeddings — not yet implemented.
+/// POST /v1/embeddings — OpenAI-compatible embeddings, proxied through the
+/// same auth → dispatch → adapt → log pipeline as chat (non-streaming only;
+/// the OpenAI embeddings API has no streaming mode).
 pub async fn embeddings(
     State(app): State<AppHandle>,
+    headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    let _ = (app, body);
+    let state: Arc<AppState> = app.state::<Arc<AppState>>().inner().clone();
+    let start = std::time::Instant::now();
+    let mode = "embedding";
+
+    // 1. Auth
+    let key = match auth::extract_gateway_key(&headers) {
+        Some(k) => k,
+        None => {
+            return error_response(
+                StatusCode::UNAUTHORIZED,
+                "missing_key",
+                "缺少 Authorization 或非 sk-dongapi- 密钥",
+            )
+        }
+    };
+    let gw_key = match auth::validate_gateway_key(&state.db, &key).await {
+        Some(k) => k,
+        None => {
+            return error_response(
+                StatusCode::UNAUTHORIZED,
+                "invalid_key",
+                "网关密钥不存在/已禁用/已过期/配额耗尽",
+            )
+        }
+    };
+
+    // 1.5 请求限流（与 chat 一致）
+    {
+        let rl = match state.rate_limiter.lock() {
+            Ok(g) => g,
+            Err(_) => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal",
+                    "限速器状态损坏",
+                );
+            }
+        };
+        if rl.enabled && rl.limiter.check(key.as_str()).is_err() {
+            return error_response(
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate_limited",
+                "请求过于频繁，已超过每分钟允许的请求数上限",
+            );
+        }
+    }
+
+    // 2. Parse
+    let body_json: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => return error_response(StatusCode::BAD_REQUEST, "invalid_json", &e.to_string()),
+    };
+    let model = body_json
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if model.is_empty() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "missing_model",
+            "请求体缺少 model 字段",
+        );
+    }
+
+    // 2.5 安全审计闸门（解析后、分发前扫描请求体，与 chat 一致）
+    let cached: Option<Settings> = match state.settings_cache.read() {
+        Ok(g) => Some(g.clone()),
+        Err(_) => None,
+    };
+    let app_settings = match cached {
+        Some(s) => s,
+        None => Settings::load(&state.db)
+            .await
+            .unwrap_or_else(|_| Settings::conservative_default()),
+    };
+    let gate = security::gate::run_gate_ctx(&app_settings.security, body_json.clone());
+    let sec_outcome = gate.outcome.clone();
+    let sec_findings = gate.findings.clone();
+    if gate.action == SecurityAction::Block {
+        let duration_ms = start.elapsed().as_millis() as i64;
+        spawn_log(
+            state.clone(),
+            Some(gw_key.name.clone()),
+            None,
+            model.clone(),
+            None,
+            403,
+            0,
+            0,
+            0,
+            duration_ms,
+            gate.outcome.blocked_reason.clone(),
+            false,
+            false,
+            None,
+            None,
+            mode,
+            sec_outcome.clone(),
+            sec_findings.clone(),
+        );
+        return error_response(
+            StatusCode::FORBIDDEN,
+            "security_blocked",
+            gate.outcome.blocked_reason.as_deref().unwrap_or("请求被安全审计阻断"),
+        );
+    }
+
+    // 3. Dispatch + forward, wrapped in the channel-failover state machine
+    //    (single attempt for v1; embeddings calls are billable, so we don't
+    //    fan out across channels by default).
+    let ctx = dispatcher::DispatchContext {
+        model: model.clone(),
+        api_key_id: gw_key.id.clone(),
+        is_stream: false,
+        request_body: body_json.clone(),
+    };
+    let mut fo = failover::Failover::new(state.db.clone(), ctx, 1);
+
+    let mut last_err: Option<String> = None;
+    loop {
+        let step = match fo.next().await {
+            Ok(s) => s,
+            Err(e) => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal",
+                    &e.to_string(),
+                )
+            }
+        };
+        let selected = match step {
+            failover::Step::Try(c) => c,
+            failover::Step::NoChannel(msg) => {
+                return error_response(StatusCode::SERVICE_UNAVAILABLE, "no_channel", &msg);
+            }
+            failover::Step::Exhausted => break,
+        };
+
+        let config = ChannelConfig {
+            base_url: selected.base_url.clone(),
+            api_key: selected.upstream_api_key.clone(),
+            models: selected.models.clone(),
+            model_mapping: selected.model_mapping.clone(),
+            extra: selected.extra.clone(),
+            timeout_secs: selected.timeout_secs,
+            stream: false,
+        };
+        let proxy_req = ProxyRequest {
+            model: model.clone(),
+            body: body_json.clone(),
+            stream: false,
+        };
+        let adaptor = adapter::get_adaptor(&selected.channel_type);
+
+        match adaptor.forward_embeddings(&proxy_req, &config).await {
+            Ok((status, resp_body)) => {
+                record_upstream_outcome(&state, &selected.id, true, false, "").await;
+
+                // 嵌入用量以 prompt_tokens 计（OpenAI 返回 usage.prompt_tokens）。
+                let usage = resp_body
+                    .get("usage")
+                    .and_then(|u| u.get("prompt_tokens"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                if usage > 0 {
+                    let _ = gateway_keys::add_quota_used(&state.db, &gw_key.id, usage as i64).await;
+                }
+
+                let duration_ms = start.elapsed().as_millis() as i64;
+                spawn_log(
+                    state.clone(),
+                    Some(gw_key.name.clone()),
+                    Some(selected.name.clone()),
+                    model.clone(),
+                    Some(model.clone()),
+                    status as i32,
+                    usage as i64,
+                    0,
+                    usage as i64,
+                    duration_ms,
+                    None,
+                    false,
+                    false,
+                    None,
+                    None,
+                    mode,
+                    sec_outcome.clone(),
+                    sec_findings.clone(),
+                );
+
+                let st = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
+                return (st, Json(resp_body)).into_response();
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                record_upstream_outcome(&state, &selected.id, false, true, &msg).await;
+                fo.observe(failover::Outcome::connection(msg.clone()));
+                last_err = Some(msg);
+                if fo.should_retry() {
+                    continue;
+                }
+                break;
+            }
+        }
+    }
+
     error_response(
-        StatusCode::NOT_IMPLEMENTED,
-        "not_implemented",
-        "Embeddings endpoint not yet implemented",
+        StatusCode::BAD_GATEWAY,
+        "upstream_error",
+        last_err
+            .as_deref()
+            .unwrap_or("嵌入请求失败：无可用渠道或上游返回错误"),
     )
 }
 

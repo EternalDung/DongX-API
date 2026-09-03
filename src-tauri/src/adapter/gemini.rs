@@ -163,6 +163,17 @@ impl Adaptor for GeminiAdaptor {
         "https://generativelanguage.googleapis.com"
     }
 
+    /// Gemini 走原生 generateContent，无 OpenAI 兼容的 `/v1/embeddings` 端点。
+    async fn forward_embeddings(
+        &self,
+        _request: &ProxyRequest,
+        _config: &ChannelConfig,
+    ) -> Result<(u16, serde_json::Value), anyhow::Error> {
+        Err(anyhow::anyhow!(
+            "Embeddings API 不支持 Google (Gemini) 渠道"
+        ))
+    }
+
     /// Gemini lists models at `GET /v1beta/models?key=<api_key>` (native API,
     /// query-string auth, ids under `models[].name` as `models/<id>`). Override
     /// the default OpenAI-compatible implementation.

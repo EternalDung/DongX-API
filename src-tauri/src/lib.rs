@@ -10,8 +10,10 @@ mod db;
 mod error;
 mod models;
 mod protocol;
+mod rag;
 mod security;
 mod server;
+mod services;
 mod settings;
 mod tray;
 
@@ -110,6 +112,14 @@ pub fn run() {
             commands::security::list_builtin_rules,
             commands::security::update_builtin_rule,
             commands::security::reset_builtin_rules,
+            commands::services::list_services,
+            commands::rag::list_knowledge_bases,
+            commands::rag::create_knowledge_base,
+            commands::rag::delete_knowledge_base,
+            commands::rag::ingest_kb_text,
+            commands::rag::ask_kb,
+            commands::rag::list_documents,
+            commands::rag::delete_document,
             commands::settings::get_settings,
             commands::settings::update_settings,
             commands::settings::get_dashboard_stats,
@@ -152,6 +162,10 @@ pub fn run() {
             ) {
                 tracing::warn!("回填默认设置失败（已忽略，沿用库内现有值）: {}", e);
             }
+
+            // 初始化服务注册表（加载服务启用/禁用/移除状态），须先于 Axum 启动，
+            // 使 `ServiceRegistry::global()` 在路由合并时可用。
+            crate::services::ServiceRegistry::init(&pool);
 
             // AppState managed here; commands access it via
             // State<'_, Arc<AppState>> and clone the pool handle freely.

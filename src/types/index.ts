@@ -337,3 +337,89 @@ export interface ConfigContent {
   content: string;
   error: string | null;
 }
+
+// ============================================================
+// 业务服务（服务页）
+// ============================================================
+
+/** 单个业务服务的运行态快照（对应 Rust ServiceStatus） */
+export interface ServiceStatus {
+  id: string;
+  name: string;
+  description: string;
+  enabled: boolean;
+  running: boolean;
+  /** 服务自定义统计（RAG 为 kb_count / doc_count / chunk_count 等） */
+  stats: Record<string, number>;
+}
+
+// ============================================================
+// Knowledge Base (RAG)
+// 知识库：RAG 检索的数据源。每个知识库绑定一个嵌入模型/渠道，
+// 摄入文档后分块并向量化，问答时检索相关片段。
+// 后端由 Phase 1（009_rag.sql + rag commands）落地；前端先接类型与 API。
+// ============================================================
+
+/** 知识库状态：0 禁用 / 1 启用 */
+export type KnowledgeBaseStatus = 0 | 1;
+
+export interface KnowledgeBase {
+  id: string;
+  name: string;
+  description: string;
+  /** 用于向量化的嵌入模型名（如 text-embedding-3-small） */
+  embedding_model: string;
+  /** 提供该嵌入模型的渠道 id */
+  embedding_channel_id: string;
+  doc_count: number;
+  chunk_count: number;
+  status: KnowledgeBaseStatus;
+  created_at: string;
+  updated_at: string;
+}
+
+/** 新建知识库参数 — 对应 Rust KnowledgeBaseInput */
+export interface KnowledgeBaseInput {
+  name: string;
+  description: string;
+  embedding_model: string;
+}
+
+/** 摄入文本结果 — 对应 Rust IngestResult */
+export interface IngestResult {
+  /** 新建文档 id */
+  document_id: string;
+  /** 分块数 */
+  chunk_count: number;
+}
+
+/** 问答引用来源 — 对应 Rust Source */
+export interface RagSource {
+  kb_id: string;
+  doc_title: string;
+  content: string;
+  score: number;
+}
+
+/** 问答结果 — 对应 Rust AskResult */
+export interface AskResult {
+  answer: string;
+  sources: RagSource[];
+}
+
+/** 知识库文档 — 对应 Rust KbDocument */
+export interface KbDocument {
+  id: string;
+  kb_id: string;
+  title: string;
+  /** text | file | url | git */
+  source_type: string;
+  source_ref: string;
+  char_count: number;
+  chunk_count: number;
+  /** 0=处理中 1=已就绪 2=失败 */
+  status: number;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+}

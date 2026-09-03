@@ -90,6 +90,30 @@ pub trait Adaptor: Send + Sync {
         request: &ProxyRequest,
         config: &ChannelConfig,
     ) -> Result<reqwest::Response, anyhow::Error>;
+
+    /// Forward an embeddings request to the OpenAI-compatible `/v1/embeddings`
+    /// endpoint. Default implementation POSTs the raw body with Bearer auth;
+    /// providers without an embeddings API (Claude / Gemini) override this to
+    /// return a clear error instead of a confusing 404.
+    async fn forward_embeddings(
+        &self,
+        request: &ProxyRequest,
+        config: &ChannelConfig,
+    ) -> Result<(u16, serde_json::Value), anyhow::Error> {
+        let _ = self;
+        let client = build_client(config)?;
+        let base = config.base_url.trim_end_matches('/');
+        let url = format!("{}/embeddings", base);
+        let resp = client
+            .post(url)
+            .bearer_auth(&config.api_key)
+            .json(&request.body)
+            .send()
+            .await?;
+        let status = resp.status().as_u16();
+        let body: serde_json::Value = resp.json().await?;
+        Ok((status, body))
+    }
 }
 
 /// Factory: resolve the adaptor for a channel type.

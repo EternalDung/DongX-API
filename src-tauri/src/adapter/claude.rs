@@ -124,6 +124,17 @@ impl Adaptor for ClaudeAdaptor {
         "https://api.anthropic.com"
     }
 
+    /// Anthropic has no OpenAI-compatible `/v1/embeddings` endpoint.
+    async fn forward_embeddings(
+        &self,
+        _request: &ProxyRequest,
+        _config: &ChannelConfig,
+    ) -> Result<(u16, serde_json::Value), anyhow::Error> {
+        Err(anyhow::anyhow!(
+            "Embeddings API 不支持 Anthropic (Claude) 渠道"
+        ))
+    }
+
     /// Anthropic lists models at `GET /v1/models` using the `x-api-key` header
     /// (not Bearer), so override the default OpenAI-compatible implementation.
     async fn list_models(&self, config: &ChannelConfig) -> Result<Vec<String>, anyhow::Error> {

@@ -29,6 +29,12 @@ import type {
   ClientInfo,
   ApplyResult,
   ConfigContent,
+  ServiceStatus,
+  KnowledgeBase,
+  KnowledgeBaseInput,
+  IngestResult,
+  AskResult,
+  KbDocument,
 } from "@/types";
 
 // ============================================================
@@ -317,4 +323,58 @@ export const clientConfigApi = {
   /** 恢复该客户端被本网关修改前的原始配置（依赖写入时生成的 .dongx-backup） */
   restore: (name: string): Promise<ApplyResult> =>
     invoke<ApplyResult>("restore_client_config", { appName: name }),
+};
+
+// ============================================================
+// 业务服务 API
+// 服务页：列出业务服务（RAG/Wiki/MCP/Skill）并控制启用 / 禁用 / 移除
+// ============================================================
+
+export const serviceApi = {
+  /** 获取所有未移除服务的状态 */
+  list: (): Promise<ServiceStatus[]> => invoke<ServiceStatus[]>("list_services"),
+
+  /** 启用 / 禁用服务（持久化，重启后仍生效） */
+  setEnabled: (id: string, enabled: boolean): Promise<void> =>
+    invoke<void>("set_service_enabled", { id, enabled }),
+
+  /** 移除（软删除）服务：从列表隐藏、不再挂载路由（持久化） */
+  remove: (id: string): Promise<void> =>
+    invoke<void>("delete_service", { id }),
+};
+
+// ============================================================
+// 知识库 API（RAG）
+// 知识库列表 / 新建 / 删除。后端由 Phase 1（009_rag.sql + rag commands）落地；
+// 在后端就绪前，前端调用会失败并在页面内优雅降级为空状态。
+// ============================================================
+
+export const knowledgeApi = {
+  /** 获取全部知识库（含统计与状态） */
+  list: (): Promise<KnowledgeBase[]> =>
+    invoke<KnowledgeBase[]>("list_knowledge_bases"),
+
+  /** 新建知识库，返回完整对象 */
+  create: (input: KnowledgeBaseInput): Promise<KnowledgeBase> =>
+    invoke<KnowledgeBase>("create_knowledge_base", { input }),
+
+  /** 删除知识库（级联删除其文档与分块） */
+  remove: (id: string): Promise<void> =>
+    invoke<void>("delete_knowledge_base", { id }),
+
+  /** 摄入一段文本到知识库：分块 → 向量化 → 落库，返回文档 id 与分块数 */
+  ingest: (kbId: string, title: string, text: string): Promise<IngestResult> =>
+    invoke<IngestResult>("ingest_kb_text", { kbId, title, text }),
+
+  /** 在知识库范围内问答：检索相关分块 → 构造上下文 → 复用网关分发发起 chat */
+  ask: (kbIds: string[], question: string, model: string): Promise<AskResult> =>
+    invoke<AskResult>("ask_kb", { kbIds, question, model }),
+
+  /** 列出某知识库下的全部文档（含片段数与状态），按创建时间倒序 */
+  documents: (kbId: string): Promise<KbDocument[]> =>
+    invoke<KbDocument[]>("list_documents", { kbId }),
+
+  /** 删除文档（级联删除其向量分块） */
+  removeDocument: (docId: string): Promise<void> =>
+    invoke<void>("delete_document", { docId }),
 };
