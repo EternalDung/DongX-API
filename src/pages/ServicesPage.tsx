@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { Plus, Trash2, BookOpen, RefreshCw, AlertTriangle } from "lucide-react";
 import {
   Tabs,
@@ -10,10 +11,10 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
 import { EmptyState } from "@/components/ui/empty-state";
 import { StatusBadge } from "@/components/ui/status-badge";
+import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/components/ui/toast";
 import {
   Dialog,
@@ -23,8 +24,9 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { knowledgeApi, channelApi } from "@/lib/api";
-import type { AskResult, KbDocument, KnowledgeBase, KnowledgeBaseInput } from "@/types";
+import { cn } from "@/lib/utils";
+import { knowledgeApi } from "@/lib/api";
+import type { KnowledgeBase, KnowledgeBaseInput } from "@/types";
 
 /** 服务分类标签（服务页右上角切换）。 */
 const TABS = [
@@ -42,6 +44,38 @@ function fmtTime(iso: string | null): string {
   return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+/**
+ * 头像配色：基于名称 hash 选 6 种之一，保证不同 KB 视觉差异大。
+ *
+ * 采用「低透明度底 + 同色系文字 + 同色系细边框」而非高饱和实底白字：
+ * 实底白字色块视觉权重过大，列表里一屏 6+ 个头像时会把注意力从 KB 名称上抢走。
+ * 文字色需分深浅两套（浅色模式 600 级、深色模式 400 级），否则深色下对比度不足。
+ */
+const KB_AVATAR_BG = [
+  "bg-blue-500/15 text-blue-600 ring-blue-500/25 dark:text-blue-400",
+  "bg-emerald-500/15 text-emerald-600 ring-emerald-500/25 dark:text-emerald-400",
+  "bg-violet-500/15 text-violet-600 ring-violet-500/25 dark:text-violet-400",
+  "bg-amber-500/15 text-amber-600 ring-amber-500/25 dark:text-amber-400",
+  "bg-rose-500/15 text-rose-600 ring-rose-500/25 dark:text-rose-400",
+  "bg-cyan-500/15 text-cyan-600 ring-cyan-500/25 dark:text-cyan-400",
+];
+
+function avatarColor(name: string): string {
+  let h = 0;
+  for (let i = 0; i < name.length; i++) {
+    h = (h * 31 + name.charCodeAt(i)) >>> 0;
+  }
+  return KB_AVATAR_BG[h % KB_AVATAR_BG.length];
+}
+
+/** 取 KB 名称的首个非空白字符作为头像字；空名时回落到「?」。 */
+function avatarLetter(name: string): string {
+  const t = name.trim();
+  if (!t) return "?";
+  // 中文 / 表情都显示原字符；否则取大写首字母。
+  return t.charAt(0).toUpperCase();
+}
+
 /** 新建知识库表单。 */
 interface KbForm {
   name: string;
@@ -54,47 +88,104 @@ function emptyForm(): KbForm {
 }
 
 // ---------------------------------------------------------------------------
-// 单个知识库行
+// 单个知识库行（点击进入详情页）
+// 操作区中的开关与删除按钮阻止冒泡，避免被行点击带去详情页。
 // ---------------------------------------------------------------------------
 
 function KnowledgeBaseRow({
   kb,
-  onDetail,
+  onOpen,
   onDelete,
+  onToggleStatus,
+  onToggleMcpExposed,
+  busy = false,
 }: {
   kb: KnowledgeBase;
-  onDetail: (kb: KnowledgeBase) => void;
+  onOpen: (kb: KnowledgeBase) => void;
   onDelete: (kb: KnowledgeBase) => void;
+  onToggleStatus: (kb: KnowledgeBase, next: 0 | 1) => void;
+  onToggleMcpExposed: (kb: KnowledgeBase, next: 0 | 1) => void;
+  busy?: boolean;
 }) {
-  const tone = kb.status === 1 ? "success" : "secondary";
-  const label = kb.status === 1 ? "就绪" : "禁用";
+  const enabled = kb.status === 1;
+  const tone = enabled ? "success" : "secondary";
+  const label = enabled ? "就绪" : "禁用";
+  const bg = avatarColor(kb.name);
   return (
-    <div className="group flex items-center justify-between gap-3 rounded-lg px-2 py-3 transition-colors hover:bg-accent/40">
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={() => onOpen(kb)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") onOpen(kb);
+      }}
+      className="group flex cursor-pointer items-center gap-4 rounded-lg border bg-card/30 px-4 py-4 transition-colors hover:bg-accent/50"
+    >
+      {/* 头像：hash(name) → 6 色 + 首字符 */}
+      <div
+        aria-hidden
+        // ring 取代 shadow：淡底配投影会显脏，细边框更贴合同色系配色。
+        className={cn(
+          "flex h-12 w-12 shrink-0 items-center justify-center rounded-lg text-lg font-semibold ring-1 ring-inset",
+          bg,
+        )}
+      >
+        {avatarLetter(kb.name)}
+      </div>
+
+      {/* 主信息：名称 / 描述 / 文档·分片 / 嵌入模型 / 更新 */}
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
-          <span className="font-medium">{kb.name}</span>
+          <span className="truncate text-base font-semibold">{kb.name}</span>
           <StatusBadge tone={tone}>{label}</StatusBadge>
         </div>
         {kb.description && (
-          <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
+          <p className="mt-1 line-clamp-1 text-sm text-muted-foreground">
             {kb.description}
           </p>
         )}
-        <p className="mt-1 text-[11px] text-muted-foreground">
+        <p className="mt-1.5 text-xs text-muted-foreground">
           {kb.doc_count} 文档 · {kb.chunk_count} 片段
           {kb.embedding_model ? ` · ${kb.embedding_model}` : ""}
           {kb.updated_at ? ` · 更新 ${fmtTime(kb.updated_at)}` : ""}
         </p>
       </div>
-      <div className="flex shrink-0 items-center gap-1 opacity-70 transition-opacity group-hover:opacity-100">
-        <Button variant="ghost" size="sm" onClick={() => onDetail(kb)}>
-          详情
-        </Button>
+
+      {/* 操作区：MCP 暴露 / 启用 / 删除 —— 阻断行点击 */}
+      <div
+        className="flex shrink-0 items-end gap-4 pl-2"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex flex-col items-center gap-1">
+          <Switch
+            checked={kb.mcp_exposed === 1}
+            disabled={busy || !enabled}
+            title={
+              enabled
+                ? kb.mcp_exposed === 1
+                  ? "已暴露给 MCP，点击关闭"
+                  : "未暴露给 MCP，点击开启"
+                : "请先启用知识库"
+            }
+            onCheckedChange={(v) => onToggleMcpExposed(kb, v ? 1 : 0)}
+          />
+          <span className="text-[10px] text-muted-foreground">MCP</span>
+        </div>
+        <div className="flex flex-col items-center gap-1">
+          <Switch
+            checked={enabled}
+            disabled={busy}
+            title={enabled ? "已启用，点击禁用" : "已禁用，点击启用"}
+            onCheckedChange={(v) => onToggleStatus(kb, v ? 1 : 0)}
+          />
+          <span className="text-[10px] text-muted-foreground">启用</span>
+        </div>
         <Button
           variant="ghost"
           size="icon"
           title="删除知识库"
           className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+          disabled={busy}
           onClick={() => onDelete(kb)}
         >
           <Trash2 />
@@ -123,6 +214,7 @@ function Placeholder({ name }: { name: string }) {
 // ---------------------------------------------------------------------------
 
 export function ServicesPage() {
+  const navigate = useNavigate();
   const toast = useToast();
 
   // RAG 知识库列表
@@ -135,24 +227,6 @@ export function ServicesPage() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [form, setForm] = useState<KbForm>(emptyForm());
   const [saving, setSaving] = useState(false);
-
-  // 知识库详情（摄入文本 / 问答）
-  const [detailTarget, setDetailTarget] = useState<KnowledgeBase | null>(null);
-  const [ingestTitle, setIngestTitle] = useState("");
-  const [ingestText, setIngestText] = useState("");
-  const [ingesting, setIngesting] = useState(false);
-  const [askQuestion, setAskQuestion] = useState("");
-  const [askModel, setAskModel] = useState("");
-  const [asking, setAsking] = useState(false);
-  const [askResult, setAskResult] = useState<AskResult | null>(null);
-  // 全部启用渠道的模型（去重），作为「回答模型」输入建议
-  const [channelModels, setChannelModels] = useState<string[]>([]);
-
-  // 知识库文档列表（详情对话框内展示 / 删除）
-  const [documents, setDocuments] = useState<KbDocument[]>([]);
-  const [loadingDocs, setLoadingDocs] = useState(false);
-  const [docDeleteTarget, setDocDeleteTarget] = useState<KbDocument | null>(null);
-  const [deletingDoc, setDeletingDoc] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -204,157 +278,6 @@ export function ServicesPage() {
     }
   };
 
-  const loadDocuments = async (kbId: string) => {
-    setLoadingDocs(true);
-    try {
-      const docs = await knowledgeApi.documents(kbId);
-      setDocuments(docs);
-      // 用文档列表重算统计，确保与库一致（摄入 / 删除后计数同步）。
-      const docCount = docs.length;
-      const chunkCount = docs.reduce((s, d) => s + (d.chunk_count || 0), 0);
-      setDetailTarget((prev) =>
-        prev ? { ...prev, doc_count: docCount, chunk_count: chunkCount } : prev,
-      );
-      setKbs((prev) =>
-        prev.map((k) =>
-          k.id === kbId ? { ...k, doc_count: docCount, chunk_count: chunkCount } : k,
-        ),
-      );
-    } catch (e) {
-      console.error("加载文档失败：", e);
-      setDocuments([]);
-    } finally {
-      setLoadingDocs(false);
-    }
-  };
-
-  const openDetail = (kb: KnowledgeBase) => {
-    setDetailTarget(kb);
-    setIngestTitle("");
-    setIngestText("");
-    setAskQuestion("");
-    setAskModel("");
-    setAskResult(null);
-    // 载入全部启用渠道的模型，作为「回答模型」输入建议（问答由网关全局分发）。
-    channelApi
-      .list()
-      .then((chs) =>
-        setChannelModels(
-          Array.from(
-            new Set(
-              chs
-                .filter((c) => c.status === 1)
-                .flatMap((c) => c.models ?? []),
-            ),
-          ).sort(),
-        ),
-      )
-      .catch(() => setChannelModels([]));
-    // 载入该知识库下的文档列表。
-    loadDocuments(kb.id);
-  };
-
-  const handleIngest = async () => {
-    if (!detailTarget) return;
-    if (!ingestTitle.trim() || !ingestText.trim()) {
-      toast.error("标题与文本内容均不能为空");
-      return;
-    }
-    setIngesting(true);
-    try {
-      const res = await knowledgeApi.ingest(
-        detailTarget.id,
-        ingestTitle.trim(),
-        ingestText.trim(),
-      );
-      toast.success(`已摄入「${ingestTitle.trim()}」，共 ${res.chunk_count} 个片段`);
-      // 本地更新统计，避免重新拉取列表。
-      setDetailTarget((prev) =>
-        prev
-          ? {
-              ...prev,
-              doc_count: prev.doc_count + 1,
-              chunk_count: prev.chunk_count + res.chunk_count,
-            }
-          : prev,
-      );
-      setKbs((prev) =>
-        prev.map((k) =>
-          k.id === detailTarget.id
-            ? {
-                ...k,
-                doc_count: k.doc_count + 1,
-                chunk_count: k.chunk_count + res.chunk_count,
-              }
-            : k,
-        ),
-      );
-      setIngestTitle("");
-      setIngestText("");
-    } catch (e) {
-      const msg =
-        e && typeof e === "object" && "message" in e
-          ? String((e as { message: unknown }).message)
-          : String(e);
-      console.error("摄入文本失败：", e);
-      toast.error(msg || "摄入失败，请重试");
-    } finally {
-      setIngesting(false);
-    }
-  };
-
-  const handleAsk = async () => {
-    if (!detailTarget) return;
-    if (!askQuestion.trim()) {
-      toast.error("问题不能为空");
-      return;
-    }
-    if (!askModel.trim()) {
-      toast.error("请填写用于生成回答的 chat 模型");
-      return;
-    }
-    setAsking(true);
-    setAskResult(null);
-    try {
-      const res = await knowledgeApi.ask(
-        [detailTarget.id],
-        askQuestion.trim(),
-        askModel.trim(),
-      );
-      setAskResult(res);
-    } catch (e) {
-      const msg =
-        e && typeof e === "object" && "message" in e
-          ? String((e as { message: unknown }).message)
-          : String(e);
-      console.error("问答失败：", e);
-      toast.error(msg || "问答失败，请重试");
-    } finally {
-      setAsking(false);
-    }
-  };
-
-  const handleConfirmDeleteDoc = async () => {
-    if (!docDeleteTarget || !detailTarget) return;
-    const target = docDeleteTarget;
-    setDeletingDoc(true);
-    try {
-      await knowledgeApi.removeDocument(target.id);
-      toast.success(`已删除文档「${target.title}」`);
-      setDocDeleteTarget(null);
-      await loadDocuments(detailTarget.id);
-    } catch (e) {
-      const msg =
-        e && typeof e === "object" && "message" in e
-          ? String((e as { message: unknown }).message)
-          : String(e);
-      console.error("删除文档失败：", e);
-      toast.error(msg || "删除失败，请重试");
-    } finally {
-      setDeletingDoc(false);
-    }
-  };
-
   const handleConfirmDelete = async () => {
     if (!deleteTarget) return;
     const target = deleteTarget;
@@ -371,6 +294,48 @@ export function ServicesPage() {
       setDeleting(false);
     }
   };
+
+  // 行内开关的乐观更新 + 失败回滚。仅对单个 KB 标记 in-flight。
+  const [togglingId, setTogglingId] = useState<string | null>(null);
+
+  const patchKb = useCallback(
+    async (kb: KnowledgeBase, patch: Partial<Pick<KnowledgeBase, "status" | "mcp_exposed">>, successMsg: string) => {
+      setTogglingId(kb.id);
+      // 乐观更新：立刻翻转 UI 反映"将要变到"的状态。
+      const previous = { status: kb.status, mcp_exposed: kb.mcp_exposed };
+      setKbs((prev) =>
+        prev.map((k) =>
+          k.id === kb.id ? { ...k, ...(patch.status !== undefined ? { status: patch.status } : {}), ...(patch.mcp_exposed !== undefined ? { mcp_exposed: patch.mcp_exposed } : {}) } : k,
+        ),
+      );
+      try {
+        await knowledgeApi.update(kb.id, patch as Parameters<typeof knowledgeApi.update>[1]);
+        toast.success(successMsg);
+      } catch (e) {
+        // 失败回滚
+        setKbs((prev) =>
+          prev.map((k) =>
+            k.id === kb.id ? { ...k, status: previous.status, mcp_exposed: previous.mcp_exposed } : k,
+          ),
+        );
+        const msg =
+          e && typeof e === "object" && "message" in e
+            ? String((e as { message: unknown }).message)
+            : String(e);
+        console.error("更新知识库失败：", e);
+        toast.error(msg || "更新失败，请重试");
+      } finally {
+        setTogglingId(null);
+      }
+    },
+    [toast],
+  );
+
+  const handleToggleStatus = (kb: KnowledgeBase, next: 0 | 1) =>
+    patchKb(kb, { status: next }, next === 1 ? "知识库已启用" : "知识库已禁用");
+
+  const handleToggleMcpExposed = (kb: KnowledgeBase, next: 0 | 1) =>
+    patchKb(kb, { mcp_exposed: next }, next === 1 ? "已暴露给 MCP" : "已关闭 MCP 暴露");
 
   return (
     <div>
@@ -424,7 +389,7 @@ export function ServicesPage() {
                 <EmptyState
                   icon={BookOpen}
                   title="暂无知识库"
-                  description="知识库是 RAG 检索的数据源。新建一个知识库并摄入文档后，即可在问答中检索引用。后端 RAG 模块待接入（Phase 1）。"
+                  description="知识库是 RAG 检索的数据源。新建一个知识库并摄入文档后，即可在问答中检索引用。"
                   action={
                     <Button size="sm" variant="outline" onClick={openCreate}>
                       <Plus />
@@ -433,13 +398,16 @@ export function ServicesPage() {
                   }
                 />
               ) : (
-                <div className="divide-y">
+                <div className="space-y-3 py-2">
                   {kbs.map((kb) => (
                     <KnowledgeBaseRow
                       key={kb.id}
                       kb={kb}
-                      onDetail={openDetail}
+                      busy={togglingId === kb.id || deleting}
+                      onOpen={(k) => navigate(`/services/rag/${k.id}`)}
                       onDelete={setDeleteTarget}
+                      onToggleStatus={handleToggleStatus}
+                      onToggleMcpExposed={handleToggleMcpExposed}
                     />
                   ))}
                 </div>
@@ -511,223 +479,6 @@ export function ServicesPage() {
               disabled={saving || !form.name.trim()}
             >
               {saving ? "创建中..." : "创建"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* 知识库详情：摄入文本 / 问答 */}
-      <Dialog
-        open={detailTarget !== null}
-        onOpenChange={(o) => !o && setDetailTarget(null)}
-      >
-        <DialogContent className="sm:max-w-2xl max-h-[85vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              {detailTarget?.name}
-              {detailTarget && (
-                <StatusBadge tone={detailTarget.status === 1 ? "success" : "secondary"}>
-                  {detailTarget.status === 1 ? "就绪" : "禁用"}
-                </StatusBadge>
-              )}
-            </DialogTitle>
-            <DialogDescription>
-              {detailTarget?.description || "暂无描述"}
-            </DialogDescription>
-          </DialogHeader>
-
-          {/* 统计条 */}
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
-            <span>{detailTarget?.doc_count ?? 0} 文档</span>
-            <span>{detailTarget?.chunk_count ?? 0} 片段</span>
-            <span>嵌入模型：{detailTarget?.embedding_model || "—"}</span>
-          </div>
-
-          <Tabs defaultValue="ingest" className="w-full">
-            <TabsList>
-              <TabsTrigger value="ingest">摄入文本</TabsTrigger>
-              <TabsTrigger value="docs">文档</TabsTrigger>
-              <TabsTrigger value="ask">问答</TabsTrigger>
-            </TabsList>
-
-            {/* 摄入文本 */}
-            <TabsContent value="ingest" className="mt-4 space-y-3">
-              <div className="grid gap-2">
-                <Label htmlFor="ingest-title">标题</Label>
-                <Input
-                  id="ingest-title"
-                  placeholder="如：产品说明书第 3 章"
-                  value={ingestTitle}
-                  onChange={(e) => setIngestTitle(e.target.value)}
-                />
-              </div>
-              <div className="grid gap-2">
-                <Label htmlFor="ingest-text">文本内容</Label>
-                <Textarea
-                  id="ingest-text"
-                  placeholder="粘贴待向量化的文本，将自动按长度分块..."
-                  rows={8}
-                  value={ingestText}
-                  onChange={(e) => setIngestText(e.target.value)}
-                  className="font-mono text-xs"
-                />
-              </div>
-              <div className="flex justify-end">
-                <Button onClick={handleIngest} disabled={ingesting}>
-                  {ingesting ? "摄入中..." : "摄入"}
-                </Button>
-              </div>
-            </TabsContent>
-
-            {/* 文档列表 */}
-            <TabsContent value="docs" className="mt-4 space-y-3">
-              {loadingDocs ? (
-                <div className="space-y-2">
-                  <Skeleton className="h-12 w-full" />
-                  <Skeleton className="h-12 w-full" />
-                </div>
-              ) : documents.length === 0 ? (
-                <p className="text-sm text-muted-foreground">
-                  暂无文档，请到「摄入文本」粘贴资料。
-                </p>
-              ) : (
-                <div className="divide-y rounded-lg border">
-                  {documents.map((d) => (
-                    <div
-                      key={d.id}
-                      className="flex items-center justify-between gap-3 px-3 py-2"
-                    >
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="truncate font-medium">{d.title}</span>
-                          <StatusBadge
-                            tone={
-                              d.status === 1
-                                ? "success"
-                                : d.status === 2
-                                  ? "destructive"
-                                  : "warning"
-                            }
-                          >
-                            {d.status === 1 ? "就绪" : d.status === 2 ? "失败" : "处理中"}
-                          </StatusBadge>
-                        </div>
-                        <p className="text-[11px] text-muted-foreground">
-                          {d.chunk_count} 片段 · {fmtTime(d.created_at)}
-                        </p>
-                      </div>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        title="删除文档"
-                        className="text-destructive hover:bg-destructive/10 hover:text-destructive"
-                        onClick={() => setDocDeleteTarget(d)}
-                      >
-                        <Trash2 />
-                      </Button>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </TabsContent>
-
-            {/* 问答 */}
-            <TabsContent value="ask" className="mt-4 space-y-3">
-              <div className="grid gap-2">
-                <Label htmlFor="ask-question">问题</Label>
-                <Textarea
-                  id="ask-question"
-                  placeholder="基于该知识库内容提出问题..."
-                  rows={3}
-                  value={askQuestion}
-                  onChange={(e) => setAskQuestion(e.target.value)}
-                />
-              </div>
-              <div className="grid gap-2">
-                <Label htmlFor="ask-model">回答模型</Label>
-                <Input
-                  id="ask-model"
-                  list="kb-answer-model-options"
-                  placeholder="用于生成回答的 chat 模型，如 gpt-4.1-mini / deepseek-chat"
-                  value={askModel}
-                  onChange={(e) => setAskModel(e.target.value)}
-                  className="font-mono"
-                />
-                <datalist id="kb-answer-model-options">
-                  {channelModels.map((m) => (
-                    <option key={m} value={m} />
-                  ))}
-                </datalist>
-                <p className="text-xs text-muted-foreground">
-                  回答模型与嵌入模型相互独立，由网关在所有启用且支持该模型的渠道间分发。
-                </p>
-              </div>
-              <div className="flex justify-end">
-                <Button onClick={handleAsk} disabled={asking}>
-                  {asking ? "检索中..." : "问答"}
-                </Button>
-              </div>
-
-              {askResult && (
-                <div className="mt-2 space-y-3 rounded-lg border p-3">
-                  <div>
-                    <p className="mb-1 text-xs font-medium text-muted-foreground">回答</p>
-                    <p className="whitespace-pre-wrap text-sm leading-relaxed">
-                      {askResult.answer}
-                    </p>
-                  </div>
-                  {askResult.sources.length > 0 && (
-                    <div>
-                      <p className="mb-1 text-xs font-medium text-muted-foreground">
-                        引用来源（{askResult.sources.length}）
-                      </p>
-                      <ul className="space-y-2">
-                        {askResult.sources.map((s, i) => (
-                          <li key={i} className="rounded-md bg-muted/40 p-2 text-xs">
-                            <div className="mb-1 flex items-center justify-between">
-                              <span className="font-medium">{s.doc_title}</span>
-                              <span className="text-muted-foreground">
-                                相似度 {s.score.toFixed(3)}
-                              </span>
-                            </div>
-                            <p className="line-clamp-3 text-muted-foreground">{s.content}</p>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                </div>
-              )}
-            </TabsContent>
-          </Tabs>
-        </DialogContent>
-      </Dialog>
-
-      {/* 文档删除确认 Dialog */}
-      <Dialog
-        open={docDeleteTarget !== null}
-        onOpenChange={(o) => !o && setDocDeleteTarget(null)}
-      >
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <AlertTriangle className="h-5 w-5 text-destructive" />
-              删除文档
-            </DialogTitle>
-            <DialogDescription>
-              确认删除文档「{docDeleteTarget?.title}」？其下全部向量分块将一并移除，操作不可恢复。
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setDocDeleteTarget(null)}>
-              取消
-            </Button>
-            <Button
-              variant="destructive"
-              onClick={handleConfirmDeleteDoc}
-              disabled={deletingDoc}
-            >
-              {deletingDoc ? "删除中..." : "确认删除"}
             </Button>
           </DialogFooter>
         </DialogContent>

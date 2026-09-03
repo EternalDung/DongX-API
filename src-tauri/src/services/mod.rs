@@ -77,6 +77,7 @@ impl ServiceRegistry {
             removed: Mutex::new(HashSet::new()),
         };
         registry.register(Box::new(knowledge::KnowledgeService));
+        registry.register(Box::new(mcp::McpService));
         registry
     }
 
@@ -211,3 +212,4 @@ impl ServiceRegistry {
 }
 
 pub mod knowledge;
+pub mod mcp;

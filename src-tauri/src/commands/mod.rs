@@ -2,6 +2,7 @@ pub mod channel;
 pub mod client_config;
 pub mod key;
 pub mod log;
+pub mod mcp;
 pub mod rag;
 pub mod services;
 pub mod settings;

@@ -8,6 +8,7 @@ mod core;
 mod crypto;
 mod db;
 mod error;
+mod mcp;
 mod models;
 mod protocol;
 mod rag;
@@ -29,6 +30,7 @@ use crate::settings::Settings;
 pub struct AppState {
     pub db: sqlx::SqlitePool,
     /// 网关服务运行态句柄：查询/停止/重启数据面服务都通过它。
+    /// MCP 服务挂载在网关路由下（`services::mcp`），与网关同源、共用此句柄。
     pub server: server::ServerHandle,
     /// 关闭到托盘开关的运行态镜像（由设置页保存时更新，供窗口关闭钩子同步读取）。
     pub close_to_tray: std::sync::Arc<std::sync::Mutex<bool>>,
@@ -105,6 +107,7 @@ pub fn run() {
             commands::log::get_log_security_findings,
             commands::log::clear_logs,
             commands::log::delete_log,
+            commands::mcp::get_mcp_status,
             commands::security::list_custom_rules,
             commands::security::create_custom_rule,
             commands::security::update_custom_rule,
@@ -115,11 +118,18 @@ pub fn run() {
             commands::services::list_services,
             commands::rag::list_knowledge_bases,
             commands::rag::create_knowledge_base,
+            commands::rag::update_knowledge_base,
             commands::rag::delete_knowledge_base,
             commands::rag::ingest_kb_text,
             commands::rag::ask_kb,
             commands::rag::list_documents,
             commands::rag::delete_document,
+            commands::rag::import_source,
+            commands::rag::list_sources,
+            commands::rag::delete_source,
+            commands::rag::retrieve_kb,
+            commands::rag::get_index_status,
+            commands::rag::reindex_kb,
             commands::settings::get_settings,
             commands::settings::update_settings,
             commands::settings::get_dashboard_stats,
@@ -224,6 +234,10 @@ pub fn run() {
                     tracing::error!("Axum server error: {}", e);
                 }
             });
+
+            // MCP 无独立启动流程：其路由由 services::mcp::McpService 注册进
+            // 网关路由表（见 server::router::create_router），端点 = 网关地址 + /mcp。
+            // 因此改网关端口 → 重启网关 → MCP 端点自动跟随，无需额外联动。
 
             // 后台日志保留清理：按 log_retention_days 定期清理过期日志
             // （含关联的 request_security_findings），避免日志无限增长。

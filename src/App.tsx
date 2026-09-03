@@ -8,6 +8,7 @@ import { ApiKeysPage } from "./pages/ApiKeysPage";
 import { LogsPage } from "./pages/LogsPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { ServicesPage } from "./pages/ServicesPage";
+import { KnowledgeBaseDetailPage } from "./pages/KnowledgeBaseDetailPage";
 
 const router = createHashRouter([
   {
@@ -21,6 +22,7 @@ const router = createHashRouter([
       { path: "logs", element: <LogsPage /> },
       { path: "settings", element: <SettingsPage /> },
       { path: "services", element: <ServicesPage /> },
+      { path: "services/rag/:kbId", element: <KnowledgeBaseDetailPage /> },
     ],
   },
 ]);

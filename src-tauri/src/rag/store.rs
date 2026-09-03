@@ -22,6 +22,7 @@ pub async fn insert_document(
     title: &str,
     source_type: &str,
     source_ref: &str,
+    embedding_model: &str,
     chunks: Vec<(String, Vec<f32>)>,
 ) -> AppResult<String> {
     let doc_id = uuid::Uuid::new_v4().to_string();
@@ -51,8 +52,8 @@ pub async fn insert_document(
         let emb_json =
             serde_json::to_string(&emb).map_err(|e| AppError::Internal(e.to_string()))?;
         sqlx::query(
-            "INSERT INTO kb_chunks (id, kb_id, doc_id, seq, content, embedding, token_count, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, 0, ?)",
+            "INSERT INTO kb_chunks (id, kb_id, doc_id, seq, content, embedding, embedding_model, token_count, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)",
         )
         .bind(&chunk_id)
         .bind(kb_id)
@@ -60,6 +61,7 @@ pub async fn insert_document(
         .bind(i as i32)
         .bind(&content)
         .bind(emb_json)
+        .bind(embedding_model)
         .bind(&now)
         .execute(pool)
         .await?;

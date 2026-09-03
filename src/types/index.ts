@@ -374,6 +374,16 @@ export interface KnowledgeBase {
   doc_count: number;
   chunk_count: number;
   status: KnowledgeBaseStatus;
+  /** 是否将本知识库暴露给 MCP 层（0=否 1=是） */
+  mcp_exposed: number;
+  /** 单次向量化批大小（null=取引擎默认） */
+  embedding_batch_size: number | null;
+  /** 摄入时排除的目录（逗号分隔，null=不排除） */
+  exclude_dirs: string | null;
+  /** 摄入时排除的文件（逗号分隔，null=不排除） */
+  exclude_files: string | null;
+  /** 摄入时仅包含的文件类型（逗号分隔，null=全部） */
+  include_file_types: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -383,6 +393,20 @@ export interface KnowledgeBaseInput {
   name: string;
   description: string;
   embedding_model: string;
+}
+
+/** 更新知识库参数（部分更新）— 对应 Rust KnowledgeBaseUpdate */
+export interface KnowledgeBaseUpdate {
+  name?: string;
+  description?: string;
+  /** 启用 RAG 开关：0=禁用 1=启用（复用 status 列） */
+  status?: number;
+  /** MCP 暴露开关：0=否 1=是 */
+  mcp_exposed?: number;
+  embedding_batch_size?: number | null;
+  exclude_dirs?: string | null;
+  exclude_files?: string | null;
+  include_file_types?: string | null;
 }
 
 /** 摄入文本结果 — 对应 Rust IngestResult */
@@ -407,6 +431,51 @@ export interface AskResult {
   sources: RagSource[];
 }
 
+/** 检索命中分块 — 对应 Rust RetrievalHit */
+export interface RetrievalHit {
+  doc_id: string;
+  doc_title: string;
+  content: string;
+  /** 余弦相似度（0~1，越大越相关） */
+  score: number;
+}
+
+/** 索引状态 — 对应 Rust IndexStatus */
+export interface IndexStatus {
+  /** 文档数 */
+  doc_count: number;
+  /** 分块总数 */
+  chunk_count: number;
+  /** 已向量化的分块数 */
+  embedded_count: number;
+  /** 嵌入模型与知识库当前模型不一致的分块数（需重建索引） */
+  stale_count: number;
+  /** 知识库当前绑定的嵌入模型（判定 stale 的基准） */
+  embedding_model: string;
+  /** 全部分块都已向量化 */
+  is_complete: boolean;
+  /** 存在 stale 分块 */
+  is_stale: boolean;
+}
+
+/** MCP 端点（运行态）— 对应 Rust McpListenAddr */
+export interface McpListenAddr {
+  host: string;
+  port: number;
+}
+
+/** MCP 服务运行态 — 对应 Rust McpStatus */
+export interface McpStatus {
+  /** server 进程是否在监听端口 */
+  running: boolean;
+  /** 当前实际监听的地址；服务未起时为 null */
+  bindAddr: McpListenAddr | null;
+  /** 给 MCP client 用的端点 URL（= bindAddr.url()）；服务未起时为 null */
+  endpoint: string | null;
+  /** 当前可用的 MCP tool 数量（与后端 tool_specs().len() 一致） */
+  toolsCount: number;
+}
+
 /** 知识库文档 — 对应 Rust KbDocument */
 export interface KbDocument {
   id: string;
@@ -422,4 +491,41 @@ export interface KbDocument {
   error_message: string | null;
   created_at: string;
   updated_at: string;
+}
+
+/** 摄入来源 — 对应 Rust KbSource（不含 token 字段） */
+export interface KbSource {
+  id: string;
+  kb_id: string;
+  /** git | url | local_dir */
+  source_type: string;
+  repo_url: string | null;
+  branch: string | null;
+  url: string | null;
+  dir_path: string | null;
+  subpath: string | null;
+  /** fetching | done | error */
+  status: string;
+  file_count: number;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** 导入来源参数 — 对应 Rust ImportSourceInput */
+export interface ImportSourceInput {
+  /** git | url | local_dir */
+  source_type: string;
+  repo_url?: string;
+  branch?: string;
+  token?: string;
+  url?: string;
+  dir_path?: string;
+  subpath?: string;
+  /** 逗号分隔 */
+  excluded_dirs?: string;
+  /** 逗号分隔 */
+  included_files?: string;
+  /** MB */
+  max_file_size_mb?: number;
 }

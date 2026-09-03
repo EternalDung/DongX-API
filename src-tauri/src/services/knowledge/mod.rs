@@ -94,7 +94,17 @@ async fn ask_route(
     Json(payload): Json<AskRequest>,
 ) -> impl IntoResponse {
     let state: Arc<AppState> = app.state::<Arc<AppState>>().inner().clone();
-    match crate::rag::ask::ask(&state.db, &payload.kb_ids, &payload.question, &payload.model).await
+    match crate::rag::ask::ask(
+        &state.db,
+        &payload.kb_ids,
+        &payload.question,
+        &payload.model,
+        payload.channel_id.as_deref(),
+        crate::rag::retrieve::RetrievalMode::Vector,
+        5,
+        0.3,
+    )
+    .await
     {
         Ok(res) => (StatusCode::OK, Json(res)).into_response(),
         Err(e) => e.into_response(),
@@ -111,4 +121,8 @@ struct AskRequest {
     /// 用于生成回答的 chat 模型（经网关分发，独立于嵌入模型）
     #[serde(default)]
     model: String,
+    /// 可选：锁定单一渠道直接发（不走 Failover/熔断/加权）。
+    /// 前端 RAG 问答 UI 在用户显式选择渠道时传此字段。
+    #[serde(default)]
+    channel_id: Option<String>,
 }

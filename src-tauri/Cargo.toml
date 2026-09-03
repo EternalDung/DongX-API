@@ -29,7 +29,7 @@ tauri-plugin-dialog = "2"            # 文件选择对话框（导出日志等�
 # Web 框架（数据面 — Axum HTTP 代理服务器）
 # ============================================================
 axum = "0.8"
-tower = "0.5"
+tower = { version = "0.5", features = ["util"] } # ServiceExt::oneshot 用于 router 测试
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 
 # ============================================================

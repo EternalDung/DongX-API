@@ -39,7 +39,7 @@ pub async fn ingest_text(
     }
     let paired: Vec<(String, Vec<f32>)> = chunks.into_iter().zip(vecs).collect();
     let chunk_count = paired.len();
-    let document_id = insert_document(pool, kb_id, title, "text", "", paired).await?;
+    let document_id = insert_document(pool, kb_id, title, "text", "", &kb.embedding_model, paired).await?;
     Ok(IngestResult {
         document_id,
         chunk_count,

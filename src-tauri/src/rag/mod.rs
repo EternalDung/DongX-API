@@ -7,6 +7,7 @@
 pub mod ask;
 pub mod chunk;
 pub mod embed;
+pub mod importer;
 pub mod ingest;
 pub mod models;
 pub mod retrieve;

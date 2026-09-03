@@ -32,9 +32,15 @@ import type {
   ServiceStatus,
   KnowledgeBase,
   KnowledgeBaseInput,
+  KnowledgeBaseUpdate,
   IngestResult,
   AskResult,
   KbDocument,
+  KbSource,
+  ImportSourceInput,
+  RetrievalHit,
+  IndexStatus,
+  McpStatus,
 } from "@/types";
 
 // ============================================================
@@ -362,13 +368,33 @@ export const knowledgeApi = {
   remove: (id: string): Promise<void> =>
     invoke<void>("delete_knowledge_base", { id }),
 
+  /** 部分更新知识库设置，返回更新后的完整对象 */
+  update: (kbId: string, patch: KnowledgeBaseUpdate): Promise<KnowledgeBase> =>
+    invoke<KnowledgeBase>("update_knowledge_base", { id: kbId, patch }),
+
   /** 摄入一段文本到知识库：分块 → 向量化 → 落库，返回文档 id 与分块数 */
   ingest: (kbId: string, title: string, text: string): Promise<IngestResult> =>
     invoke<IngestResult>("ingest_kb_text", { kbId, title, text }),
 
-  /** 在知识库范围内问答：检索相关分块 → 构造上下文 → 复用网关分发发起 chat */
-  ask: (kbIds: string[], question: string, model: string): Promise<AskResult> =>
-    invoke<AskResult>("ask_kb", { kbIds, question, model }),
+  /** 在知识库范围内问答：检索相关分块 → 构造上下文 → 复用网关分发发起 chat。
+   *  `channelId` 为空时走 dispatcher 自动加权 / 熔断分发；指定则锁定该渠道直接发。
+   *  `retrieval` 透传检索配置（模式 / Top-K / 关键词权重），缺省走后端默认向量检索。*/
+  ask: (
+    kbIds: string[],
+    question: string,
+    model: string,
+    channelId?: string,
+    retrieval?: { mode: "vector" | "keyword" | "hybrid"; topK: number; keywordWeight: number },
+  ): Promise<AskResult> =>
+    invoke<AskResult>("ask_kb", {
+      kbIds,
+      question,
+      model,
+      channelId,
+      mode: retrieval?.mode ?? "vector",
+      topK: retrieval?.topK ?? 5,
+      keywordWeight: retrieval?.keywordWeight ?? 0.3,
+    }),
 
   /** 列出某知识库下的全部文档（含片段数与状态），按创建时间倒序 */
   documents: (kbId: string): Promise<KbDocument[]> =>
@@ -377,4 +403,34 @@ export const knowledgeApi = {
   /** 删除文档（级联删除其向量分块） */
   removeDocument: (docId: string): Promise<void> =>
     invoke<void>("delete_document", { docId }),
+
+  /** 导入来源（Git / URL / 本地目录）：写入来源记录并后台跑导入，立即返回该行 */
+  importSource: (kbId: string, input: ImportSourceInput): Promise<KbSource> =>
+    invoke<KbSource>("import_source", { kbId, input }),
+
+  /** 列出某知识库下的全部来源（含导入状态与进度） */
+  listSources: (kbId: string): Promise<KbSource[]> =>
+    invoke<KbSource[]>("list_sources", { kbId }),
+
+  /** 删除来源（级联删除其导入产生的文档与分块） */
+  deleteSource: (sourceId: string): Promise<void> =>
+    invoke<void>("delete_source", { id: sourceId }),
+
+  /** 检索调试：对知识库执行查询，返回 Top-K 最相似分块（含内容与相似度） */
+  retrieve: (kbId: string, query: string, topK?: number): Promise<RetrievalHit[]> =>
+    invoke<RetrievalHit[]>("retrieve_kb", { kbId, query, topK }),
+
+  /** 查询索引状态：文档数 / 分块数 / 已向量化数 / stale 数 / 是否完整 */
+  indexStatus: (kbId: string): Promise<IndexStatus> =>
+    invoke<IndexStatus>("get_index_status", { kbId }),
+
+  /** 重建索引：按知识库当前嵌入模型重新向量化全部分块，返回最新索引状态 */
+  reindex: (kbId: string): Promise<IndexStatus> =>
+    invoke<IndexStatus>("reindex_kb", { kbId }),
+};
+
+/** MCP 服务相关 API（独立 namespace：MCP 是数据面，不是 KB 内部命令） */
+export const mcpApi = {
+  /** 获取 MCP server 运行态：是否在监听 / 端点 URL / 工具数量 */
+  status: (): Promise<McpStatus> => invoke<McpStatus>("get_mcp_status"),
 };
