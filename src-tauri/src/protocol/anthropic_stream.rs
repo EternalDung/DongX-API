@@ -1,7 +1,7 @@
 //! OpenAI Chat Completions SSE -> Anthropic Messages SSE.
 //!
 //! This is the outbound half of the `/v1/messages` bridge. The inbound half
-//! (`anthropic_to_chat_request` in `server/handler.rs`) translates an Anthropic
+//! (`anthropic_to_openai` in `crate::protocol::anthropic`) translates an Anthropic
 //! request into a Chat request; the shared chat pipeline then runs exactly like
 //! `/v1/chat/completions` and yields a Chat SSE stream. This module turns those
 //! Chat `chat.completion.chunk` frames into the Anthropic Messages event

@@ -8,6 +8,8 @@
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
+pub mod channel_presets;
+
 // ============================================================
 // channels
 // ============================================================

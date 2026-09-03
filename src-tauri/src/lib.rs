@@ -3,24 +3,22 @@
 #![recursion_limit = "1024"]
 
 mod adapter;
-mod app_settings;
-mod channel_presets;
-mod responses_stream;
-mod messages_stream;
 mod commands;
 mod core;
 mod crypto;
 mod db;
 mod error;
 mod models;
+mod protocol;
 mod security;
 mod server;
+mod settings;
 mod tray;
 
 use std::sync::{Arc, Mutex, RwLock};
 use tauri::Manager;
 
-use crate::app_settings::AppSettings;
+use crate::settings::Settings;
 
 /// Application shared state (shared between Axum data plane and Tauri management plane)
 ///
@@ -36,7 +34,7 @@ pub struct AppState {
     pub rate_limiter: Arc<Mutex<security::rate_limit::RateLimiterState>>,
     /// 设置/规则缓存：启动与设置变更时重建，数据面热路径只读一次本地镜像，
     /// 消除每条请求 20+ 次 settings/rules 重复读库。
-    pub settings_cache: Arc<RwLock<AppSettings>>,
+    pub settings_cache: Arc<RwLock<Settings>>,
 }
 
 impl AppState {
@@ -49,7 +47,7 @@ impl AppState {
     ///
     /// 失败只告警不中断：缓存保持旧值，下次变更时重试（不会让设置保存失败）。
     pub async fn reload_settings_cache(&self) {
-        match AppSettings::load(&self.db).await {
+        match Settings::load(&self.db).await {
             Ok(next) => match self.settings_cache.write() {
                 Ok(mut g) => *g = next,
                 Err(_) => tracing::warn!("settings_cache 写锁中毒，缓存未刷新（下次变更时重试）"),
@@ -190,9 +188,9 @@ pub fn run() {
 
             // 初始化设置/规则缓存（启动即加载；运行期改设置由 update_settings 重建）。
             let settings_cache = Arc::new(RwLock::new(
-                tauri::async_runtime::block_on(AppSettings::load(&pool)).unwrap_or_else(|e| {
+                tauri::async_runtime::block_on(Settings::load(&pool)).unwrap_or_else(|e| {
                     tracing::warn!("设置缓存加载失败，使用保守默认: {}", e);
-                    AppSettings::conservative_default()
+                    Settings::conservative_default()
                 }),
             ));
 

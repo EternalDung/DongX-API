@@ -49,7 +49,7 @@ async fn bool_setting(pool: &SqlitePool, key: &str, default: bool) -> bool {
 ///
 /// 由 `load_security_context` 一次性加载，run_gate / scan_response / 流式增量审计
 /// 三处共用同一份镜像，避免各读一遍 settings/rules 产生分歧，也便于上层的
-/// 单请求内缓存（AppSettings.security）直接传入，跳过热路径上的重复读库。
+/// 单请求内缓存（Settings.security）直接传入，跳过热路径上的重复读库。
 #[derive(Debug, Clone)]
 pub struct SecurityContext {
     pub settings: SecuritySettings,

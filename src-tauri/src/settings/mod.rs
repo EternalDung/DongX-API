@@ -12,11 +12,11 @@ use crate::security::gate::SecurityContext;
 
 /// 进程级缓存的应用设置镜像。
 ///
-/// 启动与设置变更时由 [`AppSettings::load`] 重建；热路径上通过
+/// 启动与设置变更时由 [`Settings::load`] 重建；热路径上通过
 /// `AppState.settings_cache` 读取。所有字段均为热路径真正需要的子集
 /// （并非 settings 全量）。
 #[derive(Debug, Clone)]
-pub struct AppSettings {
+pub struct Settings {
     /// 是否记录原始请求/响应体（log_raw_body）。
     pub log_raw_body: bool,
     /// 请求失败自动换渠道重试开关（retry_enabled）。
@@ -27,14 +27,14 @@ pub struct AppSettings {
     pub security: SecurityContext,
 }
 
-impl AppSettings {
+impl Settings {
     /// 从数据库加载全部需要的设置与规则，构建缓存镜像。
-    pub async fn load(pool: &SqlitePool) -> Result<AppSettings, sqlx::Error> {
+    pub async fn load(pool: &SqlitePool) -> Result<Settings, sqlx::Error> {
         let log_raw_body = bool_setting(pool, "log_raw_body", false).await;
         let retry_enabled = bool_setting(pool, "retry_enabled", true).await;
         let retry_times = int_setting(pool, "retry_times", 3).await;
         let security = SecurityContext::load(pool).await?;
-        Ok(AppSettings {
+        Ok(Settings {
             log_raw_body,
             retry_enabled,
             retry_times,
@@ -45,8 +45,8 @@ impl AppSettings {
     /// 锁中毒等极端情况下无法读缓存时的保守默认（与 settings 缺省一致）。
     ///
     /// security 上下文为空（不扫描），效果等同 fail-open 放行，保证主流程不中断。
-    pub fn conservative_default() -> AppSettings {
-        AppSettings {
+    pub fn conservative_default() -> Settings {
+        Settings {
             log_raw_body: false,
             retry_enabled: true,
             retry_times: 3,

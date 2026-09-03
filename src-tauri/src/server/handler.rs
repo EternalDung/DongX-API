@@ -20,7 +20,8 @@ use crate::db::repository::{
 };
 use crate::security::{self, redact, SecurityAction, SecurityFinding, SecurityOutcome};
 use crate::server::auth;
-use crate::app_settings::AppSettings;
+use crate::settings::Settings;
+use crate::protocol::{anthropic_to_openai, openai_to_anthropic, openai_to_responses, responses_to_openai};
 use crate::AppState;
 
 /// Health check endpoint.
@@ -70,7 +71,7 @@ async fn run_chat_pipeline(
     // 注意：必须先把 guard 的结果取出来再 await。若直接在 `match state.settings_cache.read()`
     // 的 Err 分支里 await，guard 临时值会存活到整个 match 结束，跨 await 持有非 Send 的
     // 锁守卫会让 handler 的 future 失去 Send，axum 的 Handler 约束随之不满足。
-    let cached: Option<AppSettings> = match state.settings_cache.read() {
+    let cached: Option<Settings> = match state.settings_cache.read() {
         Ok(g) => Some(g.clone()),
         Err(_) => None,
     };
@@ -79,9 +80,9 @@ async fn run_chat_pipeline(
         None => {
             // 锁中毒（理论不可能）：降级即时读库，保证 fail-open 不丢功能。
             tracing::warn!("settings_cache 读锁中毒，降级即时读库");
-            AppSettings::load(&state.db)
+            Settings::load(&state.db)
                 .await
-                .unwrap_or_else(|_| AppSettings::conservative_default())
+                .unwrap_or_else(|_| Settings::conservative_default())
         }
     };
     // Read the "log raw request/response body" toggle (default off).
@@ -450,11 +451,11 @@ async fn run_chat_pipeline(
             // - chat / responses 模式：上游返回即 OpenAI / Responses 形态，直接落库；
             // - messages 模式：上游返回 OpenAI Chat 完成体，handler 随后会转成
             //   Anthropic Messages 形态回给客户端（见 `messages()` 的
-            //   `chat_completion_to_anthropic`）。此处先转成 Anthropic 形态再落库，
+            //   `openai_to_anthropic`）。此处先转成 Anthropic 形态再落库，
             //   否则日志响应仍是 OpenAI 结构，LogsPage 按 mode="messages" 用
             //   parseAnthropicResponse 解析会失败、回退原始 JSON 视图。
             let logged_resp_body = if mode == "messages" {
-                chat_completion_to_anthropic(&resp_body)
+                openai_to_anthropic(&resp_body)
             } else {
                 resp_body.clone()
             };
@@ -604,7 +605,7 @@ pub async fn responses(
     let is_stream = req.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
 
     // 2. Translate Responses `input` -> Chat `messages`.
-    let messages = responses_input_to_messages(&req);
+    let messages = responses_to_openai(&req);
 
     // 3. Build the Chat request body, forwarding common sampler params.
     let mut chat_body = json!({
@@ -661,7 +662,7 @@ pub async fn responses(
             // Non-JSON 200 — forward as-is rather than guessing.
             Err(_) => return (parts.status, bytes).into_response(),
         };
-        let resp_json = chat_completion_to_responses(&cc);
+        let resp_json = openai_to_responses(&cc);
         return (StatusCode::OK, Json(resp_json)).into_response();
     }
 
@@ -709,7 +710,7 @@ pub async fn messages(
     let is_stream = req.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
 
     // 2. Translate Anthropic `system`/`messages`/`max_tokens` -> Chat `messages`.
-    let chat_body = anthropic_to_chat_request(&req);
+    let chat_body = anthropic_to_openai(&req);
     let chat_bytes = match serde_json::to_vec(&chat_body) {
         Ok(b) => b,
         Err(e) => {
@@ -765,7 +766,7 @@ pub async fn messages(
             // Non-JSON 200 — forward as-is rather than guessing.
             Err(_) => return (parts.status, bytes).into_response(),
         };
-        let anthropic = chat_completion_to_anthropic(&cc);
+        let anthropic = openai_to_anthropic(&cc);
         return (StatusCode::OK, Json(anthropic)).into_response();
     }
 
@@ -774,251 +775,6 @@ pub async fn messages(
     //     AND wrote the request log (with the full Anthropic-shaped body). Pass
     //     it through unchanged.
     chat_resp
-}
-
-/// Convert an Anthropic Messages request into an OpenAI Chat request.
-///
-/// Handles `system` (string or `[{type:"text",text}]` blocks), `messages`
-/// (string or `[{type:"text",text}]` blocks; tool_result text is extracted
-/// best-effort), and forwards common sampler params (`temperature`, `top_p`,
-/// `max_tokens`, `stop`, `top_k`, `seed`). `max_tokens` is `required` by
-/// Anthropic and maps directly onto the same-named Chat field.
-fn anthropic_to_chat_request(req: &serde_json::Value) -> serde_json::Value {
-    let mut messages: Vec<serde_json::Value> = Vec::new();
-
-    // system -> Chat system message
-    if let Some(sys) = req.get("system") {
-        let text = match sys {
-            serde_json::Value::String(s) => serde_json::Value::String(s.clone()),
-            serde_json::Value::Array(arr) => blocks_to_text(arr),
-            _ => serde_json::Value::Null,
-        };
-        if let serde_json::Value::String(t) = &text {
-            if !t.is_empty() {
-                messages.push(json!({ "role": "system", "content": t }));
-            }
-        }
-    }
-
-    if let Some(msgs) = req.get("messages").and_then(|v| v.as_array()) {
-        for m in msgs {
-            let role = m.get("role").and_then(|v| v.as_str()).unwrap_or("user");
-            let content = m.get("content");
-            let text = match content {
-                Some(serde_json::Value::String(s)) => serde_json::Value::String(s.clone()),
-                Some(serde_json::Value::Array(arr)) => {
-                    let t = blocks_to_text(arr);
-                    if let serde_json::Value::String(s) = &t {
-                        if s.is_empty() {
-                            serde_json::Value::Null
-                        } else {
-                            t
-                        }
-                    } else {
-                        serde_json::Value::Null
-                    }
-                }
-                _ => serde_json::Value::Null,
-            };
-            if text.is_null() {
-                // Fall back to passing the raw content through (e.g. tool_use
-                // blocks) — best effort; the upstream adapts what it can.
-                messages.push(json!({ "role": role, "content": content }));
-            } else {
-                messages.push(json!({ "role": role, "content": text }));
-            }
-        }
-    }
-
-    let mut chat = json!({
-        "model": req.get("model").cloned().unwrap_or(json!("")),
-        "messages": messages,
-        "stream": req.get("stream").cloned().unwrap_or(json!(false)),
-    });
-    for f in [
-        "temperature",
-        "top_p",
-        "top_k",
-        "max_tokens",
-        "stop",
-        "seed",
-    ] {
-        if let Some(v) = req.get(f) {
-            chat[f] = v.clone();
-        }
-    }
-    chat
-}
-
-/// Concatenate the text of `[{type:"text",text}, ...]` content blocks.
-fn blocks_to_text(blocks: &[serde_json::Value]) -> serde_json::Value {
-    let mut buf = String::new();
-    for b in blocks {
-        let t = b.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        match t {
-            "text" => {
-                if let Some(s) = b.get("text").and_then(|v| v.as_str()) {
-                    buf.push_str(s);
-                }
-            }
-            "tool_result" => {
-                if let Some(c) = b.get("content").and_then(|v| v.as_str()) {
-                    buf.push_str(c);
-                }
-            }
-            _ => {}
-        }
-    }
-    serde_json::Value::String(buf)
-}
-
-/// Convert an OpenAI Chat completion into the Anthropic Messages shape.
-fn chat_completion_to_anthropic(cc: &serde_json::Value) -> serde_json::Value {
-    let id = cc.get("id").and_then(|v| v.as_str()).unwrap_or("msg_unknown");
-    // OpenAI ids look like "chatcmpl-xxx"; Anthropic message ids are "msg_...".
-    let anthropic_id = if let Some(core) = id.strip_prefix("chatcmpl-") {
-        format!("msg_{}", core)
-    } else {
-        id.to_string()
-    };
-    let model = cc.get("model").and_then(|v| v.as_str()).unwrap_or("");
-    let created = cc.get("created").and_then(|v| v.as_i64()).unwrap_or(0);
-    let message = cc
-        .get("choices")
-        .and_then(|c| c.get(0))
-        .and_then(|c| c.get("message"));
-    let content_text = message
-        .and_then(|m| m.get("content"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let reasoning = message
-        .and_then(|m| m.get("reasoning_content"))
-        .and_then(|v| v.as_str());
-
-    let mut content_blocks: Vec<serde_json::Value> = Vec::new();
-    if let Some(r) = reasoning {
-        if !r.is_empty() {
-            content_blocks.push(json!({ "type": "thinking", "thinking": r }));
-        }
-    }
-    content_blocks.push(json!({ "type": "text", "text": content_text }));
-
-    let usage = cc.get("usage");
-    let (in_t, out_t) = match usage {
-        Some(u) => (
-            u.get("prompt_tokens").and_then(|v| v.as_i64()).unwrap_or(0),
-            u.get("completion_tokens").and_then(|v| v.as_i64()).unwrap_or(0),
-        ),
-        None => (0, 0),
-    };
-
-    json!({
-        "id": anthropic_id,
-        "type": "message",
-        "role": "assistant",
-        "model": model,
-        "created_at": created,
-        "content": content_blocks,
-        "stop_reason": "end_turn",
-        "stop_sequence": null,
-        "usage": { "input_tokens": in_t, "output_tokens": out_t },
-    })
-}
-
-/// Convert a Responses `input` (plus optional top-level `instructions`) into
-/// OpenAI Chat `messages`.
-fn responses_input_to_messages(req: &serde_json::Value) -> Vec<serde_json::Value> {
-    let mut messages = Vec::new();
-    if let Some(instr) = req.get("instructions").and_then(|v| v.as_str()) {
-        if !instr.is_empty() {
-            messages.push(json!({ "role": "system", "content": instr }));
-        }
-    }
-    if let Some(input) = req.get("input") {
-        match input {
-            serde_json::Value::String(s) => {
-                messages.push(json!({ "role": "user", "content": s }));
-            }
-            serde_json::Value::Array(items) => {
-                for item in items {
-                    let role = item
-                        .get("role")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("user");
-                    let text = match item.get("content") {
-                        Some(serde_json::Value::String(s)) => s.clone(),
-                        Some(serde_json::Value::Array(parts)) => {
-                            let mut buf = String::new();
-                            for p in parts {
-                                if let Some(t) = p.get("text").and_then(|v| v.as_str()) {
-                                    buf.push_str(t);
-                                }
-                            }
-                            buf
-                        }
-                        _ => String::new(),
-                    };
-                    messages.push(json!({ "role": role, "content": text }));
-                }
-            }
-            _ => {}
-        }
-    }
-    messages
-}
-
-/// Convert an OpenAI Chat completion into the Responses API shape.
-fn chat_completion_to_responses(cc: &serde_json::Value) -> serde_json::Value {
-    let model = cc.get("model").and_then(|v| v.as_str()).unwrap_or("");
-    let created = cc.get("created").and_then(|v| v.as_i64()).unwrap_or(0);
-    let id = cc.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
-    let id_core = id.trim_start_matches("chatcmpl-");
-    let choice = cc.get("choices").and_then(|c| c.get(0));
-    let message = choice.and_then(|c| c.get("message"));
-    let content_text = message
-        .and_then(|m| m.get("content"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let reasoning = message
-        .and_then(|m| m.get("reasoning_content"))
-        .and_then(|v| v.as_str());
-    let mut content_items: Vec<serde_json::Value> = Vec::new();
-    if let Some(r) = reasoning {
-        if !r.is_empty() {
-            content_items.push(json!({ "type": "reasoning", "summary": [r] }));
-        }
-    }
-    content_items.push(json!({ "type": "output_text", "text": content_text }));
-    let usage = cc.get("usage");
-    let (in_t, out_t, tot_t) = match usage {
-        Some(u) => (
-            u.get("prompt_tokens").and_then(|v| v.as_i64()).unwrap_or(0),
-            u.get("completion_tokens").and_then(|v| v.as_i64()).unwrap_or(0),
-            u.get("total_tokens").and_then(|v| v.as_i64()).unwrap_or(0),
-        ),
-        None => (0, 0, 0),
-    };
-    json!({
-        "id": format!("resp_{}", id_core),
-        "object": "response",
-        "created_at": created,
-        "model": model,
-        "status": "completed",
-        "output": [
-            {
-                "type": "message",
-                "id": format!("msg_{}", id_core),
-                "role": "assistant",
-                "status": "completed",
-                "content": content_items,
-            }
-        ],
-        "usage": {
-            "input_tokens": in_t,
-            "output_tokens": out_t,
-            "total_tokens": tot_t,
-        }
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1403,7 +1159,7 @@ fn build_stream_response(
             .settings_cache
             .read()
             .map(|g| g.clone())
-            .unwrap_or_else(|_| AppSettings::conservative_default());
+            .unwrap_or_else(|_| Settings::conservative_default());
         // 沿用原 (settings, builtin, custom) 元组形态，下游 scan_text_chunk 调用不变。
         // 缓存读取失败已降级为 conservative_default，故恒为 Some（不会失败）。
         let scan_ctx = Some((
@@ -1680,7 +1436,7 @@ fn build_responses_stream_response(
     use futures_util::StreamExt;
     use tokio::sync::mpsc;
 
-    let response_id = crate::responses_stream::new_response_id();
+    let response_id = crate::protocol::responses_stream::new_response_id();
     let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(64);
     // Accumulate the Responses-shaped events so the request log can record the
     // full response body (only when `log_raw_body` is enabled).
@@ -1688,11 +1444,11 @@ fn build_responses_stream_response(
 
     tokio::spawn(async move {
         let mut data_stream = body.into_data_stream();
-        let mut rs_state = crate::responses_stream::ResponsesStreamState::default();
+        let mut rs_state = crate::protocol::responses_stream::ResponsesStreamState::default();
         let mut acc = crate::adapter::StreamUsage::default();
 
         // Opening events must precede any delta.
-        let created = crate::responses_stream::created_events(&response_id, &model);
+        let created = crate::protocol::responses_stream::created_events(&response_id, &model);
         if log_raw_body {
             response_body_acc.push_str(&created);
         }
@@ -1712,7 +1468,7 @@ fn build_responses_stream_response(
             .settings_cache
             .read()
             .map(|g| g.clone())
-            .unwrap_or_else(|_| AppSettings::conservative_default());
+            .unwrap_or_else(|_| Settings::conservative_default());
         // 沿用原 (settings, builtin, custom) 元组形态，下游 scan_text_chunk 调用不变。
         // 缓存读取失败已降级为 conservative_default，故恒为 Some（不会失败）。
         let scan_ctx = Some((
@@ -1759,7 +1515,7 @@ fn build_responses_stream_response(
                     }
                 }
             }
-            for ev in crate::responses_stream::convert_chunk(&text, &response_id, &mut rs_state) {
+            for ev in crate::protocol::responses_stream::convert_chunk(&text, &response_id, &mut rs_state) {
                 if log_raw_body {
                     response_body_acc.push_str(&ev);
                 }
@@ -1768,7 +1524,7 @@ fn build_responses_stream_response(
         }
 
         if !had_error {
-            for ev in crate::responses_stream::completed_events(
+            for ev in crate::protocol::responses_stream::completed_events(
                 &response_id,
                 &model,
                 &mut rs_state,
@@ -1855,7 +1611,7 @@ fn build_responses_stream_response(
 /// Build the Anthropic Messages SSE `Response` for `/v1/messages` streaming.
 ///
 /// The upstream (normalized to OpenAI Chat SSE by the shared pipeline) is fed
-/// through a converter (`crate::messages_stream`) that turns each Chat
+/// through a converter (`crate::protocol::anthropic_stream`) that turns each Chat
 /// `chat.completion.chunk` frame into the Anthropic Messages event stream
 /// (message_start -> content_block_start -> content_block_delta ->
 /// content_block_stop -> message_delta -> message_stop). Like
@@ -1890,7 +1646,7 @@ fn build_messages_stream_response(
 
     tokio::spawn(async move {
         let mut data_stream = body.into_data_stream();
-        let mut st = crate::messages_stream::AnthropicStreamState::new(model.clone(), message_id);
+        let mut st = crate::protocol::anthropic_stream::AnthropicStreamState::new(model.clone(), message_id);
         let mut acc = crate::adapter::StreamUsage::default();
         let mut had_error = false;
 
@@ -1900,7 +1656,7 @@ fn build_messages_stream_response(
             .settings_cache
             .read()
             .map(|g| g.clone())
-            .unwrap_or_else(|_| AppSettings::conservative_default());
+            .unwrap_or_else(|_| Settings::conservative_default());
         // 沿用原 (settings, builtin, custom) 元组形态，下游 scan_text_chunk 调用不变。
         // 缓存读取失败已降级为 conservative_default，故恒为 Some（不会失败）。
         let scan_ctx = Some((

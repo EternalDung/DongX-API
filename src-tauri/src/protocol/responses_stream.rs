@@ -1,7 +1,7 @@
 //! Streaming converter: OpenAI Chat Completions SSE -> OpenAI Responses SSE.
 //!
 //! This is the outbound half of the Responses bridge. The inbound half
-//! (`responses_input_to_messages` in `server/handler.rs`) translates a
+//! (`responses_to_openai` in `crate::protocol::responses`) translates a
 //! Responses `input` into Chat `messages`; the shared chat pipeline then runs
 //! exactly like `/v1/chat/completions` and yields a Chat SSE stream. This
 //! module turns those Chat `chat.completion.chunk` frames into the Responses

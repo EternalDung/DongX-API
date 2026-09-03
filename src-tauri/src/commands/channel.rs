@@ -317,6 +317,6 @@ pub async fn list_provider_models(
 /// never hard-codes base URLs, model suggestions, or native endpoints.
 #[tauri::command]
 pub async fn list_provider_presets(
-) -> AppResult<Vec<crate::channel_presets::ProtocolPresetGroup>> {
-    Ok(crate::channel_presets::groups_for_protocols())
+) -> AppResult<Vec<crate::models::channel_presets::ProtocolPresetGroup>> {
+    Ok(crate::models::channel_presets::groups_for_protocols())
 }
