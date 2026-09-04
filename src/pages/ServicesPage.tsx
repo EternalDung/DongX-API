@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Plus, Trash2, BookOpen, RefreshCw, AlertTriangle } from "lucide-react";
+import { Plus, Trash2, BookOpen, RefreshCw, AlertTriangle, Copy, Check, Terminal, Layers, Wifi, Server, Code2 } from "lucide-react";
 import {
   Tabs,
   TabsContent,
@@ -16,6 +16,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/components/ui/toast";
+import { CodeBlock } from "@/components/CodeBlock";
 import {
   Dialog,
   DialogContent,
@@ -25,8 +26,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
-import { knowledgeApi } from "@/lib/api";
-import type { KnowledgeBase, KnowledgeBaseInput } from "@/types";
+import { knowledgeApi, mcpApi } from "@/lib/api";
+import type { KnowledgeBase, KnowledgeBaseInput, McpStatus } from "@/types";
 
 /** 服务分类标签（服务页右上角切换）。 */
 const TABS = [
@@ -212,6 +213,278 @@ function Placeholder({ name }: { name: string }) {
 // ---------------------------------------------------------------------------
 // 页面
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// MCP 服务 tab：运行态 + 端点 + 调用示例 + 工具清单
+// 信息架构参考 waliapi 服务页 MCP tab，但端点与工具以 DongX 真实实现为准：
+// 端点与网关同源（默认 http://127.0.0.1:9842/mcp），仅有 POST /mcp 与
+// GET /mcp/tools（调试），无独立 SSE 端口；工具为 5 个。
+// ---------------------------------------------------------------------------
+
+function McpTab({ kbs }: { kbs: KnowledgeBase[] }) {
+  const [status, setStatus] = useState<McpStatus | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [conn, setConn] = useState<{ state: "idle" | "testing" | "ok" | "err"; msg?: string; n?: number }>({ state: "idle" });
+
+  useEffect(() => {
+    let alive = true;
+    mcpApi
+      .status()
+      .then((s) => alive && setStatus(s))
+      .catch(() => alive && setStatus(null))
+      .finally(() => alive && setLoading(false));
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const endpoint = status?.endpoint ?? "http://127.0.0.1:9842/mcp";
+  const running = status?.running ?? false;
+  const exposedCount = kbs.filter((k) => k.mcp_exposed === 1 && k.status === 1).length;
+  const toolCount = status?.toolsCount ?? 0;
+
+  // 统一复制：用 key 区分多个复制源，各自短暂显示 ✓。
+  const copy = (key: string, text: string) => {
+    navigator.clipboard?.writeText(text);
+    setCopiedKey(key);
+    setTimeout(() => setCopiedKey((k) => (k === key ? null : k)), 2000);
+  };
+
+  // 向 MCP 端点 POST tools/list，验证端点真实可达且能返回工具清单。
+  // 网关已开 CorsLayer::permissive()，前端跨域 fetch 不会被拦。
+  const handleTest = async () => {
+    setConn({ state: "testing" });
+    try {
+      const resp = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+      });
+      if (!resp.ok) {
+        setConn({ state: "err", msg: `HTTP ${resp.status}` });
+        return;
+      }
+      const data = await resp.json();
+      if (Array.isArray(data?.result?.tools)) {
+        setConn({ state: "ok", n: data.result.tools.length });
+      } else if (data?.error) {
+        setConn({ state: "err", msg: data.error.message ?? "未知错误" });
+      } else {
+        setConn({ state: "err", msg: "响应格式异常" });
+      }
+    } catch (e) {
+      setConn({ state: "err", msg: e instanceof Error ? e.message : String(e) });
+    }
+  };
+
+  const tools: { name: string; desc: string; required: string[] }[] = [
+    { name: "search_knowledge_base", desc: "语义检索 RAG，返回匹配文本片段和相似度评分", required: ["kb_id", "query"] },
+    { name: "list_knowledge_bases", desc: "列出所有已暴露的 RAG（ID / 名称 / 文档数）", required: [] },
+    { name: "ask_knowledge_base", desc: "RAG 问答，基于检索内容生成回答并返回来源引用", required: ["kb_id", "question"] },
+    { name: "read_document", desc: "读取指定文档的完整内容（含分片正文）", required: ["kb_id", "doc_id"] },
+    { name: "get_knowledge_base_stats", desc: "获取 RAG 统计信息（文档数 / 切片数 / token 数）", required: ["kb_id"] },
+  ];
+
+  // 调用示例的三段 curl（同一份字符串既用于展示也用于复制）。
+  const exInit = `curl -X POST ${endpoint} \\
+  -H "Content-Type: application/json" \\
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"demo","version":"1.0"}}}'`;
+  const exList = `curl -X POST ${endpoint} \\
+  -H "Content-Type: application/json" \\
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'`;
+  const exSearch = `curl -X POST ${endpoint} \\
+  -H "Content-Type: application/json" \\
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_knowledge_base","arguments":{"kb_id":"<KB_ID>","query":"你的问题"}}}'`;
+
+  return (
+    <div className="space-y-6">
+      {/* 头部说明 */}
+      <div>
+        <h2 className="text-lg font-semibold tracking-tight">MCP 服务</h2>
+        <p className="mt-1 text-sm text-muted-foreground">
+          通过 Model Context Protocol 把本地 RAG 暴露给 AI Agent / MCP 客户端（如 Claude Desktop、Cursor）。
+          端点与网关同源，无需单独配置端口，开启知识库的「MCP 暴露」后即可被检索。
+        </p>
+      </div>
+
+      {/* 状态 + 概览 */}
+      <div className="grid gap-4 sm:grid-cols-2">
+        <Card>
+          <CardContent className="space-y-3 p-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <span
+                  className={cn(
+                    "flex h-9 w-9 items-center justify-center rounded-lg",
+                    running ? "bg-emerald-500/15 text-emerald-600" : "bg-rose-500/15 text-rose-600",
+                  )}
+                >
+                  <Wifi size={18} />
+                </span>
+                <div>
+                  <p className="text-sm font-medium">MCP 端点</p>
+                  <p className={cn("text-xs", running ? "text-emerald-600" : "text-rose-500")}>
+                    {loading ? "检测中…" : running ? "运行中" : "已停止"}
+                  </p>
+                </div>
+              </div>
+              <div className="flex flex-col items-end gap-2">
+                <span
+                  className={cn(
+                    "rounded-full px-2 py-0.5 text-xs font-medium",
+                    running ? "bg-emerald-500/15 text-emerald-600" : "bg-rose-500/15 text-rose-500",
+                  )}
+                >
+                  {running ? "就绪" : "离线"}
+                </span>
+                <Button variant="outline" size="sm" onClick={handleTest} disabled={conn.state === "testing"}>
+                  {conn.state === "testing" ? "测试中…" : "测试连接"}
+                </Button>
+              </div>
+            </div>
+            {conn.state !== "idle" && (
+              <p
+                className={cn(
+                  "rounded-lg px-3 py-2 text-xs",
+                  conn.state === "ok"
+                    ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-400"
+                    : conn.state === "err"
+                      ? "bg-rose-50 text-rose-700 dark:bg-rose-500/10 dark:text-rose-400"
+                      : "bg-muted text-muted-foreground",
+                )}
+              >
+                {conn.state === "ok"
+                  ? `连接成功，返回 ${conn.n ?? 0} 个工具`
+                  : conn.state === "err"
+                    ? `连接失败：${conn.msg}`
+                    : "正在测试连接…"}
+              </p>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardContent className="flex items-center justify-between p-4">
+            <div className="flex items-center gap-3">
+              <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-violet-500/15 text-violet-600">
+                <Layers size={18} />
+              </span>
+              <div>
+                <p className="text-sm font-medium">已暴露知识库</p>
+                <p className="text-xs text-muted-foreground">可在 MCP 中被检索的启用知识库</p>
+              </div>
+            </div>
+            <span className="text-2xl font-semibold tabular-nums">{exposedCount}</span>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* 端点 */}
+      <Card>
+        <CardContent className="space-y-3 p-5">
+          <div className="flex items-center gap-2">
+            <Terminal size={18} className="text-foreground" />
+            <h3 className="text-sm font-semibold">MCP 端点</h3>
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-medium text-muted-foreground">
+              JSON-RPC over HTTP（仅 POST；浏览器直接访问会返回 405）
+            </label>
+            <div className="flex items-center gap-2">
+              <code className="flex-1 truncate rounded-lg border bg-muted px-3 py-2 font-mono text-xs text-foreground">
+                {endpoint}
+              </code>
+              <Button variant="outline" size="icon" onClick={() => copy("endpoint", endpoint)} title="复制端点">
+                {copiedKey === "endpoint" ? <Check size={14} className="text-emerald-500" /> : <Copy size={14} />}
+              </Button>
+            </div>
+          </div>
+          <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:bg-amber-500/10 dark:text-amber-400">
+            ⚠️ 该端点仅接受 JSON-RPC POST 请求。可用{" "}
+            <code className="rounded bg-amber-100 px-1 py-0.5 font-mono dark:bg-amber-500/20">
+              GET {endpoint.replace(/\/$/, "")}/tools
+            </code>{" "}
+            调试查看工具清单。
+          </p>
+        </CardContent>
+      </Card>
+
+      {/* 调用示例 */}
+      <Card>
+        <CardContent className="space-y-4 p-5">
+          <div className="flex items-center gap-2">
+            <Code2 size={18} className="text-foreground" />
+            <h3 className="text-sm font-semibold">调用示例（curl）</h3>
+          </div>
+
+          <div>
+            <div className="mb-1 flex items-center justify-between">
+              <label className="text-xs font-medium text-muted-foreground">1 · 初始化握手</label>
+              <Button variant="outline" size="sm" className="h-7 gap-1 px-2 text-xs" onClick={() => copy("ex1", exInit)}>
+                {copiedKey === "ex1" ? <Check size={13} className="text-emerald-500" /> : <Copy size={13} />}
+                <span>复制</span>
+              </Button>
+            </div>
+            <CodeBlock code={exInit} lang="bash" />
+          </div>
+
+          <div>
+            <div className="mb-1 flex items-center justify-between">
+              <label className="text-xs font-medium text-muted-foreground">2 · 列出工具</label>
+              <Button variant="outline" size="sm" className="h-7 gap-1 px-2 text-xs" onClick={() => copy("ex2", exList)}>
+                {copiedKey === "ex2" ? <Check size={13} className="text-emerald-500" /> : <Copy size={13} />}
+                <span>复制</span>
+              </Button>
+            </div>
+            <CodeBlock code={exList} lang="bash" />
+          </div>
+
+          <div>
+            <div className="mb-1 flex items-center justify-between">
+              <label className="text-xs font-medium text-muted-foreground">3 · 语义检索</label>
+              <Button variant="outline" size="sm" className="h-7 gap-1 px-2 text-xs" onClick={() => copy("ex3", exSearch)}>
+                {copiedKey === "ex3" ? <Check size={13} className="text-emerald-500" /> : <Copy size={13} />}
+                <span>复制</span>
+              </Button>
+            </div>
+            <CodeBlock code={exSearch} lang="bash" />
+          </div>
+
+          <p className="text-xs text-muted-foreground">
+            所有工具遵循 MCP JSON-RPC 2.0 规范，仅接受 POST。跨知识库操作会强制校验「MCP 暴露」开关——未暴露的 KB 不会被检索命中。
+          </p>
+        </CardContent>
+      </Card>
+
+      {/* 工具清单 */}
+      <Card>
+        <CardContent className="space-y-2 p-5">
+          <div className="mb-2 flex items-center gap-2">
+            <Server size={18} className="text-foreground" />
+            <h3 className="text-sm font-semibold">可用工具</h3>
+            <span className="ml-auto text-xs text-muted-foreground">
+              {conn.state === "ok" ? (conn.n ?? toolCount) : toolCount} 个工具
+            </span>
+          </div>
+          {tools.map((t) => (
+            <div key={t.name} className="flex items-start gap-3 rounded-lg bg-muted px-3 py-2.5">
+              <code className="shrink-0 rounded bg-background px-1.5 py-0.5 font-mono text-[11px] font-medium text-foreground">
+                {t.name}
+              </code>
+              <div className="min-w-0">
+                <p className="text-xs text-muted-foreground">{t.desc}</p>
+                {t.required.length > 0 && (
+                  <p className="mt-0.5 text-[11px] text-muted-foreground/70">必填：{t.required.join("、")}</p>
+                )}
+              </div>
+            </div>
+          ))}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
 
 export function ServicesPage() {
   const navigate = useNavigate();
@@ -421,7 +694,7 @@ export function ServicesPage() {
           <Placeholder name="Wiki" />
         </TabsContent>
         <TabsContent value="mcp" className="mt-6">
-          <Placeholder name="MCP" />
+          <McpTab kbs={kbs} />
         </TabsContent>
         <TabsContent value="skill" className="mt-6">
           <Placeholder name="Skill" />

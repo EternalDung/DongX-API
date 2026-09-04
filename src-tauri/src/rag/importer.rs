@@ -284,9 +284,6 @@ async fn import_url(
     }
 
     let source_ref = url.clone();
-    if let Err(e) = delete_doc_by_ref(pool, kb_id, &source_ref).await {
-        tracing::warn!("删除旧文档失败（继续导入）: {}", e);
-    }
     // 复用 ingest_file 以便正确记录 source_type = "url"；命中重复则跳过但不报错。
     match ingest_file(pool, kb_id, &url, &text, "url", &source_ref).await {
         Ok(o) => {
@@ -381,10 +378,6 @@ async fn scan_and_ingest(
             .replace('\\', "/");
         let source_ref = format!("{}::{}", source_id, rel);
 
-        // 幂等重导：先删掉同一 source_ref 的旧文档再摄入
-        if let Err(e) = delete_doc_by_ref(pool, kb_id, &source_ref).await {
-            tracing::warn!("删除旧文档失败（继续摄入）: {}", e);
-        }
         match ingest_file(pool, kb_id, &rel, &text, source_type, &source_ref).await {
             Ok(o) if !o.duplicate => count += 1,
             Ok(_) => skipped += 1, // 命中内容去重
@@ -481,34 +474,6 @@ async fn ingest_file(
     .await
     .map_err(|e| e.to_string())?;
     Ok(IngestOutcome { duplicate: false })
-}
-
-/// 按 `source_ref` 删除文档及其分块（重导前清理旧版本）。
-async fn delete_doc_by_ref(
-    pool: &SqlitePool,
-    kb_id: &str,
-    source_ref: &str,
-) -> Result<(), String> {
-    let ids: Vec<String> = sqlx::query_scalar(
-        "SELECT id FROM kb_documents WHERE kb_id = ? AND source_ref = ?",
-    )
-    .bind(kb_id)
-    .bind(source_ref)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| e.to_string())?;
-    for id in ids {
-        crate::rag::store::purge_document_chunks(pool, &id)
-            .await
-            .map_err(|e| e.to_string())?;
-    }
-    sqlx::query("DELETE FROM kb_documents WHERE kb_id = ? AND source_ref = ?")
-        .bind(kb_id)
-        .bind(source_ref)
-        .execute(pool)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(())
 }
 
 /// 朴素 HTML 标签剥离（保留可见文本）。
