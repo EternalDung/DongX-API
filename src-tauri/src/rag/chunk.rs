@@ -109,9 +109,16 @@ pub fn split(content: &str, kind: FileKind, source_path: Option<&str>, config: &
                 split_text(content, config, &meta)
             }
         }
-        FileKind::Structured | FileKind::Plain => {
-            split_text(content, config, &base_meta)
+        FileKind::Structured(ext) => {
+            // 结构化文本不打语言标签就走不了前端高亮（language=null 时
+            // 回退 <pre> 纯文本），这里带上格式扩展名；切分策略不变。
+            let meta = ChunkMeta {
+                language: Some(ext),
+                ..base_meta
+            };
+            split_text(content, config, &meta)
         }
+        FileKind::Plain => split_text(content, config, &base_meta),
     }
 }
 
@@ -359,6 +366,22 @@ mod tests {
         let code = "fun main() { println(\"hi\") }";
         let chunks = split(code, FileKind::Code("kt".to_string()), Some("Main.kt"), &SplitConfig::default());
         assert!(!chunks.is_empty());
+        assert!(chunks.iter().all(|c| c.meta.symbol_name.is_none()));
+    }
+
+    #[test]
+    fn structured_html_carries_language_tag() {
+        // 结构化文本（html/json 等）也必须带 language 标签，否则落库为
+        // null，前端分片预览回退纯文本、无法高亮。切分仍是普通文本切分。
+        let html = "<html>\n<body>\n<p>hello</p>\n</body>\n</html>\n";
+        let chunks = split(
+            html,
+            crate::rag::parser::detect_kind_by_name("douban.html"),
+            None,
+            &SplitConfig::default(),
+        );
+        assert!(!chunks.is_empty());
+        assert!(chunks.iter().all(|c| c.meta.language.as_deref() == Some("html")));
         assert!(chunks.iter().all(|c| c.meta.symbol_name.is_none()));
     }
 

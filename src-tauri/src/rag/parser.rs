@@ -8,8 +8,10 @@ pub enum FileKind {
     /// 代码：按 AST 符号切分；参数为扩展名（如 "rs" / "py"），
     /// 由 `code_parser` 判断是否支持符号级切分，不支持则回退普通切分。
     Code(String),
-    /// 结构化文本（json / yaml / toml / xml / html / csv 等）
-    Structured,
+    /// 结构化文本（json / yaml / toml / xml / html / csv 等）；参数为格式
+    /// 扩展名，写入 chunk 元数据的 `language` 供前端 CodeBlock 高亮
+    /// （分块仍按普通文本切分，不做符号级切分）。
+    Structured(String),
     /// 纯文本 / 其它
     Plain,
 }
@@ -24,7 +26,7 @@ pub fn detect_kind_by_name(filename: &str) -> FileKind {
     match ext.as_str() {
         "md" | "markdown" => FileKind::Markdown,
         "json" | "yaml" | "yml" | "toml" | "xml" | "html" | "htm" | "csv" | "svg" => {
-            FileKind::Structured
+            FileKind::Structured(ext.clone())
         }
         "rs" | "py" | "ts" | "tsx" | "js" | "jsx" | "go" | "java" | "c" | "cpp" | "h" | "hpp"
         | "cc" | "cs" | "php" | "swift" | "kt" | "kts" | "rb" | "scala" | "dart" | "sh"
