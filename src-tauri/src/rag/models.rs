@@ -26,4 +26,32 @@ pub struct KnowledgeBaseRow {
     pub include_file_types: Option<String>,
     /// 单次向量化批大小（NULL=取引擎默认）。
     pub embedding_batch_size: Option<i64>,
+    /// 分块大小（字符数，0=引擎默认 1500）。
+    pub chunk_size: i64,
+    /// 分块重叠字符数（0=引擎默认 200）。
+    pub chunk_overlap: i64,
+}
+
+/// 块的语义元数据（类型感知分块的产物）。
+///
+/// 这些字段不参与 FTS5 索引（仅 `content` 被索引），纯存储用于溯源与引用展示。
+/// 普通文本块大多字段为 `None` / 0；代码块会带 `language` / `symbol_*` / 行范围；
+/// Markdown 块带 `heading`。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChunkMeta {
+    pub heading: Option<String>,
+    pub language: Option<String>,
+    pub symbol_name: Option<String>,
+    pub symbol_kind: Option<String>,
+    pub signature: Option<String>,
+    pub line_start: i64,
+    pub line_end: i64,
+    pub source_path: Option<String>,
+}
+
+/// 一个分块：内容 + 语义元数据。
+#[derive(Debug, Clone)]
+pub struct Chunk {
+    pub content: String,
+    pub meta: ChunkMeta,
 }

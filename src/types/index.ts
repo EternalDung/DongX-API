@@ -384,6 +384,10 @@ export interface KnowledgeBase {
   exclude_files: string | null;
   /** 摄入时仅包含的文件类型（逗号分隔，null=全部） */
   include_file_types: string | null;
+  /** 分块大小（字符数，0=引擎默认） */
+  chunk_size: number | null;
+  /** 分块重叠字符数（0=引擎默认） */
+  chunk_overlap: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -403,10 +407,21 @@ export interface KnowledgeBaseUpdate {
   status?: number;
   /** MCP 暴露开关：0=否 1=是 */
   mcp_exposed?: number;
+  /**
+   * 嵌入模型。不同模型的向量空间不兼容：改模型后旧分块立刻变 stale，
+   * 需调用 reindex 重建索引，否则向量/混合检索会静默返回错误结果。
+   */
+  embedding_model?: string;
+  /** 绑定的嵌入渠道（必填，须为已启用渠道）。换渠道通常也要换模型 */
+  embedding_channel_id?: string;
   embedding_batch_size?: number | null;
   exclude_dirs?: string | null;
   exclude_files?: string | null;
   include_file_types?: string | null;
+  /** 分块大小（字符数，0=引擎默认） */
+  chunk_size?: number | null;
+  /** 分块重叠字符数（0=引擎默认） */
+  chunk_overlap?: number | null;
 }
 
 /** 摄入文本结果 — 对应 Rust IngestResult */
@@ -415,6 +430,8 @@ export interface IngestResult {
   document_id: string;
   /** 分块数 */
   chunk_count: number;
+  /** 命中重复上传去重，未重复摄入 */
+  duplicate?: boolean;
 }
 
 /** 问答引用来源 — 对应 Rust Source */
@@ -450,6 +467,8 @@ export interface IndexStatus {
   embedded_count: number;
   /** 嵌入模型与知识库当前模型不一致的分块数（需重建索引） */
   stale_count: number;
+  /** 全部分块的 token 总数 */
+  total_tokens: number;
   /** 知识库当前绑定的嵌入模型（判定 stale 的基准） */
   embedding_model: string;
   /** 全部分块都已向量化 */
@@ -489,6 +508,10 @@ export interface KbDocument {
   /** 0=处理中 1=已就绪 2=失败 */
   status: number;
   error_message: string | null;
+  /** 原始文件字节数 */
+  file_size: number;
+  /** 该文档分块 token 总数 */
+  token_count: number;
   created_at: string;
   updated_at: string;
 }

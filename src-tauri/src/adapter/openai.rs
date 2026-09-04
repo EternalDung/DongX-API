@@ -100,7 +100,15 @@ impl Adaptor for OpenAIAdaptor {
             .await?;
 
         let status = resp.status().as_u16();
-        let body: serde_json::Value = resp.json().await?;
+        // Read the raw body once, then parse, so a non-JSON upstream response
+        // (proxy/HTML error page, or an undecoded compressed body) surfaces the
+        // real HTTP status + a snippet instead of an opaque
+        // "error decoding response body".
+        let text = resp.text().await?;
+        let body: serde_json::Value = serde_json::from_str(&text).map_err(|_| {
+            let snippet: String = text.chars().take(300).collect();
+            anyhow::anyhow!("上游返回非 JSON（HTTP {}）：{}", status, snippet)
+        })?;
         let usage = extract_usage(&body);
         Ok((status, body, usage))
     }

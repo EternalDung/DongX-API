@@ -373,8 +373,8 @@ export const knowledgeApi = {
     invoke<KnowledgeBase>("update_knowledge_base", { id: kbId, patch }),
 
   /** 摄入一段文本到知识库：分块 → 向量化 → 落库，返回文档 id 与分块数 */
-  ingest: (kbId: string, title: string, text: string): Promise<IngestResult> =>
-    invoke<IngestResult>("ingest_kb_text", { kbId, title, text }),
+  ingest: (kbId: string, title: string, text: string, fileSize: number): Promise<IngestResult> =>
+    invoke<IngestResult>("ingest_kb_text", { kbId, title, text, fileSize }),
 
   /** 在知识库范围内问答：检索相关分块 → 构造上下文 → 复用网关分发发起 chat。
    *  `channelId` 为空时走 dispatcher 自动加权 / 熔断分发；指定则锁定该渠道直接发。
@@ -402,7 +402,7 @@ export const knowledgeApi = {
 
   /** 删除文档（级联删除其向量分块） */
   removeDocument: (docId: string): Promise<void> =>
-    invoke<void>("delete_document", { docId }),
+    invoke<void>("delete_document", { id: docId }),
 
   /** 导入来源（Git / URL / 本地目录）：写入来源记录并后台跑导入，立即返回该行 */
   importSource: (kbId: string, input: ImportSourceInput): Promise<KbSource> =>

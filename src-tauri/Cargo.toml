@@ -41,7 +41,7 @@ tokio-stream = "0.1"                 # SSE 流式响应（proxy → client）
 # ============================================================
 # HTTP 客户端（转发请求到上游 LLM 供应商）
 # ============================================================
-reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"] }
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls", "gzip", "deflate", "brotli"] }
 futures-util = "0.3"                 # StreamExt（bytes_stream 转 SSE）
 bytes = "1"
 
@@ -70,6 +70,17 @@ sha2 = "0.10"                       # 安全审计证据哈希（取证链去重
 keyring = { version = "3", features = ["windows-native"] }
 rand = "0.8"                         # nonce 生成（与 aes-gcm 0.10 的 rand 0.8 对齐）
 base64 = "0.22"                      # 密文 Base64 编码存储
+
+# ============================================================
+# RAG 代码解析（类型感知分块：AST 符号感知）
+# ============================================================
+tree-sitter = "0.23"
+tree-sitter-rust = "0.23"
+tree-sitter-python = "0.23"
+tree-sitter-typescript = "0.23"
+tree-sitter-javascript = "0.23"
+tree-sitter-go = "0.23"
+tree-sitter-java = "0.23"
 
 # ============================================================
 # 工具

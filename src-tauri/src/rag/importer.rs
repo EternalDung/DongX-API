@@ -1,8 +1,8 @@
 //! 来源导入：把 Git 仓库 / 单个 URL / 本地目录 中的文本文件摄入到知识库。
 //!
-//! 设计对齐 waliapi 的 `importer.rs`，但贴合 DongX 现有引擎：
+//! 设计贴合 DongX 现有引擎：
 //! - 复用 `rag::ingest::ingest_text`（分块 → 嵌入 → 落库），不在本模块重复管线；
-//! - Git 直接 shell out 系统 `git`（与 waliapi 一致，零额外依赖；要求用户机装有 git）；
+//! - Git 直接 shell out 系统 `git`（零额外依赖；要求用户机装有 git）；
 //! - 目录遍历用 `tokio::fs` 自实现（不引入 walkdir）；
 //! - 一次导入是一个后台任务：命令层写 `kb_sources`(status='fetching') 后立即返回，
 //!   后台任务跑完再回写 `done` / `error` + file_count，前端轮询即可看到进度。
@@ -165,7 +165,7 @@ async fn import_git(
         .filter(|s| !s.is_empty())
         .ok_or_else(|| "Git 导入需要仓库地址".to_string())?;
 
-    // 把 access token 注入 https URL（与 waliapi 一致：https://<token>@host/...）
+    // 把 access token 注入 https URL（https://<token>@host/...）
     let mut clone_url = repo.clone();
     if let Some(t) = &r.token {
         let t = t.trim();
@@ -287,9 +287,14 @@ async fn import_url(
     if let Err(e) = delete_doc_by_ref(pool, kb_id, &source_ref).await {
         tracing::warn!("删除旧文档失败（继续导入）: {}", e);
     }
-    // 复用 ingest_file 以便正确记录 source_type = "url"
+    // 复用 ingest_file 以便正确记录 source_type = "url"；命中重复则跳过但不报错。
     match ingest_file(pool, kb_id, &url, &text, "url", &source_ref).await {
-        Ok(_) => Ok(1),
+        Ok(o) => {
+            if o.duplicate {
+                tracing::info!("URL 内容已存在，已跳过: {}", url);
+            }
+            Ok(1)
+        }
         Err(e) => Err(e),
     }
 }
@@ -360,6 +365,7 @@ async fn scan_and_ingest(
     collect_files(root, filters, &mut files).await?;
 
     let mut count = 0usize;
+    let mut skipped = 0usize;
     for p in files {
         let text = match tokio::fs::read_to_string(&p).await {
             Ok(t) => t,
@@ -380,11 +386,24 @@ async fn scan_and_ingest(
             tracing::warn!("删除旧文档失败（继续摄入）: {}", e);
         }
         match ingest_file(pool, kb_id, &rel, &text, source_type, &source_ref).await {
-            Ok(_) => count += 1,
+            Ok(o) if !o.duplicate => count += 1,
+            Ok(_) => skipped += 1, // 命中内容去重
             Err(e) => tracing::warn!("摄入文件失败 {}: {}", rel, e),
         }
     }
+    if skipped > 0 {
+        tracing::info!(
+            "批量导入完成（source={}）：处理 {} 个，跳过 {} 个重复",
+            source_id, count, skipped
+        );
+    }
     Ok(count)
+}
+
+/// 摄入单个文件的返回（用于内部去重信号）。
+pub(crate) struct IngestOutcome {
+    /// 是否命中内容去重（true=跳过，未重复摄入）。
+    pub duplicate: bool,
 }
 
 /// 摄入单个文件：分块 → 向量化 → 落库，并写入正确的 `source_type`
@@ -396,33 +415,72 @@ async fn ingest_file(
     text: &str,
     source_type: &str,
     source_ref: &str,
-) -> Result<(), String> {
+) -> Result<IngestOutcome, String> {
     if text.trim().is_empty() {
-        return Ok(());
+        return Ok(IngestOutcome { duplicate: false });
     }
+
+    // 去重：先按内容哈希查重，命中已就绪文档则直接复用，避免对同一内容
+    // 重复分块+向量化。覆盖 URL / 本地目录 / Git 三条摄入路径，与单文件上传走同一查询。
+    let hash = crate::rag::store::content_hash(text);
+    if crate::rag::store::find_document_by_hash(pool, kb_id, &hash)
+        .await
+        .map_err(|e| e.to_string())?
+        .is_some()
+    {
+        tracing::info!(
+            "内容哈希命中已就绪文档，跳过摄入（kb={}, source_ref={}）",
+            kb_id, source_ref
+        );
+        return Ok(IngestOutcome { duplicate: true });
+    }
+
     let kb = crate::rag::store::get_kb(pool, kb_id)
         .await
         .map_err(|e| e.to_string())?;
-    let chunks = crate::rag::chunk::chunk_text(text, 1500, 200);
+    // 按文件名判定类型（含扩展名），分块时记录来源路径与语言/符号元数据
+    let kind = crate::rag::parser::detect_kind_by_name(title);
+    let config = crate::rag::chunk::SplitConfig::from_kb(kb.chunk_size, kb.chunk_overlap);
+    let chunks = crate::rag::chunk::split(text, kind, Some(title), &config);
     if chunks.is_empty() {
-        return Ok(());
+        return Ok(IngestOutcome { duplicate: false });
     }
-    let vecs = crate::rag::embed::embed_texts(
+    let contents: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
+    let (vecs, token_count) = crate::rag::embed::embed_texts(
         pool,
         &kb.embedding_channel_id,
         &kb.embedding_model,
-        chunks.clone(),
+        contents,
     )
     .await
     .map_err(|e| e.to_string())?;
     if vecs.len() != chunks.len() {
         return Err("嵌入返回的向量数量与分块数量不一致".to_string());
     }
-    let paired: Vec<(String, Vec<f32>)> = chunks.into_iter().zip(vecs).collect();
-    crate::rag::store::insert_document(pool, kb_id, title, source_type, source_ref, &kb.embedding_model, paired)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(())
+    let inputs: Vec<crate::rag::store::ChunkInput> = chunks
+        .into_iter()
+        .zip(vecs)
+        .map(|(c, e)| crate::rag::store::ChunkInput {
+            content: c.content,
+            embedding: e,
+            meta: c.meta,
+        })
+        .collect();
+    crate::rag::store::insert_document(
+        pool,
+        kb_id,
+        title,
+        source_type,
+        source_ref,
+        &kb.embedding_model,
+        text.len() as i64,
+        token_count,
+        &hash,
+        inputs,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(IngestOutcome { duplicate: false })
 }
 
 /// 按 `source_ref` 删除文档及其分块（重导前清理旧版本）。
@@ -440,9 +498,7 @@ async fn delete_doc_by_ref(
     .await
     .map_err(|e| e.to_string())?;
     for id in ids {
-        sqlx::query("DELETE FROM kb_chunks WHERE doc_id = ?")
-            .bind(&id)
-            .execute(pool)
+        crate::rag::store::purge_document_chunks(pool, &id)
             .await
             .map_err(|e| e.to_string())?;
     }

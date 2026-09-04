@@ -10,7 +10,10 @@ use crate::db::repository::channels;
 use crate::error::AppError;
 use crate::models::ChannelRow;
 
-/// 对一批文本批量嵌入，返回与输入等长的向量列表。
+/// 对一批文本批量嵌入，返回与输入等长的向量列表，以及该批次的总 token 数。
+///
+/// 返回的 token 数取自 OpenAI 风格响应的 `usage.prompt_tokens`
+/// （整批合计），用于文档级 token 统计；响应缺 `usage` 时回退 0。
 ///
 /// - `channel_id`：知识库绑定的嵌入渠道（已校验存在）
 /// - `model`：嵌入模型名（如 `text-embedding-3-small`）
@@ -20,9 +23,9 @@ pub async fn embed_texts(
     channel_id: &str,
     model: &str,
     inputs: Vec<String>,
-) -> Result<Vec<Vec<f32>>, AppError> {
+) -> Result<(Vec<Vec<f32>>, i64), AppError> {
     if inputs.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), 0));
     }
 
     let row: ChannelRow = channels::get_by_id(pool, channel_id)
@@ -78,5 +81,13 @@ pub async fn embed_texts(
         let vec: Vec<f32> = emb.iter().filter_map(|v| v.as_f64().map(|f| f as f32)).collect();
         out.push(vec);
     }
-    Ok(out)
+
+    // 整批 token 数：OpenAI 风格 `usage.prompt_tokens`（缺失则 0）。
+    let total_tokens: i64 = resp
+        .get("usage")
+        .and_then(|u| u.get("prompt_tokens").or_else(|| u.get("total_tokens")))
+        .and_then(|t| t.as_i64())
+        .unwrap_or(0);
+
+    Ok((out, total_tokens))
 }

@@ -1,8 +1,9 @@
-//! 检索：支持三种模式 —— 向量（余弦）、关键词（BM25）、混合（归一化加权融合）。
+//! 检索：支持三种模式 —— 向量（余弦）、关键词（FTS5 trigram）、混合（归一化加权融合）。
 //!
 //! - 向量：对查询嵌入向量在指定知识库分块中求 Top-K 余弦相似度。
-//! - 关键词：BM25 召回，零外部依赖；中文按字符 bigram、英文/数字按词切分。
-//! - 混合：向量得分与 BM25 得分分别 min-max 归一化到 [0,1]，按
+//! - 关键词：FTS5 原生全文检索（trigram tokenizer）召回，得分即 FTS5 的 BM25 排名
+//!   （`-rank`，越大越相关）。中文子串匹配友好，无需手工分词。
+//! - 混合：向量余弦得分（0–1）与 FTS5 得分（min-max 归一化到 0–1）按
 //!   `final = (1 - keyword_weight) * vec + keyword_weight * bm25` 融合。
 
 use std::collections::HashMap;
@@ -43,6 +44,7 @@ pub struct RetrievedChunk {
 
 /// 检索中间态：原始分块数据 + 解析后的向量。
 struct ChunkData {
+    id: String,
     kb_id: String,
     doc_id: String,
     doc_title: String,
@@ -52,7 +54,7 @@ struct ChunkData {
 
 /// 在 `kb_ids` 范围内检索 `query_text`/`query_vec` 最相关的 Top-K 分块。
 ///
-/// - `query_text`：原始查询文本，BM25 关键词召回使用。
+/// - `query_text`：原始查询文本，FTS5 关键词召回使用。
 /// - `query_vec`：查询嵌入向量，向量/混合模式使用；纯关键词模式下可传空。
 /// - `mode`：检索模式（见 [`RetrievalMode`]）。
 /// - `keyword_weight`：混合模式下关键词得分权重（0..1），向量权重为 1 - keyword_weight。
@@ -70,7 +72,7 @@ pub async fn retrieve(
     }
     let placeholders = vec!["?"; kb_ids.len()].join(",");
     let sql = format!(
-        "SELECT c.kb_id, c.doc_id, c.content, c.embedding, d.title AS doc_title \
+        "SELECT c.id AS chunk_id, c.kb_id, c.doc_id, c.content, c.embedding, d.title AS doc_title \
          FROM kb_chunks c LEFT JOIN kb_documents d ON d.id = c.doc_id \
          WHERE c.kb_id IN ({})",
         placeholders
@@ -88,6 +90,7 @@ pub async fn retrieve(
             .and_then(|s| serde_json::from_str::<Vec<f32>>(s.as_str()).ok())
             .filter(|v| !v.is_empty());
         chunks.push(ChunkData {
+            id: row.try_get("chunk_id").unwrap_or_default(),
             kb_id: row.try_get("kb_id").unwrap_or_default(),
             doc_id: row.try_get("doc_id").unwrap_or_default(),
             doc_title: row
@@ -118,13 +121,19 @@ pub async fn retrieve(
         vec![0.0; chunks.len()]
     };
 
-    // 关键词得分（BM25）
-    let kw_scores: Vec<f32> = if need_kw {
-        let qt = tokenize(query_text);
-        bm25(&chunks, &qt)
+    // 关键词得分（FTS5 trigram）
+    let fts_scores: HashMap<String, f32> = if need_kw {
+        match normalize_fts_query(query_text) {
+            Some(q) => fts_keyword_scores(pool, kb_ids, &q).await,
+            None => HashMap::new(),
+        }
     } else {
-        vec![0.0; chunks.len()]
+        HashMap::new()
     };
+    let kw_scores: Vec<f32> = chunks
+        .iter()
+        .map(|c| fts_scores.get(&c.id).copied().unwrap_or(0.0))
+        .collect();
 
     // 融合
     let kw = keyword_weight.clamp(0.0, 1.0);
@@ -187,82 +196,75 @@ fn normalize(scores: &[f32]) -> Vec<f32> {
     scores.iter().map(|s| (s - min) / range).collect()
 }
 
+/// 把查询文本规整为 FTS5 可安全检索的形式：
+/// - 仅保留 ASCII 字母数字、CJK 基本汉字与空白；
+/// - ASCII 统一小写（trigram 大小写折叠兜底）；连续空白合并为单空格；
+/// - 去除首尾空白。
+///
+/// 返回 `None` 表示规整后有效字符不足 3 个（trigram 最短需 3 字符，
+/// 否则无法构成 trigram，直接回退空关键词得分，由混合模式的向量部分兜底）。
+fn normalize_fts_query(q: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut prev_space = false;
+    for c in q.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+            prev_space = false;
+        } else if is_cjk(c) {
+            out.push(c);
+            prev_space = false;
+        } else if c.is_whitespace() {
+            if !prev_space && !out.is_empty() {
+                out.push(' ');
+                prev_space = true;
+            }
+        }
+        // 其它标点 / 符号丢弃
+    }
+    let nospace_len = out.chars().filter(|c| !c.is_whitespace()).count();
+    if nospace_len < 3 {
+        None
+    } else {
+        Some(out.trim().to_string())
+    }
+}
+
 /// 判断是否 CJK 基本汉字（覆盖常用中文，扩展区略）。
 fn is_cjk(ch: char) -> bool {
     matches!(ch as u32, 0x4E00..=0x9FFF | 0x3400..=0x4DBF)
 }
 
-/// 分词：CJK 字符按字符 bigram（同时保留单字），连续 ASCII 字母数字作为一个小写词。
-fn tokenize(text: &str) -> Vec<String> {
-    let mut tokens: Vec<String> = Vec::new();
-    let mut buf = String::new();
-    let mut prev_cjk: Option<char> = None;
-    let flush_buf = |buf: &mut String, tokens: &mut Vec<String>| {
-        if !buf.is_empty() {
-            tokens.push(buf.clone());
-            buf.clear();
-        }
-    };
-    for ch in text.chars() {
-        if ch.is_ascii_alphanumeric() {
-            buf.push(ch.to_ascii_lowercase());
-            prev_cjk = None;
-        } else if is_cjk(ch) {
-            flush_buf(&mut buf, &mut tokens);
-            if let Some(p) = prev_cjk {
-                tokens.push(format!("{}{}", p, ch));
-            }
-            tokens.push(ch.to_string());
-            prev_cjk = Some(ch);
-        } else {
-            flush_buf(&mut buf, &mut tokens);
-            prev_cjk = None;
-        }
+/// 用 FTS5 trigram 对 `kb_ids` 范围做关键词检索，返回 `chunk_id → 得分(-rank)`。
+///
+/// 查询失败时（异常输入等）返回空 map，让调用方回退到向量检索，不阻断整体问答。
+async fn fts_keyword_scores(
+    pool: &SqlitePool,
+    kb_ids: &[String],
+    query: &str,
+) -> HashMap<String, f32> {
+    let mut map = HashMap::new();
+    let placeholders = vec!["?"; kb_ids.len()].join(",");
+    let sql = format!(
+        "SELECT chunk_id, -rank AS score FROM kb_chunks_fts \
+         WHERE kb_id IN ({}) AND kb_chunks_fts MATCH ? ORDER BY rank",
+        placeholders
+    );
+    let mut q = sqlx::query_as::<_, (String, f64)>(&sql);
+    for id in kb_ids {
+        q = q.bind(id);
     }
-    flush_buf(&mut buf, &mut tokens);
-    tokens.retain(|t| !t.is_empty());
-    tokens
-}
-
-/// 对 `chunks` 求 `query_terms` 的 BM25 得分（每块一个 f32）。
-/// 语料 = 本批 `chunks`；IDF 用标准平滑公式；k1=1.5, b=0.75。
-fn bm25(chunks: &[ChunkData], query_terms: &[String]) -> Vec<f32> {
-    if query_terms.is_empty() || chunks.is_empty() {
-        return vec![0.0; chunks.len()];
-    }
-    let mut df: HashMap<String, usize> = HashMap::new();
-    let mut doc_tf: Vec<HashMap<String, usize>> = Vec::with_capacity(chunks.len());
-    let mut total_len = 0usize;
-    for c in chunks {
-        let toks = tokenize(&c.content);
-        let mut tf: HashMap<String, usize> = HashMap::new();
-        for t in &toks {
-            *tf.entry(t.clone()).or_insert(0) += 1;
-        }
-        for t in tf.keys() {
-            *df.entry(t.clone()).or_insert(0) += 1;
-        }
-        total_len += toks.len();
-        doc_tf.push(tf);
-    }
-    let n = chunks.len() as f32;
-    let avgdl = total_len as f32 / n.max(1.0);
-    let k1 = 1.5f32;
-    let b = 0.75f32;
-    let mut scores = Vec::with_capacity(chunks.len());
-    for tf in &doc_tf {
-        let dl = tf.values().sum::<usize>() as f32;
-        let mut s = 0.0f32;
-        for qt in query_terms {
-            if let Some(&n_t) = df.get(qt) {
-                let idf = ((n - n_t as f32 + 0.5) / (n_t as f32 + 0.5) + 1.0).ln();
-                let f = *tf.get(qt).unwrap_or(&0) as f32;
-                s += idf * (f * (k1 + 1.0)) / (f + k1 * (1.0 - b + b * dl / avgdl.max(1.0)));
+    q = q.bind(query);
+    match q.fetch_all(pool).await {
+        Ok(rows) => {
+            for (cid, score) in rows {
+                map.insert(cid, score as f32);
             }
         }
-        scores.push(s);
+        Err(e) => {
+            tracing::warn!("FTS5 关键词检索失败（回退为空）: {}", e);
+        }
     }
-    scores
+    map
 }
 
 #[cfg(test)]
@@ -298,19 +300,30 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        // 三块：Rust 相关两块、Python 一块；embedding 置 NULL（BM25 不依赖）
+        // 三块：Rust 相关两块、Python 一块；embedding 置 NULL（向量模式另测）
         let contents = [
             "Rust 所有权机制详解与移动语义",
             "Python 装饰器使用指南与闭包",
             "Rust 生命周期标注与借用检查",
         ];
         for (i, content) in contents.iter().enumerate() {
+            let cid = format!("c{}", i);
             sqlx::query(
                 "INSERT INTO kb_chunks (id,kb_id,doc_id,content,embedding,created_at) VALUES (?,?,?,?,NULL,'2026-01-01T00:00:00Z')",
             )
-            .bind(format!("c{}", i))
+            .bind(&cid)
             .bind("kb1")
             .bind("d1")
+            .bind(*content)
+            .execute(&pool)
+            .await
+            .unwrap();
+            // 同步写入 FTS5 索引（与 store::insert_document 的维护逻辑一致）
+            sqlx::query(
+                "INSERT INTO kb_chunks_fts (chunk_id, kb_id, content) VALUES (?, ?, ?)",
+            )
+            .bind(&cid)
+            .bind("kb1")
             .bind(*content)
             .execute(&pool)
             .await
@@ -320,11 +333,12 @@ mod tests {
     }
 
     #[test]
-    fn tokenize_splits_cjk_bigram_and_ascii() {
-        let toks = tokenize("Rust所有权");
-        assert!(toks.contains(&"rust".to_string()), "英文小写化: {:?}", toks);
-        assert!(toks.contains(&"所有".to_string()), "CJK bigram: {:?}", toks);
-        assert!(toks.contains(&"有权".to_string()), "CJK bigram: {:?}", toks);
+    fn normalize_fts_query_drops_short_input() {
+        // < 3 有效字符 → None（trigram 无法构成）
+        assert!(normalize_fts_query("知识").is_none());
+        assert!(normalize_fts_query("ab").is_none());
+        // 正常保留并小写 ASCII
+        assert_eq!(normalize_fts_query("Rust 所有权"), Some("rust 所有权".to_string()));
     }
 
     #[tokio::test]
@@ -372,7 +386,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn vector_mode_returns_empty_without_embeddings() {
+    async fn trigram_matches_cjk_substring() {
+        let pool = test_pool().await;
+        // "知识库" 不在任何块里，但 "本知识库内容" 子串应被 trigram 命中（若插入这样的块）
+        sqlx::query("INSERT INTO kb_chunks (id,kb_id,doc_id,content,embedding,created_at) VALUES (?,?,?,?,NULL,'2026-01-01T00:00:00Z')")
+            .bind("cX").bind("kb1").bind("d1").bind("本知识库内容索引示例").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO kb_chunks_fts (chunk_id,kb_id,content) VALUES (?,?,?)")
+            .bind("cX").bind("kb1").bind("本知识库内容索引示例").execute(&pool).await.unwrap();
+        let hits = retrieve(
+            &pool,
+            &["kb1".to_string()],
+            "知识库",
+            &[],
+            1,
+            RetrievalMode::Keyword,
+            0.3,
+        )
+        .await
+        .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].content.contains("本知识库内容"));
+    }
+
+    #[tokio::test]
+    async fn short_query_under_3_chars_falls_back_empty() {
+        // ≤2 字查询关键词检索回退空（不报错），排序稳定即可
+        let pool = test_pool().await;
+        let hits = retrieve(
+            &pool,
+            &["kb1".to_string()],
+            "知识",
+            &[],
+            3,
+            RetrievalMode::Keyword,
+            0.3,
+        )
+        .await
+        .unwrap();
+        assert_eq!(hits.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn vector_mode_returns_all_without_embeddings() {
         // 分块 embedding 为 NULL，向量模式拿不到任何向量得分 → 仍返回块但 score=0
         let pool = test_pool().await;
         let hits = retrieve(
@@ -392,7 +447,7 @@ mod tests {
 
     #[tokio::test]
     async fn hybrid_falls_back_when_no_keyword_overlap() {
-        // 查询词完全不在语料 → BM25 全 0 → 混合排序退化为向量（此处向量也全 0，顺序稳定即可）
+        // 查询词完全不在语料 → FTS5 全 0 → 混合排序退化为向量（此处向量也全 0，顺序稳定即可）
         let pool = test_pool().await;
         let hits = retrieve(
             &pool,

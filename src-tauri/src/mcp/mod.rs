@@ -11,7 +11,7 @@
 //! 授权范围：KB 是否对外可见完全由 KB 上 `mcp_exposed` 字段决定，
 //! `tools::dispatch` 内部统一把关（见 [`crate::mcp::tools::require_exposed_kb`]）。
 //! 注意这是**授权范围**而非**身份认证**——当前端点无入站鉴权，仅靠绑定
-//! 127.0.0.1 限制为本机可访问（与参考实现 waliapi 的做法一致）。
+//! 127.0.0.1 限制为本机可访问。
 //!
 //! Wire：
 //! - JSON-RPC 2.0 over HTTP，POST /mcp；

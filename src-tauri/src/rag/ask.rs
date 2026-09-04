@@ -197,6 +197,7 @@ pub async fn ask(
             vec![question.to_string()],
         )
         .await?
+        .0
         .into_iter()
         .next()
         .ok_or_else(|| AppError::Internal("嵌入结果为空".into()))?

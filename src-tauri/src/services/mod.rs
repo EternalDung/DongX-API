@@ -2,8 +2,8 @@
 //! 自己的路由、状态与启用开关，统一向 [`ServiceRegistry`] 注册。新增服务只需
 //! 实现 [`Service`] trait 并在 [`ServiceRegistry::init`] 里 `register`。
 //!
-//! 设计参考 waliapi 的 `services` 模块，但适配 DongX 的 axum 状态类型
-//! （DongX 用 [`tauri::AppHandle`] 作为 axum state，而非 waliapi 的 `SharedState`）。
+//! 服务注册框架适配 DongX 的 axum 状态类型
+//! （DongX 用 [`tauri::AppHandle`] 作为 axum state）。
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};

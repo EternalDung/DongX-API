@@ -20,6 +20,7 @@ import {
   FolderOpen,
   Plus,
   CheckCircle2,
+  XCircle,
   Sparkles,
   SlidersHorizontal,
   MessageCircle,
@@ -109,6 +110,36 @@ function errMsg(e: unknown): string {
   return String(e);
 }
 
+/** 字节数 → 人类可读（如 1.2 KB / 3.4 MB） */
+function formatBytes(n: number): string {
+  if (!n || n <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  const i = Math.min(units.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
+  const v = n / Math.pow(1024, i);
+  return `${v >= 10 || i === 0 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
+}
+
+/** 千分位 */
+function formatNumber(n: number): string {
+  return n.toLocaleString("en-US");
+}
+
+/** 文件名扩展名 → 展示标签（md / python / typescript ...） */
+function formatLabel(filename: string): string {
+  const m = filename.match(/\.([a-z0-9]+)$/i);
+  if (!m) return "";
+  const ext = m[1].toLowerCase();
+  const map: Record<string, string> = {
+    md: "md", markdown: "md", txt: "txt", text: "txt", log: "log",
+    py: "python", rs: "rust", go: "go", java: "java", kt: "kotlin",
+    js: "javascript", jsx: "jsx", ts: "typescript", tsx: "tsx",
+    c: "c", cpp: "cpp", h: "c", hpp: "cpp",
+    json: "json", yaml: "yaml", yml: "yaml", toml: "toml", xml: "xml",
+    html: "html", css: "css", sh: "shell", csv: "csv",
+  };
+  return map[ext] ?? ext;
+}
+
 // ---------------------------------------------------------------------------
 // 文档 Tab：拖拽上传 + 文档列表
 // ---------------------------------------------------------------------------
@@ -151,8 +182,12 @@ function DocumentsTab({ kb }: { kb: KnowledgeBase }) {
       setUploading((prev) => [...prev, { id: uid, name: file.name }]);
       try {
         const text = await file.text();
-        const res = await knowledgeApi.ingest(kb.id, file.name, text);
-        toast.success(`已摄入「${file.name}」，共 ${res.chunk_count} 个片段`);
+        const res = await knowledgeApi.ingest(kb.id, file.name, text, file.size);
+        if (res.duplicate) {
+          toast.info(`「${file.name}」内容已存在，已跳过重复摄入`);
+        } else {
+          toast.success(`已摄入「${file.name}」，共 ${res.chunk_count} 个片段`);
+        }
         await refresh();
       } catch (e) {
         console.error("摄入失败：", e);
@@ -274,7 +309,19 @@ function DocumentsTab({ kb }: { kb: KnowledgeBase }) {
             >
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
+                  {d.status === 1 ? (
+                    <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-500" />
+                  ) : d.status === 2 ? (
+                    <XCircle className="h-4 w-4 shrink-0 text-destructive" />
+                  ) : (
+                    <Loader2 className="h-4 w-4 shrink-0 animate-spin text-muted-foreground" />
+                  )}
                   <span className="truncate font-medium">{d.title}</span>
+                  {formatLabel(d.title) && (
+                    <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium uppercase text-muted-foreground">
+                      {formatLabel(d.title)}
+                    </span>
+                  )}
                   <StatusBadge
                     tone={
                       d.status === 1
@@ -288,7 +335,8 @@ function DocumentsTab({ kb }: { kb: KnowledgeBase }) {
                   </StatusBadge>
                 </div>
                 <p className="mt-0.5 text-[11px] text-muted-foreground">
-                  {d.chunk_count} 片段 · {fmtTime(d.created_at)}
+                  {formatBytes(d.file_size)} · {d.chunk_count} 片段 ·{" "}
+                  {formatNumber(d.token_count)} tokens · {fmtTime(d.created_at)}
                   {d.error_message ? ` · ${d.error_message}` : ""}
                 </p>
               </div>
@@ -837,32 +885,75 @@ function MessageBubble({ message }: { message: AskMessage }) {
 
 function SettingsTab({ kb, onSaved }: { kb: KnowledgeBase; onSaved: (next: KnowledgeBase) => void }) {
   const toast = useToast();
-  const [channels, setChannels] = useState<Record<string, string>>({});
+  const [channels, setChannels] = useState<Channel[]>([]);
   const [saving, setSaving] = useState(false);
 
   const [name, setName] = useState(kb.name);
   const [description, setDescription] = useState(kb.description);
   const [enabled, setEnabled] = useState(kb.status === 1);
   const [mcpExposed, setMcpExposed] = useState(kb.mcp_exposed === 1);
+  const [embedChannelId, setEmbedChannelId] = useState(
+    kb.embedding_channel_id ?? "",
+  );
+  const [embedModel, setEmbedModel] = useState(kb.embedding_model ?? "");
+  const [staleCount, setStaleCount] = useState(0);
+  const [reindexing, setReindexing] = useState(false);
   const [batchSize, setBatchSize] = useState(
     kb.embedding_batch_size != null ? String(kb.embedding_batch_size) : "",
   );
   const [excludeDirs, setExcludeDirs] = useState(kb.exclude_dirs ?? "");
   const [excludeFiles, setExcludeFiles] = useState(kb.exclude_files ?? "");
   const [includeTypes, setIncludeTypes] = useState(kb.include_file_types ?? "");
+  const [chunkSize, setChunkSize] = useState(
+    kb.chunk_size != null ? String(kb.chunk_size) : "",
+  );
+  const [chunkOverlap, setChunkOverlap] = useState(
+    kb.chunk_overlap != null ? String(kb.chunk_overlap) : "",
+  );
 
+  // 已启用渠道供「绑定渠道」下拉；索引状态供 stale 提示（换模型后旧分块待重建）
   useEffect(() => {
     channelApi
       .list()
-      .then((chs) =>
-        setChannels(Object.fromEntries(chs.map((c) => [c.id, c.name]))),
-      )
-      .catch(() => setChannels({}));
-  }, []);
+      .then((chs) => setChannels(chs.filter((c) => c.status === 1)))
+      .catch(() => setChannels([]));
+    knowledgeApi
+      .indexStatus(kb.id)
+      .then((s) => setStaleCount(s.stale_count))
+      .catch(() => setStaleCount(0));
+  }, [kb.id]);
+
+  const refreshStale = useCallback(() => {
+    knowledgeApi
+      .indexStatus(kb.id)
+      .then((s) => setStaleCount(s.stale_count))
+      .catch(() => {});
+  }, [kb.id]);
+
+  const handleReindex = async () => {
+    setReindexing(true);
+    try {
+      const s = await knowledgeApi.reindex(kb.id);
+      setStaleCount(s.stale_count);
+      toast.success("索引已重建：全部分块已按当前嵌入模型重新向量化");
+    } catch (e) {
+      toast.error(`重建失败：${errMsg(e) || "请重试"}`);
+    } finally {
+      setReindexing(false);
+    }
+  };
 
   const handleSave = async () => {
     if (!name.trim()) {
       toast.error("知识库名称不能为空");
+      return;
+    }
+    if (!embedChannelId) {
+      toast.error("请选择绑定渠道");
+      return;
+    }
+    if (!embedModel.trim()) {
+      toast.error("嵌入模型不能为空");
       return;
     }
     setSaving(true);
@@ -871,8 +962,12 @@ function SettingsTab({ kb, onSaved }: { kb: KnowledgeBase; onSaved: (next: Knowl
       description: description.trim(),
       status: enabled ? 1 : 0,
       mcp_exposed: mcpExposed ? 1 : 0,
+      embedding_model: embedModel.trim(),
+      embedding_channel_id: embedChannelId,
       embedding_batch_size:
         batchSize.trim() === "" ? null : Number(batchSize),
+      chunk_size: chunkSize.trim() === "" ? null : Number(chunkSize),
+      chunk_overlap: chunkOverlap.trim() === "" ? null : Number(chunkOverlap),
       exclude_dirs: excludeDirs.trim() || null,
       exclude_files: excludeFiles.trim() || null,
       include_file_types: includeTypes.trim() || null,
@@ -880,6 +975,8 @@ function SettingsTab({ kb, onSaved }: { kb: KnowledgeBase; onSaved: (next: Knowl
     try {
       const updated = await knowledgeApi.update(kb.id, patch);
       onSaved(updated);
+      // 换模型/渠道会让存量分块变 stale，保存后立即刷新待重建数量
+      refreshStale();
       toast.success("设置已保存");
     } catch (e) {
       console.error("保存设置失败：", e);
@@ -942,28 +1039,62 @@ function SettingsTab({ kb, onSaved }: { kb: KnowledgeBase; onSaved: (next: Knowl
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="grid gap-2">
-            <Label>绑定渠道</Label>
-            <p className="text-sm text-muted-foreground">
-              {channels[kb.embedding_channel_id] ?? kb.embedding_channel_id ?? "—"}
+            <Label htmlFor="set-channel">绑定渠道</Label>
+            <Select
+              id="set-channel"
+              value={embedChannelId}
+              onChange={(e) => setEmbedChannelId(e.target.value)}
+              disabled={channels.length === 0}
+            >
+              {channels.length === 0 ? (
+                <option value="">无可用渠道</option>
+              ) : (
+                channels.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))
+              )}
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              仅列出已启用的渠道；换渠道通常也要换模型
             </p>
           </div>
           <div className="grid gap-2">
-            <Label>嵌入模型</Label>
-            <p className="font-mono text-sm text-muted-foreground">
-              {kb.embedding_model || "—"}
-            </p>
-          </div>
-          <div className="grid gap-2">
-            <Label htmlFor="set-batch">Embedding 批次</Label>
+            <Label htmlFor="set-model">嵌入模型</Label>
             <Input
-              id="set-batch"
-              type="number"
-              min={1}
-              placeholder="留空使用引擎默认（如 16）"
-              value={batchSize}
-              onChange={(e) => setBatchSize(e.target.value)}
+              id="set-model"
+              value={embedModel}
+              onChange={(e) => setEmbedModel(e.target.value)}
+              placeholder="如 text-embedding-3-small"
             />
+            <p className="text-xs text-muted-foreground">
+              手动输入模型名，需与所选渠道匹配
+            </p>
           </div>
+          {staleCount > 0 && (
+            <div className="flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
+              <div className="flex-1 space-y-2">
+                <p className="text-xs text-amber-700 dark:text-amber-400">
+                  有 {staleCount} 个分块的嵌入模型与当前设置不一致，检索结果可能不正确，需重建索引。
+                </p>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={reindexing}
+                  onClick={handleReindex}
+                >
+                  {reindexing ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <RefreshCw className="h-3.5 w-3.5" />
+                  )}
+                  重建索引
+                </Button>
+              </div>
+            </div>
+          )}
         </CardContent>
       </Card>
 
@@ -1002,8 +1133,47 @@ function SettingsTab({ kb, onSaved }: { kb: KnowledgeBase; onSaved: (next: Knowl
               />
             </div>
           </div>
+          <div className="grid gap-4 md:grid-cols-3">
+            <div className="grid gap-2">
+              <Label htmlFor="set-chunk-size">分块大小</Label>
+              <Input
+                id="set-chunk-size"
+                type="number"
+                min={100}
+                step={100}
+                placeholder="留空使用引擎默认（1500 字符）"
+                value={chunkSize}
+                onChange={(e) => setChunkSize(e.target.value)}
+              />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="set-chunk-overlap">分块重叠</Label>
+              <Input
+                id="set-chunk-overlap"
+                type="number"
+                min={0}
+                step={50}
+                placeholder="留空使用引擎默认（200 字符）"
+                value={chunkOverlap}
+                onChange={(e) => setChunkOverlap(e.target.value)}
+              />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="set-batch">Embedding 批次大小</Label>
+              <Input
+                id="set-batch"
+                type="number"
+                min={1}
+                placeholder="留空使用引擎默认（如 16）"
+                value={batchSize}
+                onChange={(e) => setBatchSize(e.target.value)}
+              />
+            </div>
+          </div>
           <p className="text-xs text-muted-foreground">
-            分块大小 / 重叠比例将在后续版本支持，当前由引擎按文档长度自动分块。
+            分块大小 / 重叠以字符为单位；留空则使用引擎默认（1500 / 200）。
+            Embedding 批次大小为单次嵌入请求的文本条数，留空使用引擎默认。
+            修改后对已摄入文档不回溯，新上传文档按新值分块与嵌入。
           </p>
         </CardContent>
       </Card>
@@ -1233,6 +1403,7 @@ function IndexTab({ kb }: { kb: KnowledgeBase }) {
         { label: "文档数", value: status.doc_count },
         { label: "分块数", value: status.chunk_count },
         { label: "已向量化", value: status.embedded_count },
+        { label: "总 tokens", value: formatNumber(status.total_tokens) },
         { label: "待重建(stale)", value: status.stale_count },
       ]
     : [];
@@ -1283,7 +1454,7 @@ function IndexTab({ kb }: { kb: KnowledgeBase }) {
         </CardContent>
       </Card>
 
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
         {stats.map((s) => (
           <Card key={s.label}>
             <CardContent className="pt-4">

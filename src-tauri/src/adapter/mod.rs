@@ -111,7 +111,16 @@ pub trait Adaptor: Send + Sync {
             .send()
             .await?;
         let status = resp.status().as_u16();
-        let body: serde_json::Value = resp.json().await?;
+        // Read the raw body once, then parse. This keeps the real upstream
+        // status + a body snippet in the error instead of an opaque
+        // "error decoding response body" when the payload isn't JSON
+        // (e.g. a proxy/HTML error page, or a body the client couldn't
+        // decode because the matching compression feature was disabled).
+        let text = resp.text().await?;
+        let body: serde_json::Value = serde_json::from_str(&text).map_err(|_| {
+            let snippet: String = text.chars().take(300).collect();
+            anyhow::anyhow!("嵌入上游返回非 JSON（HTTP {}）：{}", status, snippet)
+        })?;
         Ok((status, body))
     }
 }

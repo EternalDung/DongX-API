@@ -1076,9 +1076,8 @@ function aggregateFrames(frames: Record<string, unknown>[]): ParsedChoice | null
 }
 
 // ─── Anthropic Messages 解析（mode === "messages" 时启用） ──────────────────
-// waliapi 在后端把响应归一化为 response_choices 列，前端直接 JSON.parse 即可渲染；
-// DongX 当前把原始 Anthropic 报文（非流式单条 JSON / 流式 event:/data: SSE）存入
-// response_body，因此这里在前端按 mode 选解析器，思路与 waliapi 用 log.mode 选解析器一致。
+// 后端把响应原始报文（非流式单条 JSON / 流式 event:/data: SSE）存入 response_body，
+// 因此这里在前端按 mode 选解析器：messages 模式用 Anthropic 解析器，chat 模式用 choices 解析器。
 
 // 解析 Anthropic 风格 SSE：每帧由 `event:` 与 `data:` 两行组成，data 内已含 type 字段。
 function extractAnthropicSse(body: string): Record<string, unknown>[] {

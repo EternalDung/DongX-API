@@ -41,6 +41,10 @@ pub struct KnowledgeBase {
     pub exclude_files: Option<String>,
     /// 摄入时仅包含的文件类型（逗号分隔，NULL=全部）。
     pub include_file_types: Option<String>,
+    /// 分块大小（字符数，0=引擎默认）。
+    pub chunk_size: i64,
+    /// 分块重叠字符数（0=引擎默认）。
+    pub chunk_overlap: i64,
     pub created_at: String,
     pub updated_at: String,
     pub doc_count: i64,
@@ -53,6 +57,10 @@ pub struct KnowledgeBaseInput {
     pub name: String,
     pub description: String,
     pub embedding_model: String,
+    /// 绑定的嵌入渠道。省略（或为空）时由 [`resolve_embedding_channel`]
+    /// 自动挑选，保持「只传模型」的老调用方式继续可用。
+    #[serde(default)]
+    pub embedding_channel_id: Option<String>,
 }
 
 /// 导入来源入参（对齐前端 `ImportSourceInput`）。
@@ -119,10 +127,27 @@ pub struct KnowledgeBaseUpdate {
     pub status: Option<i64>,
     /// MCP 暴露开关：0=否 1=是。
     pub mcp_exposed: Option<i64>,
+    /// 嵌入模型。
+    ///
+    /// 不同嵌入模型的向量空间互不兼容，改了模型后旧分块的 `embedding_model`
+    /// 与新值不一致，会被 [`compute_index_status`] 判定为 stale，
+    /// 必须调用 `reindex_kb` 重建后才能正常检索（否则向量/混合检索会静默
+    /// 返回无意义的结果；纯关键词检索不受影响）。
+    pub embedding_model: Option<String>,
+    /// 绑定的嵌入渠道（须为已启用渠道）。
+    ///
+    /// 与 `embedding_model` 配套：换渠道通常也要换模型，因为各渠道提供的
+    /// 嵌入模型不同。这里只校验渠道存在且启用，不硬校验模型是否在该渠道的
+    /// `models` 列表里——很多中转站的模型列表并不完整。
+    pub embedding_channel_id: Option<String>,
     pub embedding_batch_size: Option<i64>,
     pub exclude_dirs: Option<String>,
     pub exclude_files: Option<String>,
     pub include_file_types: Option<String>,
+    /// 分块大小（字符数，0=引擎默认）。
+    pub chunk_size: Option<i64>,
+    /// 分块重叠字符数（0=引擎默认）。
+    pub chunk_overlap: Option<i64>,
 }
 
 /// 解析一个支持 Embeddings 的启用渠道。
@@ -166,6 +191,7 @@ pub async fn list_knowledge_bases(
                 kb.embedding_channel_id, kb.status,
                 kb.mcp_exposed, kb.embedding_batch_size,
                 kb.exclude_dirs, kb.exclude_files, kb.include_file_types,
+                kb.chunk_size, kb.chunk_overlap,
                 kb.created_at, kb.updated_at,
                 COALESCE(d.cnt, 0) AS doc_count,
                 COALESCE(c.cnt, 0) AS chunk_count
@@ -232,6 +258,8 @@ pub async fn create_knowledge_base(
         exclude_dirs: None,
         exclude_files: None,
         include_file_types: None,
+        chunk_size: 0,
+        chunk_overlap: 0,
         created_at: now.clone(),
         updated_at: now,
         doc_count: 0,
@@ -243,6 +271,12 @@ pub async fn create_knowledge_base(
 ///
 /// `updated_at` 由命令统一刷新；返回更新后的完整 `KnowledgeBase`
 /// （含实时重算的 doc_count / chunk_count）。
+///
+/// 注意：改 `embedding_model` / `embedding_channel_id` **不会**自动重建存量
+/// 分块的向量。命令本身成功返回，但旧分块会立刻变成 stale（见
+/// [`compute_index_status`]），在调用 `reindex_kb` 之前，向量与混合检索会
+/// 拿新模型的查询向量去比旧模型的分块向量，结果是静默的错误排序。
+/// 前端应在保存后提示并引导重建索引。
 #[tauri::command]
 pub async fn update_knowledge_base(
     state: State<'_, Arc<AppState>>,
@@ -250,6 +284,29 @@ pub async fn update_knowledge_base(
     patch: KnowledgeBaseUpdate,
 ) -> Result<KnowledgeBase, String> {
     let pool = &state.db;
+
+    // 嵌入配置校验：模型名不能为空；渠道必须存在且处于启用状态，
+    // 否则后续摄入会在嵌入阶段才失败（错误被推迟、难以定位）。
+    if let Some(v) = &patch.embedding_model {
+        if v.trim().is_empty() {
+            return Err("嵌入模型不能为空".to_string());
+        }
+    }
+    if let Some(v) = &patch.embedding_channel_id {
+        if v.trim().is_empty() {
+            return Err("绑定渠道不能为空".to_string());
+        }
+        let alive = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM channels WHERE id = ? AND status = 1",
+        )
+        .bind(v)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+        if alive == 0 {
+            return Err("绑定渠道不存在或已停用".to_string());
+        }
+    }
 
     // 动态拼 SET 子句：列名全部来自本函数常量，无用户输入，可安全拼接；
     // 占位值均经 bind 传入，杜绝注入。
@@ -266,6 +323,12 @@ pub async fn update_knowledge_base(
     if patch.mcp_exposed.is_some() {
         sets.push("mcp_exposed = ?");
     }
+    if patch.embedding_model.is_some() {
+        sets.push("embedding_model = ?");
+    }
+    if patch.embedding_channel_id.is_some() {
+        sets.push("embedding_channel_id = ?");
+    }
     if patch.embedding_batch_size.is_some() {
         sets.push("embedding_batch_size = ?");
     }
@@ -277,6 +340,12 @@ pub async fn update_knowledge_base(
     }
     if patch.include_file_types.is_some() {
         sets.push("include_file_types = ?");
+    }
+    if patch.chunk_size.is_some() {
+        sets.push("chunk_size = ?");
+    }
+    if patch.chunk_overlap.is_some() {
+        sets.push("chunk_overlap = ?");
     }
     sets.push("updated_at = ?");
 
@@ -297,6 +366,12 @@ pub async fn update_knowledge_base(
     if let Some(v) = &patch.mcp_exposed {
         q = q.bind(v);
     }
+    if let Some(v) = &patch.embedding_model {
+        q = q.bind(v.trim());
+    }
+    if let Some(v) = &patch.embedding_channel_id {
+        q = q.bind(v.trim());
+    }
     if let Some(v) = &patch.embedding_batch_size {
         q = q.bind(v);
     }
@@ -307,6 +382,12 @@ pub async fn update_knowledge_base(
         q = q.bind(v);
     }
     if let Some(v) = &patch.include_file_types {
+        q = q.bind(v);
+    }
+    if let Some(v) = &patch.chunk_size {
+        q = q.bind(v);
+    }
+    if let Some(v) = &patch.chunk_overlap {
         q = q.bind(v);
     }
     let now = chrono::Utc::now().to_rfc3339();
@@ -325,6 +406,7 @@ pub async fn update_knowledge_base(
     let updated = sqlx::query_as::<_, KnowledgeBase>(
         "SELECT id, name, description, embedding_model, embedding_channel_id, status,
                 mcp_exposed, embedding_batch_size, exclude_dirs, exclude_files, include_file_types,
+                chunk_size, chunk_overlap,
                 created_at, updated_at,
                 (SELECT COUNT(*) FROM kb_documents WHERE kb_id = knowledge_bases.id) AS doc_count,
                 (SELECT COUNT(*) FROM kb_chunks WHERE kb_id = knowledge_bases.id) AS chunk_count
@@ -346,9 +428,8 @@ pub async fn delete_knowledge_base(
 ) -> Result<(), String> {
     let pool = &state.db;
     // 先删子表，避免外键式孤儿（本项目未开 FK，需手动级联）。
-    sqlx::query("DELETE FROM kb_chunks WHERE kb_id = ?")
-        .bind(&id)
-        .execute(pool)
+    // purge_kb_chunks 同时清理 FTS5 全文索引，防止索引与正文漂移。
+    crate::rag::store::purge_kb_chunks(pool, &id)
         .await
         .map_err(|e| e.to_string())?;
     sqlx::query("DELETE FROM kb_documents WHERE kb_id = ?")
@@ -375,8 +456,9 @@ pub async fn ingest_kb_text(
     kb_id: String,
     title: String,
     text: String,
+    file_size: i64,
 ) -> Result<IngestResult, String> {
-    crate::rag::ingest::ingest_text(&state.db, &kb_id, &title, &text)
+    crate::rag::ingest::ingest_text(&state.db, &kb_id, &title, &text, file_size)
         .await
         .map_err(|e| e.to_string())
 }
@@ -426,6 +508,8 @@ pub struct KbDocument {
     pub chunk_count: i64,
     pub status: i64,
     pub error_message: Option<String>,
+    pub file_size: i64,
+    pub token_count: i64,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -438,7 +522,8 @@ pub async fn list_documents(
 ) -> Result<Vec<KbDocument>, String> {
     let rows = sqlx::query_as::<_, KbDocument>(
         "SELECT id, kb_id, title, source_type, source_ref, char_count,
-                chunk_count, status, error_message, created_at, updated_at
+                chunk_count, status, error_message, file_size, token_count,
+                created_at, updated_at
          FROM kb_documents WHERE kb_id = ? ORDER BY created_at DESC",
     )
     .bind(&kb_id)
@@ -455,9 +540,8 @@ pub async fn delete_document(
     id: String,
 ) -> Result<(), String> {
     let pool = &state.db;
-    sqlx::query("DELETE FROM kb_chunks WHERE doc_id = ?")
-        .bind(&id)
-        .execute(pool)
+    // 同步清理 FTS5 索引后再删文档行
+    crate::rag::store::purge_document_chunks(pool, &id)
         .await
         .map_err(|e| e.to_string())?;
     let res = sqlx::query("DELETE FROM kb_documents WHERE id = ?")
@@ -644,9 +728,7 @@ pub async fn delete_source(
     .await
     .map_err(|e| e.to_string())?;
     for doc_id in ids {
-        sqlx::query("DELETE FROM kb_chunks WHERE doc_id = ?")
-            .bind(&doc_id)
-            .execute(pool)
+        crate::rag::store::purge_document_chunks(pool, &doc_id)
             .await
             .map_err(|e| e.to_string())?;
     }
@@ -695,6 +777,7 @@ pub async fn retrieve_kb(
     )
     .await
     .map_err(|e| e.to_string())?
+    .0
     .into_iter()
     .next()
     .ok_or_else(|| "嵌入结果为空".to_string())?;
@@ -736,6 +819,8 @@ pub struct IndexStatus {
     pub chunk_count: i64,
     pub embedded_count: i64,
     pub stale_count: i64,
+    /// 全部分块的 token 总数（来自上游嵌入响应的 prompt_tokens 汇总）。
+    pub total_tokens: i64,
     /// 知识库当前绑定的嵌入模型（判定 stale 的基准）。
     pub embedding_model: String,
     pub is_complete: bool,
@@ -755,13 +840,15 @@ async fn compute_index_status(pool: &sqlx::SqlitePool, kb_id: &str) -> Result<In
                 WHERE kb_id = ? AND embedding IS NOT NULL \
                   AND embedding <> '' AND embedding <> '[]') AS embedded_count, \
             (SELECT COUNT(*) FROM kb_chunks \
-                WHERE kb_id = ? AND (embedding_model IS NULL OR embedding_model <> ?)) AS stale_count",
+                WHERE kb_id = ? AND (embedding_model IS NULL OR embedding_model <> ?)) AS stale_count, \
+            (SELECT COALESCE(SUM(token_count), 0) FROM kb_documents WHERE kb_id = ?) AS total_tokens",
     )
     .bind(kb_id)
     .bind(kb_id)
     .bind(kb_id)
     .bind(kb_id)
     .bind(&kb.embedding_model)
+    .bind(kb_id)
     .fetch_one(pool)
     .await
     .map_err(|e| e.to_string())?;
@@ -770,12 +857,14 @@ async fn compute_index_status(pool: &sqlx::SqlitePool, kb_id: &str) -> Result<In
     let chunk_count: i64 = stats.try_get("chunk_count").unwrap_or(0);
     let embedded_count: i64 = stats.try_get("embedded_count").unwrap_or(0);
     let stale_count: i64 = stats.try_get("stale_count").unwrap_or(0);
+    let total_tokens: i64 = stats.try_get("total_tokens").unwrap_or(0);
 
     Ok(IndexStatus {
         doc_count,
         chunk_count,
         embedded_count,
         stale_count,
+        total_tokens,
         embedding_model: kb.embedding_model,
         is_complete: chunk_count > 0 && embedded_count == chunk_count,
         is_stale: stale_count > 0,
@@ -830,7 +919,7 @@ pub async fn reindex_kb(
 
     for chunk in rows.chunks(batch) {
         let contents: Vec<String> = chunk.iter().map(|(_, c)| c.clone()).collect();
-        let vecs = crate::rag::embed::embed_texts(
+        let (vecs, _tokens) = crate::rag::embed::embed_texts(
             pool,
             &kb.embedding_channel_id,
             &kb.embedding_model,

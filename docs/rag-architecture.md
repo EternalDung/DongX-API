@@ -153,7 +153,8 @@ CREATE INDEX IF NOT EXISTS idx_chunk_doc ON kb_chunks(doc_id);
 ### 4.2 分块（`rag/chunk.rs`）
 - v1：**定长字符分块 + 重叠**（按 `chunk_size`/`chunk_overlap`，按换行边界对齐，避免切断句子）。
 - 估算 token（`token_est`）用于注入预算控制。
-- 后续可加语义分块（句/段聚类），不在 v1。
+- **D8 升级（已实现）**：改为**类型感知分块**——按文件扩展名路由到不同策略（见 §12）：Markdown 按标题切块、代码按 AST 符号（函数/类/方法）切块、其余走 token 化分块；并为每个块附带语义元数据（标题/符号/语言/行范围）。这是检索质量的关键升级。
+- 语义分块（句/段聚类）仍不在 v1。
 
 ### 4.3 向量存储与检索（`rag/store.rs` / `rag/retrieve.rs`）—— **D1 已定：暴力余弦 v1**
 - **v1：暴力余弦检索**。向量存 `kb_chunks.embedding`（JSON f32），检索时 `SELECT` 目标 KB 全量 chunks → Rust 内算余弦 → 取 top-k。本地单用户、KB 规模通常数千 chunk，O(n) 扫描为亚毫秒~毫秒级，零额外依赖。
@@ -185,7 +186,9 @@ src-tauri/src/
 │   ├── mod.rs          # 类型再导出
 │   ├── models.rs       # KnowledgeBase / KbDocument / KbChunk
 │   ├── embed.rs        # 嵌入调用（复用 dispatcher/adapter）
-│   ├── chunk.rs        # 分块策略
+│   ├── chunk.rs        # 分块策略（split 分发器，D8）
+│   ├── parser.rs       # 文件类型识别与文本提取（D8）
+│   ├── code_parser.rs  # tree-sitter 符号提取（D8）
 │   ├── store.rs        # 持久化（sqlx query! 宏，依赖 009 迁移）
 │   ├── retrieve.rs     # 余弦检索 top-k
 │   ├── ingest.rs       # 摄入编排（上传→分块→嵌入→落库）
@@ -221,6 +224,8 @@ migrations/009_rag.sql  # 新建表
 | **D4** | 嵌入来源 | 复用渠道（加 `Embeddings` 端点） | ✅ 已定 |
 | **D5** | 摄入格式 | v1 仅上传 + 本地目录；Git/URL 后置 | ✅ v1 子集已定 |
 | **D6** | 配置落点 | 独立表 `kb_*` | ✅ 已定 |
+| **D7** | 关键词检索 | **FTS5（trigram tokenizer）** 替代手写 BM25（sqlite bundled 3.46.1 ≥ 3.34，已验证 -DSQLITE_ENABLE_FTS5 编译进 bundled） | ✅ 已实施（代码已落地，待你本机编译提交） |
+| **D8** | 分块策略 | **类型感知分块**：Markdown 标题感知 / 代码 tree-sitter 符号感知 / 其余 token 化，块带语义元数据 | ✅ 已实施（代码已落地，待你本机编译提交） |
 
 ---
 
@@ -236,7 +241,7 @@ migrations/009_rag.sql  # 新建表
 
 ## 9. 服务注册框架（Service Registry）
 
-> 为承载未来多个服务（RAG、可能的 MCP / Wiki 等），采用**服务注册框架**：每个服务自包含路由、状态、启用开关，统一向 `ServiceRegistry` 注册。新增服务只需实现 `Service` trait 并在 `ServiceRegistry::new()` 里 `register`。设计参考 waliapi 的 `services` 模块，但适配 DongX 用 `AppHandle` 作 axum 状态（waliapi 用自定义 `SharedState`）。
+> 为承载未来多个服务（RAG、可能的 MCP / Wiki 等），采用**服务注册框架**：每个服务自包含路由、状态、启用开关，统一向 `ServiceRegistry` 注册。新增服务只需实现 `Service` trait 并在 `ServiceRegistry::new()` 里 `register`。状态类型为 `AppHandle`，在最外层统一 `.with_state(app)` apply。
 
 ### 9.1 核心契约（`src/services/mod.rs`）
 ```rust
@@ -259,7 +264,7 @@ impl ServiceRegistry {
 ```
 
 ### 9.2 挂载点
-- `server/router.rs::create_router`：先建网关路由（`Router<AppHandle>`，不 apply state），再 `ServiceRegistry::new().merge_into(gateway)` 合并服务路由，最后统一 `.with_state(app)`。这是和 waliapi 的关键差异——waliapi 在子路由上 apply `SharedState`，DongX 在最外层统一 apply `AppHandle`。
+- `server/router.rs::create_router`：先建网关路由（`Router<AppHandle>`，不 apply state），再 `ServiceRegistry::new().merge_into(gateway)` 合并服务路由，最后统一 `.with_state(app)` 在最外层 apply `AppHandle`。
 - 状态暴露：`commands/services.rs::list_services` Tauri 命令（调 `registry.list_status`），已在 `lib.rs` `invoke_handler!` 注册。
 
 ### 9.3 KnowledgeService 骨架（已实现，Phase 0）
@@ -283,3 +288,70 @@ impl ServiceRegistry {
 5. **Phase 1 摄入/检索/问答引擎已落地**（代码，未提交，已 `cargo check` 0 error / 12 warnings）：新增 `src/rag/` 引擎模块（`chunk` 分块 / `embed` 内部嵌入调用 / `store` 持久化 / `retrieve` 暴力余弦检索 / `ingest` 摄入编排 / `ask` 问答编排）+ 两个 Tauri 命令 `ingest_kb_text` / `ask_kb` + `KnowledgeService` 新增 `POST /v1/rag/ask` 路由（A 型独立 KB 问答）。`embed_texts` 复用 `dispatcher::pick_one` 解密 key + `get_adaptor().forward_embeddings`（与 HTTP embeddings 同构、不走鉴权）；`ask` 复用 `Failover`+`get_adaptor().forward` 内部直连 chat（不走 `run_chat_pipeline` 的 HTTP 驱动）。v1 嵌入通道单一尝试、答案模型经网关分发。至此 RAG 端到端可用：新建 KB → `ingest_kb_text` 摄入 → `ask_kb`/POST /v1/rag/ask 问答。
 6. **Phase 1 仍可选增强**：本地目录/Git/URL 摄入源（v1 仅 text）、`/v1/rag/ask` 的流式回答、多轮 deep-research、检索 Top-K 的 Token 降级裁切、向量存储升级 `hnsw_rs`（v1.5）。
 7. 每阶段结束你本机 `cargo build` + `npm run build` 验证（铁律：编译/提交归你）。
+8. **FTS5 关键词检索已实施（D7）**：新迁移 `013_kb_chunks_fts.sql`（独立 FTS5 表 + trigram tokenizer）+ `retrieve.rs` 关键词/混合模式改用 FTS5 trigram（`MATCH` + `-rank`）+ `store` 三处写入/删除点同步（`insert_document` / `purge_document_chunks` / `purge_kb_chunks`，覆盖 `commands/rag.rs` 与 `importer.rs`）。16 项 rag 测试全绿（D7 7 项 + D8 9 项）。**实现修正**：FTS5 是虚拟表，不支持普通二级索引，设计稿里的 `CREATE INDEX` 已删除，`kb_id` 走 `WHERE` 约束过滤（本地规模足够）；≤2 字查询回退空、由混合模式向量部分兜底。
+9. **类型感知分块已实施（D8）**：`parser.rs`（扩展名→类型识别）/ `code_parser.rs`（tree-sitter 符号提取，rust/python/ts/tsx/js/jsx/go/java）/ `chunk.rs`（`split` 分发器：Markdown 标题感知 / 代码符号感知 / 其余 token 化）+ 迁移 `014_kb_chunks_meta.sql`（heading/language/symbol_*/line_*/source_path 列）+ `ingest`/`importer` 接入（按文件名/内容判定类型并传来源路径）。不支持的语言自动回退普通切分，不降级。
+
+---
+
+## 11. FTS5 关键词检索实施设计（D7）
+
+### 11.1 背景与目标
+当前 `rag/retrieve.rs` 的 `Keyword` / `Hybrid` 模式用**手写零依赖 BM25**（CJK bigram + ASCII 词切分，标准 k1/b 公式）。可工作但有两个短板：
+- 纯 Rust 实现，每个查询在 Rust 内遍历本批全部分块算 IDF/词频，规模增大后不如 SQLite 原生索引高效；
+- 分词与归一化逻辑自维护，边界 case（标点、全角、混合语种）需手工兜。
+
+目标：用 **SQLite FTS5 原生全文索引** 替换手写 BM25 的索引与打分，保留现有 `RetrievalMode{Vector,Keyword,Hybrid}` 接口与 hybrid 融合逻辑不变。
+
+### 11.2 sqlite 版本确认（前提）
+- DongX 用 `sqlx = "0.8.6"`，features 仅 `runtime-tokio/sqlite/chrono/json/macros`，**无 `sqlite-unbundled`** → 默认 **bundled sqlite**。
+- bundled sqlite 版本 **3.46.1**（≥ FTS5 trigram tokenizer 所需的 3.34.0）→ **trigram 完全可用**。
+
+### 11.3 决策 D7：FTS5 + trigram tokenizer（用户 2026-09-03 拍板）
+- 选 **trigram** 而非查询侧 bigram 化：trigram 对中文子串匹配最友好、无需空格，且 DongX bundled sqlite 已支持。
+- 已知限制：trigram 最短匹配 3 字符，**≤2 字查询关键词检索会漏**（"知识" 查不到）。缓解：查询长度 < 3 时 keyword 分支 fallback 到向量检索（或 hybrid 以向量为主），UI 可提示。
+
+### 11.4 迁移设计（`013_kb_chunks_fts.sql`，新文件，禁改 001–012）
+```sql
+-- 独立 FTS5 表（content 自存，不 external content：kb_chunks 主键为 TEXT uuid 无 rowid，external content 不可用）
+CREATE VIRTUAL TABLE IF NOT EXISTS kb_chunks_fts USING fts5(
+    chunk_id UNINDEXED,   -- 对应 kb_chunks.id (TEXT uuid)
+    kb_id    UNINDEXED,   -- 过滤用
+    content,              -- 被索引正文
+    tokenize = 'trigram'
+);
+CREATE INDEX IF NOT EXISTS idx_kb_chunks_fts_kb ON kb_chunks_fts(kb_id);
+```
+> 不选 external content（+ 触发器同步）的原因：`kb_chunks` 主键为 TEXT uuid → 无 rowid → FTS5 external content 要求 content 表有 INTEGER rowid，不满足。故用**独立表 + 应用层显式同步**，完全不动 `kb_chunks` 结构。
+
+### 11.5 索引维护策略（三写入点 + 删除级联，必须全同步）
+- `rag/store.rs::insert_document`：写 chunk 成功后 `INSERT INTO kb_chunks_fts(chunk_id,kb_id,content) VALUES (?,?,?)`。
+- `rag/importer.rs::ingest_file`：同 insert_document（经同一 `insert_document` 路径，故只需在 `insert_document` 一处加即可；确认 importer 走 insert_document）。
+- `rag/rag.rs::reindex_kb`：重嵌前先 `DELETE FROM kb_chunks_fts WHERE kb_id=?` 再全量重插。
+- `commands/rag.rs::delete_document` / `delete_source` 级联删 chunk 时：`DELETE FROM kb_chunks_fts WHERE chunk_id=?`（或按 kb 批量）。
+- **测试必须覆盖**三写入点 + 删除，防止索引与正文漂移。
+
+### 11.6 `retrieve.rs` 改动（keyword 模式）
+- `keyword_mode` / `hybrid` 的关键词得分来源由手写 `bm25_scores` 改为 FTS5 查询：
+  ```rust
+  let rows = sqlx::query_as::<_,(String,f64)>(
+      "SELECT chunk_id, -rank FROM kb_chunks_fts \
+       WHERE kb_id = ? AND content MATCH ? ORDER BY rank LIMIT ?"
+  ).bind(kb_id).bind(&norm_query).fetch_all(pool).await?;
+  ```
+  `-rank` 即 FTS5 BM25 得分（rank 为负），收集 `chunk_id → score` 映射；再按 `chunk_id` 回查 `kb_chunks` 取 `content` / `doc_id`。
+- **hybrid 融合逻辑不变**：向量 cosine（0–1）与 FTS5 得分（min-max 归一化到 0–1）按 `final = (1-kw)·vec + kw·fts` 融合，`kw` 来自 `keyword_weight`。
+- 查询长度 < 3 时：keyword 分支回退向量路径（或返回空，由 hybrid 的向量部分兜底）。
+
+### 11.7 测试策略
+- 新增 `retrieve.rs` 测试：
+  - `trigram_matches_cjk_substring`："知识库" 能命中含 "本知识库内容" 的 chunk；
+  - `trigram_matches_ascii`："rust" 命中含 "Rust" 的 chunk（大小写行为需实测）；
+  - `short_query_under_3_chars_falls_back`：2 字查询 keyword 模式不报错（回退向量或空）；
+  - `hybrid_still_fuses_after_fts`：hybrid 融合后 top-1 与纯向量一致或兼容。
+- 测试 helper 插 chunk 时必须**同步插 `kb_chunks_fts`**（否则 FTS 查询空）。
+
+### 11.8 风险与回滚
+- **写入点遗漏** → 索引与正文漂移：靠 §11.5 三处 + 测试防回归；回滚可 `DELETE FROM kb_chunks_fts` 后全 KB `reindex_kb` 重建。
+- **trigram 体积**：3 字符切片多，索引略大；KB 规模小，可接受。
+- **2 字查询缺口**：已在 §11.3 标注，产品层接受。
+- 不删现有手写 BM25 函数直到 FTS5 全绿、测试覆盖；切换为「先并行、后删」。

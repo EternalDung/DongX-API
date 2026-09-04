@@ -199,7 +199,7 @@ async fn search_knowledge_base(pool: &SqlitePool, args: Value) -> ToolCallResult
     )
     .await
     {
-        Ok(v) => v.into_iter().next().unwrap_or_default(),
+        Ok((v, _tokens)) => v.into_iter().next().unwrap_or_default(),
         Err(e) => {
             return ToolCallResult::err(format!(
                 "向量化失败（渠道 {} / 模型 {}）：{}",
