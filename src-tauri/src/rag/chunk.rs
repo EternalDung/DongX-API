@@ -96,7 +96,14 @@ pub fn split(content: &str, kind: FileKind, source_path: Option<&str>, config: &
         ..Default::default()
     };
     match kind {
-        FileKind::Markdown => split_markdown(content, config, &base_meta),
+        FileKind::Markdown => {
+            // 同 Structured：不带 language 标签前端回退纯文本无高亮。
+            let meta = ChunkMeta {
+                language: Some("md".to_string()),
+                ..base_meta
+            };
+            split_markdown(content, config, &meta)
+        }
         FileKind::Code(ext) => {
             let meta = ChunkMeta {
                 language: Some(ext.clone()),
@@ -342,6 +349,7 @@ mod tests {
         let chunks = split(md, FileKind::Markdown, None, &SplitConfig::default());
         assert!(chunks.iter().any(|c| c.meta.heading.as_deref() == Some("Title")));
         assert!(chunks.iter().any(|c| c.meta.heading.as_deref() == Some("Section A")));
+        assert!(chunks.iter().all(|c| c.meta.language.as_deref() == Some("md")));
     }
 
     #[test]
