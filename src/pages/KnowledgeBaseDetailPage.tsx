@@ -505,7 +505,7 @@ function DocumentsTab({
                     {expanded &&
                       (c.language ? (
                         <div className="border-t">
-                          <CodeBlock code={c.content} lang={c.language} />
+                          <CodeBlock code={c.content} lang={c.language} copyable />
                         </div>
                       ) : (
                         <pre className="max-h-72 overflow-auto whitespace-pre-wrap border-t bg-muted p-3 font-mono text-[11px] text-foreground">
