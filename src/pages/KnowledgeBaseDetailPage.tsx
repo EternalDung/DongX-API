@@ -126,21 +126,46 @@ function formatNumber(n: number): string {
   return n.toLocaleString("en-US");
 }
 
-/** 文件名扩展名 → 展示标签（md / python / typescript ...） */
-function formatLabel(filename: string): string {
+/** 文件名 → 小写扩展名（无扩展名返回空串），用于语言徽章展示与配色。 */
+function docExt(filename: string): string {
   const m = filename.match(/\.([a-z0-9]+)$/i);
-  if (!m) return "";
-  const ext = m[1].toLowerCase();
-  const map: Record<string, string> = {
-    md: "md", markdown: "md", txt: "txt", text: "txt", log: "log",
-    py: "python", rs: "rust", go: "go", java: "java", kt: "kotlin",
-    js: "javascript", jsx: "jsx", ts: "typescript", tsx: "tsx",
-    c: "c", cpp: "cpp", h: "c", hpp: "cpp",
-    json: "json", yaml: "yaml", yml: "yaml", toml: "toml", xml: "xml",
-    html: "html", css: "css", sh: "shell", csv: "csv",
-  };
-  return map[ext] ?? ext;
+  return m ? m[1].toLowerCase() : "";
 }
+
+/**
+ * 语言徽章低饱和配色：pastel 底 + 600 深字（暗色走 /15 透明底 + 300 浅字），
+ * 色感与知识库 icon 一致。未命中的扩展名回落灰色。
+ */
+const LANG_BADGE_CLS: Record<string, string> = {
+  java: "bg-blue-100 text-blue-700 dark:bg-blue-500/15 dark:text-blue-300",
+  ts: "bg-blue-100 text-blue-700 dark:bg-blue-500/15 dark:text-blue-300",
+  tsx: "bg-blue-100 text-blue-700 dark:bg-blue-500/15 dark:text-blue-300",
+  js: "bg-yellow-100 text-yellow-700 dark:bg-yellow-500/15 dark:text-yellow-300",
+  jsx: "bg-yellow-100 text-yellow-700 dark:bg-yellow-500/15 dark:text-yellow-300",
+  py: "bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300",
+  rs: "bg-orange-100 text-orange-700 dark:bg-orange-500/15 dark:text-orange-300",
+  html: "bg-orange-100 text-orange-700 dark:bg-orange-500/15 dark:text-orange-300",
+  htm: "bg-orange-100 text-orange-700 dark:bg-orange-500/15 dark:text-orange-300",
+  go: "bg-cyan-100 text-cyan-700 dark:bg-cyan-500/15 dark:text-cyan-300",
+  c: "bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300",
+  cpp: "bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300",
+  h: "bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300",
+  cs: "bg-violet-100 text-violet-700 dark:bg-violet-500/15 dark:text-violet-300",
+  php: "bg-indigo-100 text-indigo-700 dark:bg-indigo-500/15 dark:text-indigo-300",
+  sql: "bg-indigo-100 text-indigo-700 dark:bg-indigo-500/15 dark:text-indigo-300",
+  md: "bg-teal-100 text-teal-700 dark:bg-teal-500/15 dark:text-teal-300",
+  markdown: "bg-teal-100 text-teal-700 dark:bg-teal-500/15 dark:text-teal-300",
+  xml: "bg-purple-100 text-purple-700 dark:bg-purple-500/15 dark:text-purple-300",
+  svg: "bg-purple-100 text-purple-700 dark:bg-purple-500/15 dark:text-purple-300",
+  json: "bg-lime-100 text-lime-700 dark:bg-lime-500/15 dark:text-lime-300",
+  yaml: "bg-pink-100 text-pink-700 dark:bg-pink-500/15 dark:text-pink-300",
+  yml: "bg-pink-100 text-pink-700 dark:bg-pink-500/15 dark:text-pink-300",
+  css: "bg-pink-100 text-pink-700 dark:bg-pink-500/15 dark:text-pink-300",
+  sh: "bg-green-100 text-green-700 dark:bg-green-500/15 dark:text-green-300",
+  bash: "bg-green-100 text-green-700 dark:bg-green-500/15 dark:text-green-300",
+  csv: "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300",
+  toml: "bg-stone-100 text-stone-700 dark:bg-stone-500/15 dark:text-stone-300",
+};
 
 // ---------------------------------------------------------------------------
 // 文档 Tab：拖拽上传 + 文档列表
@@ -344,69 +369,100 @@ function DocumentsTab({
           description="拖拽或选择文件即可摄入。文档会按长度自动分块并向量化，随后可在「问答」中检索引用。"
         />
       ) : (
-        <div className="divide-y rounded-lg border">
-          {documents.map((d, idx) => (
-            <div
-              key={d.id}
-              className="flex items-center justify-between gap-3 px-3 py-2"
-            >
-              <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  {d.status === 1 ? (
-                    <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-500" />
-                  ) : d.status === 2 ? (
-                    <XCircle className="h-4 w-4 shrink-0 text-destructive" />
-                  ) : (
-                    <Loader2 className="h-4 w-4 shrink-0 animate-spin text-muted-foreground" />
-                  )}
-                  <span className="shrink-0 font-mono text-xs text-muted-foreground">
-                    {idx + 1}#
-                  </span>
-                  <span className="truncate font-medium">{d.title}</span>
-                  {formatLabel(d.title) && (
-                    <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium uppercase text-muted-foreground">
-                      {formatLabel(d.title)}
-                    </span>
-                  )}
-                  <StatusBadge
-                    tone={
-                      d.status === 1
-                        ? "success"
-                        : d.status === 2
-                          ? "destructive"
-                          : "warning"
-                    }
-                  >
-                    {d.status === 1 ? "就绪" : d.status === 2 ? "失败" : "处理中"}
-                  </StatusBadge>
-                </div>
-                <p className="mt-0.5 text-[11px] text-muted-foreground">
-                  {formatBytes(d.file_size)} · {d.chunk_count} 片段 ·{" "}
-                  {formatNumber(d.token_count)} tokens · {fmtTime(d.created_at)}
-                  {d.error_message ? ` · ${d.error_message}` : ""}
-                </p>
-              </div>
-              <Button
-                variant="ghost"
-                size="icon"
-                title="查看分片"
-                className="text-muted-foreground hover:bg-muted hover:text-foreground"
-                disabled={d.chunk_count === 0}
-                onClick={() => openChunks(d)}
-              >
-                <Layers />
-              </Button>
-              <Button
-                variant="ghost"
-                size="icon"
-                title="删除文档"
-                className="text-destructive hover:bg-destructive/10 hover:text-destructive"
-                onClick={() => setDocDeleteTarget(d)}
-              >
-                <Trash2 />
-              </Button>
+        <div className="overflow-x-auto rounded-lg border">
+          <div className="min-w-[680px]">
+            {/* 列头 */}
+            <div className="grid grid-cols-[18px_26px_minmax(0,1fr)_44px_72px_60px_88px_76px] items-center gap-2.5 border-b bg-muted/30 px-3.5 py-1.5 text-[11px] text-muted-foreground">
+              <span />
+              <span className="text-right">#</span>
+              <span>名称</span>
+              <span className="text-right">片段</span>
+              <span className="text-right">tokens</span>
+              <span className="text-right">大小</span>
+              <span>上传时间</span>
+              <span className="text-right">操作</span>
             </div>
-          ))}
+
+            <div className="divide-y">
+              {documents.map((d, idx) => {
+                const ext = docExt(d.title);
+                return (
+                  <div
+                    key={d.id}
+                    className="group grid grid-cols-[18px_26px_minmax(0,1fr)_44px_72px_60px_88px_76px] items-center gap-2.5 px-3.5 py-2.5 transition-colors hover:bg-muted/40"
+                  >
+                    <span className="flex justify-center">
+                      {d.status === 1 ? (
+                        <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                      ) : d.status === 2 ? (
+                        <XCircle className="h-4 w-4 text-destructive" />
+                      ) : (
+                        <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                      )}
+                    </span>
+                    <span className="text-right font-mono text-xs text-muted-foreground tabular-nums">
+                      {idx + 1}
+                    </span>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="truncate text-[13px] font-medium">
+                          {d.title}
+                        </span>
+                        {ext && (
+                          <span
+                            className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] leading-none ${
+                              LANG_BADGE_CLS[ext] ??
+                              "bg-muted text-muted-foreground"
+                            }`}
+                          >
+                            {ext}
+                          </span>
+                        )}
+                      </div>
+                      {d.error_message && (
+                        <p className="mt-0.5 truncate text-[11px] text-destructive/80">
+                          {d.error_message}
+                        </p>
+                      )}
+                    </div>
+                    <span className="text-right text-[13px] tabular-nums">
+                      {d.chunk_count}
+                    </span>
+                    <span className="text-right text-[13px] tabular-nums">
+                      {formatNumber(d.token_count)}
+                    </span>
+                    <span className="text-right text-[13px] tabular-nums">
+                      {formatBytes(d.file_size)}
+                    </span>
+                    <span className="text-xs text-muted-foreground tabular-nums">
+                      {fmtTime(d.created_at)}
+                    </span>
+                    <span className="flex items-center justify-end gap-1">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        title="查看分片"
+                        className="h-8 w-8 text-muted-foreground hover:bg-muted hover:text-foreground"
+                        disabled={d.chunk_count === 0}
+                        onClick={() => openChunks(d)}
+                      >
+                        <Layers className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        title="删除文档"
+                        className="h-8 w-8 text-muted-foreground/60 hover:bg-destructive/10 hover:text-destructive group-hover:text-muted-foreground"
+                        onClick={() => setDocDeleteTarget(d)}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
         </div>
       )}
 
