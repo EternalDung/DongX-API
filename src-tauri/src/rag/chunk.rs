@@ -13,33 +13,76 @@ use crate::rag::code_parser::{self, Symbol};
 use crate::rag::models::{Chunk, ChunkMeta};
 use crate::rag::parser::FileKind;
 
-/// 分块尺寸配置（字符为单位，沿用 DongX 已有的 1500 / 200 习惯）。
+/// token → 字符 的经验换算比（英文约 4 字符/token，中文约 2，详见 [`estimate_tokens`]）。
+/// 分块引擎内部按字符切分（需对齐行边界），因此把用户侧的 token 预算换算成
+/// 字符预算后再交给切分逻辑。与常见参考实现的「字符数 ≈ token×4」启发式一致。
+const CHARS_PER_TOKEN: usize = 4;
+
+/// 分块尺寸配置。
+///
+/// 用户侧语义以 **token** 为单位（对齐嵌入模型的上下文 / 计费约束）；引擎内部仍按
+/// 字符切分，故从 token 预算派生出 `max_chars` / `overlap_chars` 供切分逻辑使用。
 #[derive(Debug, Clone)]
 pub struct SplitConfig {
+    pub max_tokens: usize,
+    pub overlap_tokens: usize,
+    /// 派生：token 预算换算出的字符预算（= max_tokens × [`CHARS_PER_TOKEN`]）。
     pub max_chars: usize,
+    /// 派生：重叠的字符预算（= overlap_tokens × [`CHARS_PER_TOKEN`]）。
     pub overlap_chars: usize,
 }
 
 impl Default for SplitConfig {
+    /// 引擎默认：512 token / 64 token 重叠（约 2048 / 256 字符）。
     fn default() -> Self {
-        Self {
-            max_chars: 1500,
-            overlap_chars: 200,
-        }
+        Self::from_tokens(512, 64)
     }
 }
 
 impl SplitConfig {
-    /// 由知识库配置构造：任一为 0 时回落引擎默认（1500 / 200）。
-    pub fn from_kb(chunk_size: i64, chunk_overlap: i64) -> Self {
+    /// 由 token 预算构造（内部换算成字符预算）。
+    fn from_tokens(max_tokens: usize, overlap_tokens: usize) -> Self {
         Self {
-            max_chars: if chunk_size > 0 { chunk_size as usize } else { 1500 },
-            overlap_chars: if chunk_overlap > 0 {
-                chunk_overlap as usize
-            } else {
-                200
-            },
+            max_tokens,
+            overlap_tokens,
+            max_chars: max_tokens.saturating_mul(CHARS_PER_TOKEN),
+            overlap_chars: overlap_tokens.saturating_mul(CHARS_PER_TOKEN),
         }
+    }
+
+    /// 由知识库配置构造：把存储的 token 数换算成字符预算。
+    /// 任一为 0 / 负数时回落引擎默认（512 / 64 token）。
+    pub fn from_kb(chunk_size: i64, chunk_overlap: i64) -> Self {
+        let max_tokens = if chunk_size > 0 { chunk_size as usize } else { 512 };
+        let overlap_tokens = if chunk_overlap > 0 {
+            chunk_overlap as usize
+        } else {
+            64
+        };
+        Self::from_tokens(max_tokens, overlap_tokens)
+    }
+}
+
+/// 近似 token 计数（CJK 感知，零依赖）。
+///
+/// 启发式：ASCII 字符约 4 个/token，非 ASCII（中文等）约 2 个/token。
+/// 与常见参考实现的 `(ascii/4) + (cjk/2)` 思路一致，用于把「字符度量」对齐到
+/// 「token 度量」——例如判断单个符号是否超过块预算、需要再切分。
+pub fn estimate_tokens(text: &str) -> usize {
+    let mut ascii = 0usize;
+    let mut non_ascii = 0usize;
+    for c in text.chars() {
+        if c.is_ascii() {
+            ascii += 1;
+        } else {
+            non_ascii += 1;
+        }
+    }
+    let tokens = ascii / 4 + non_ascii / 2;
+    if text.chars().count() == 0 {
+        0
+    } else {
+        tokens.max(1)
     }
 }
 
@@ -156,7 +199,7 @@ fn split_markdown(content: &str, config: &SplitConfig, meta: &ChunkMeta) -> Vec<
     // 超大段再按普通尺寸细分（保留 heading 元数据）
     let mut chunks = Vec::new();
     for (c, heading, start) in raw {
-        if c.chars().count() > config.max_chars * 2 {
+        if estimate_tokens(&c) > config.max_tokens.saturating_mul(2) {
             let sub_meta = ChunkMeta {
                 heading: heading.clone(),
                 ..meta.clone()
@@ -199,7 +242,6 @@ fn split_code_by_symbols(
             continue;
         }
         let chunk_content: String = lines[start..=end].join("\n");
-        let chars = chunk_content.chars().count();
 
         let sym_meta = ChunkMeta {
             heading: Some(format!("{}: {}", sym.kind.as_str(), sym.name)),
@@ -212,8 +254,8 @@ fn split_code_by_symbols(
             source_path: meta.source_path.clone(),
         };
 
-        // 超大符号内部再切分
-        if chars > config.max_chars * 3 {
+        // 超大符号内部再切分（以 token 预算判断，字符度量在中文/代码混排下失真）
+        if estimate_tokens(&chunk_content) > config.max_tokens.saturating_mul(3) {
             chunks.extend(split_text(&chunk_content, config, &sym_meta));
         } else {
             chunks.push(Chunk {
@@ -318,5 +360,34 @@ mod tests {
         let chunks = split(code, FileKind::Code("kt".to_string()), Some("Main.kt"), &SplitConfig::default());
         assert!(!chunks.is_empty());
         assert!(chunks.iter().all(|c| c.meta.symbol_name.is_none()));
+    }
+
+    #[test]
+    fn from_kb_treats_input_as_tokens() {
+        // 512 token → 约 2048 字符预算（× CHARS_PER_TOKEN）
+        let c = SplitConfig::from_kb(512, 64);
+        assert_eq!(c.max_tokens, 512);
+        assert_eq!(c.overlap_tokens, 64);
+        assert_eq!(c.max_chars, 512 * 4);
+        assert_eq!(c.overlap_chars, 64 * 4);
+        // 0 回落引擎默认（512 / 64 token）
+        let d = SplitConfig::from_kb(0, 0);
+        assert_eq!(d.max_tokens, 512);
+        assert_eq!(d.overlap_tokens, 64);
+        assert_eq!(d.max_chars, 512 * 4);
+    }
+
+    #[test]
+    fn estimate_tokens_is_cjk_aware() {
+        // 纯英文 4 字符 ≈ 1 token
+        assert_eq!(estimate_tokens("abcd"), 1);
+        // 纯中文 2 字符 ≈ 1 token
+        assert_eq!(estimate_tokens("中文"), 1);
+        // 空串 → 0
+        assert_eq!(estimate_tokens(""), 0);
+        // 较长中文串落在合理范围（约 len/2）
+        let s = "这是一段比较长的中文文本用于估算token数量看看是否准确一些";
+        let t = estimate_tokens(s);
+        assert!(t > 5 && t < 30);
     }
 }

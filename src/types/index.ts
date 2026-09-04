@@ -384,9 +384,9 @@ export interface KnowledgeBase {
   exclude_files: string | null;
   /** 摄入时仅包含的文件类型（逗号分隔，null=全部） */
   include_file_types: string | null;
-  /** 分块大小（字符数，0=引擎默认） */
+  /** 分块大小（token 数，0=引擎默认 512） */
   chunk_size: number | null;
-  /** 分块重叠字符数（0=引擎默认） */
+  /** 分块重叠 token 数（0=引擎默认 64） */
   chunk_overlap: number | null;
   created_at: string;
   updated_at: string;
@@ -418,9 +418,9 @@ export interface KnowledgeBaseUpdate {
   exclude_dirs?: string | null;
   exclude_files?: string | null;
   include_file_types?: string | null;
-  /** 分块大小（字符数，0=引擎默认） */
+  /** 分块大小（token 数，0=引擎默认 512） */
   chunk_size?: number | null;
-  /** 分块重叠字符数（0=引擎默认） */
+  /** 分块重叠 token 数（0=引擎默认 64） */
   chunk_overlap?: number | null;
 }
 
@@ -514,6 +514,25 @@ export interface KbDocument {
   token_count: number;
   created_at: string;
   updated_at: string;
+}
+
+/** 文档分片摘要 — 对应 Rust DocumentChunk（content 为完整文本，前端按需内联展开） */
+export interface KbDocumentChunk {
+  seq: number;
+  token_count: number;
+  symbol_name: string | null;
+  symbol_kind: string | null;
+  /** 语言标识（如 python / rust / javascript / markdown / text），用于前端 CodeBlock 预览的语言切换 */
+  language: string | null;
+  line_start: number | null;
+  line_end: number | null;
+  content: string;
+}
+
+/** 分页分片结果 — 对应 Rust DocumentChunksPage */
+export interface KbDocumentChunksPage {
+  total: number;
+  chunks: KbDocumentChunk[];
 }
 
 /** 摄入来源 — 对应 Rust KbSource（不含 token 字段） */

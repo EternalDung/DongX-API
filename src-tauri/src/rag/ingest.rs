@@ -7,7 +7,7 @@ use serde::Serialize;
 use crate::error::AppError;
 use crate::rag::chunk::{split, SplitConfig};
 use crate::rag::embed::embed_texts;
-use crate::rag::parser::detect_kind_by_content;
+use crate::rag::parser::{detect_kind_by_content, detect_kind_by_name, FileKind};
 use crate::rag::store::{content_hash, find_document_by_hash, get_kb, insert_document, ChunkInput};
 
 /// 摄入结果。
@@ -48,7 +48,14 @@ pub async fn ingest_text(
         });
     }
 
-    let kind = detect_kind_by_content(text);
+    // 优先按文件名扩展名判定类型（与 importer 路径一致：.py/.ts/.rs 等走
+    // AST 符号切分并打上 `language` 标签，前端 CodeBlock 才能高亮预览）。
+    // 扩展名无法识别（无扩展名或非常见类型）时，回退到按内容启发式判定
+    // （如以 `# ` 开头的视为 Markdown）。
+    let kind = match detect_kind_by_name(title) {
+        FileKind::Plain => detect_kind_by_content(text),
+        other => other,
+    };
     let config = SplitConfig::from_kb(kb.chunk_size, kb.chunk_overlap);
     let chunks = split(text, kind, None, &config);
     if chunks.is_empty() {

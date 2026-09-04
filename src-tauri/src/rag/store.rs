@@ -5,6 +5,7 @@ use sqlx::{Row, SqlitePool};
 use sha2::{Digest, Sha256};
 
 use crate::error::{AppError, AppResult};
+use crate::rag::chunk::estimate_tokens;
 use crate::rag::models::{ChunkMeta, KnowledgeBaseRow};
 
 /// 待写入的一个分块：内容 + 向量 + 语义元数据。
@@ -102,7 +103,7 @@ pub async fn insert_document(
                 id, kb_id, doc_id, seq, content, embedding, embedding_model, token_count, \
                 heading, language, symbol_name, symbol_kind, signature, line_start, line_end, source_path, \
                 created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&chunk_id)
         .bind(kb_id)
@@ -111,6 +112,9 @@ pub async fn insert_document(
         .bind(&ci.content)
         .bind(emb_json)
         .bind(embedding_model)
+        // token_count：每分块按 CJK 感知近似估算（与 chunk.rs::estimate_tokens 保持一致），
+        // 老数据落库时为 0，新摄入自动按内容估算；显示在「查看分片」下钻的 token 列。
+        .bind(estimate_tokens(&ci.content) as i32)
         .bind(&ci.meta.heading)
         .bind(&ci.meta.language)
         .bind(&ci.meta.symbol_name)

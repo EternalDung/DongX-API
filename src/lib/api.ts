@@ -36,6 +36,7 @@ import type {
   IngestResult,
   AskResult,
   KbDocument,
+  KbDocumentChunksPage,
   KbSource,
   ImportSourceInput,
   RetrievalHit,
@@ -403,6 +404,18 @@ export const knowledgeApi = {
   /** 删除文档（级联删除其向量分块） */
   removeDocument: (docId: string): Promise<void> =>
     invoke<void>("delete_document", { id: docId }),
+
+  /** 列出某文档下的分片（分页），用于「查看分片」下钻预览 */
+  chunks: (
+    docId: string,
+    limit?: number,
+    offset?: number,
+  ): Promise<KbDocumentChunksPage> =>
+    invoke<KbDocumentChunksPage>("list_document_chunks", {
+      docId,
+      limit: limit ?? null,
+      offset: offset ?? null,
+    }),
 
   /** 导入来源（Git / URL / 本地目录）：写入来源记录并后台跑导入，立即返回该行 */
   importSource: (kbId: string, input: ImportSourceInput): Promise<KbSource> =>

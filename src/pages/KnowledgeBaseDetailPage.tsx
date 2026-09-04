@@ -76,6 +76,8 @@ import type {
   Channel,
   McpStatus,
   KbDocument,
+  KbDocumentChunk,
+  KbDocumentChunksPage,
   KbSource,
   ImportSourceInput,
   RetrievalHit,
@@ -147,7 +149,14 @@ function formatLabel(filename: string): string {
 const ACCEPT =
   ".txt,.md,.markdown,.json,.yaml,.yml,.csv,.log,.ts,.tsx,.js,.jsx,.py,.rs,.go,.java,.kt,.c,.cpp,.h,.sh,.toml,.xml,.html,.css";
 
-function DocumentsTab({ kb }: { kb: KnowledgeBase }) {
+function DocumentsTab({
+  kb,
+  onChanged,
+}: {
+  kb: KnowledgeBase;
+  /** 文档增删后回调，用于刷新索引统计 / 面包屑计数 */
+  onChanged?: () => void;
+}) {
   const toast = useToast();
   const [documents, setDocuments] = useState<KbDocument[]>([]);
   const [loading, setLoading] = useState(true);
@@ -156,6 +165,38 @@ function DocumentsTab({ kb }: { kb: KnowledgeBase }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [docDeleteTarget, setDocDeleteTarget] = useState<KbDocument | null>(null);
   const [deletingDoc, setDeletingDoc] = useState(false);
+
+  // 「查看分片」下钻状态
+  const [chunkDoc, setChunkDoc] = useState<KbDocument | null>(null);
+  const [chunkPage, setChunkPage] = useState(0);
+  const [chunkData, setChunkData] = useState<KbDocumentChunksPage | null>(null);
+  const [chunkLoading, setChunkLoading] = useState(false);
+  const [expandedSeq, setExpandedSeq] = useState<number | null>(null);
+  const CHUNK_PAGE_SIZE = 50;
+
+  const loadChunks = async (doc: KbDocument, page: number) => {
+    setChunkLoading(true);
+    setExpandedSeq(null);
+    try {
+      const data = await knowledgeApi.chunks(
+        doc.id,
+        CHUNK_PAGE_SIZE,
+        page * CHUNK_PAGE_SIZE,
+      );
+      setChunkData(data);
+      setChunkPage(page);
+    } catch (e) {
+      console.error("加载分片失败：", e);
+      toast.error("加载分片失败");
+    } finally {
+      setChunkLoading(false);
+    }
+  };
+
+  const openChunks = (doc: KbDocument) => {
+    setChunkDoc(doc);
+    loadChunks(doc, 0);
+  };
 
   const refresh = async () => {
     setLoading(true);
@@ -189,6 +230,7 @@ function DocumentsTab({ kb }: { kb: KnowledgeBase }) {
           toast.success(`已摄入「${file.name}」，共 ${res.chunk_count} 个片段`);
         }
         await refresh();
+        onChanged?.();
       } catch (e) {
         console.error("摄入失败：", e);
         toast.error(`摄入「${file.name}」失败：${errMsg(e) || "请重试"}`);
@@ -213,6 +255,7 @@ function DocumentsTab({ kb }: { kb: KnowledgeBase }) {
       toast.success(`已删除文档「${target.title}」`);
       setDocDeleteTarget(null);
       await refresh();
+      onChanged?.();
     } catch (e) {
       console.error("删除文档失败：", e);
       toast.error(`删除失败：${errMsg(e) || "请重试"}`);
@@ -302,7 +345,7 @@ function DocumentsTab({ kb }: { kb: KnowledgeBase }) {
         />
       ) : (
         <div className="divide-y rounded-lg border">
-          {documents.map((d) => (
+          {documents.map((d, idx) => (
             <div
               key={d.id}
               className="flex items-center justify-between gap-3 px-3 py-2"
@@ -316,6 +359,9 @@ function DocumentsTab({ kb }: { kb: KnowledgeBase }) {
                   ) : (
                     <Loader2 className="h-4 w-4 shrink-0 animate-spin text-muted-foreground" />
                   )}
+                  <span className="shrink-0 font-mono text-xs text-muted-foreground">
+                    {idx + 1}#
+                  </span>
                   <span className="truncate font-medium">{d.title}</span>
                   {formatLabel(d.title) && (
                     <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium uppercase text-muted-foreground">
@@ -340,6 +386,16 @@ function DocumentsTab({ kb }: { kb: KnowledgeBase }) {
                   {d.error_message ? ` · ${d.error_message}` : ""}
                 </p>
               </div>
+              <Button
+                variant="ghost"
+                size="icon"
+                title="查看分片"
+                className="text-muted-foreground hover:bg-muted hover:text-foreground"
+                disabled={d.chunk_count === 0}
+                onClick={() => openChunks(d)}
+              >
+                <Layers />
+              </Button>
               <Button
                 variant="ghost"
                 size="icon"
@@ -380,6 +436,121 @@ function DocumentsTab({ kb }: { kb: KnowledgeBase }) {
               {deletingDoc ? "删除中..." : "确认删除"}
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 查看分片 Dialog：分页列出分片，点行内联展开该块全文 */}
+      <Dialog
+        open={chunkDoc !== null}
+        onOpenChange={(o) => !o && setChunkDoc(null)}
+      >
+        <DialogContent className="flex max-h-[85vh] flex-col sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Layers className="h-5 w-5 text-primary" />
+              分片预览 · {chunkDoc?.title}
+            </DialogTitle>
+            <DialogDescription>
+              共 {chunkData?.total ?? 0} 个分片（按 seq 升序，每页 {CHUNK_PAGE_SIZE}）
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
+            {chunkLoading ? (
+              <>
+                <Skeleton className="h-12 w-full" />
+                <Skeleton className="h-12 w-full" />
+                <Skeleton className="h-12 w-full" />
+              </>
+            ) : chunkData && chunkData.chunks.length > 0 ? (
+              chunkData.chunks.map((c: KbDocumentChunk) => {
+                const snippet =
+                  c.content.length > 100
+                    ? c.content.slice(0, 100) + "…"
+                    : c.content;
+                const expanded = expandedSeq === c.seq;
+                return (
+                  <div key={c.seq} className="rounded-lg border">
+                    <button
+                      type="button"
+                      onClick={() => setExpandedSeq(expanded ? null : c.seq)}
+                      className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left"
+                    >
+                      <span className="flex min-w-0 items-center gap-2">
+                        <span className="shrink-0 font-mono text-xs text-muted-foreground">
+                          {c.seq}#
+                        </span>
+                        {c.symbol_name ? (
+                          <span className="truncate text-sm font-medium">
+                            {c.symbol_name}
+                          </span>
+                        ) : (
+                          <span className="truncate text-sm text-muted-foreground">
+                            片段 {c.seq}
+                          </span>
+                        )}
+                        {c.symbol_kind && (
+                          <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium uppercase text-muted-foreground">
+                            {c.symbol_kind}
+                          </span>
+                        )}
+                      </span>
+                      <span className="flex shrink-0 items-center gap-2 text-xs text-muted-foreground">
+                        <span className="hidden max-w-[160px] truncate font-mono sm:inline">
+                          {snippet}
+                        </span>
+                        {typeof c.token_count === "number" ? c.token_count : 0} tokens
+                      </span>
+                    </button>
+                    {expanded &&
+                      (c.language ? (
+                        <div className="border-t">
+                          <CodeBlock code={c.content} lang={c.language} />
+                        </div>
+                      ) : (
+                        <pre className="max-h-72 overflow-auto whitespace-pre-wrap border-t bg-muted p-3 font-mono text-[11px] text-foreground">
+                          {c.content}
+                        </pre>
+                      ))}
+                  </div>
+                );
+              })
+            ) : (
+              <p className="py-8 text-center text-sm text-muted-foreground">
+                该文档暂无分片
+              </p>
+            )}
+          </div>
+
+          {chunkData && chunkData.total > CHUNK_PAGE_SIZE && (
+            <div className="flex items-center justify-between border-t pt-3">
+              <span className="text-xs text-muted-foreground">
+                第 {chunkPage + 1} / {Math.ceil(chunkData.total / CHUNK_PAGE_SIZE)} 页
+              </span>
+              <div className="flex gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={chunkPage === 0 || chunkLoading || !chunkDoc}
+                  onClick={() => chunkDoc && loadChunks(chunkDoc, chunkPage - 1)}
+                >
+                  上一页
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={
+                    (chunkPage + 1) * CHUNK_PAGE_SIZE >= chunkData.total ||
+                    chunkLoading ||
+                    !chunkDoc
+                  }
+                  onClick={() => chunkDoc && loadChunks(chunkDoc, chunkPage + 1)}
+                >
+                  下一页
+                </Button>
+              </div>
+            </div>
+          )}
         </DialogContent>
       </Dialog>
     </div>
@@ -1135,25 +1306,25 @@ function SettingsTab({ kb, onSaved }: { kb: KnowledgeBase; onSaved: (next: Knowl
           </div>
           <div className="grid gap-4 md:grid-cols-3">
             <div className="grid gap-2">
-              <Label htmlFor="set-chunk-size">分块大小</Label>
+              <Label htmlFor="set-chunk-size">分块大小 (token)</Label>
               <Input
                 id="set-chunk-size"
                 type="number"
                 min={100}
                 step={100}
-                placeholder="留空使用引擎默认（1500 字符）"
+                placeholder="留空使用引擎默认（512 token）"
                 value={chunkSize}
                 onChange={(e) => setChunkSize(e.target.value)}
               />
             </div>
             <div className="grid gap-2">
-              <Label htmlFor="set-chunk-overlap">分块重叠</Label>
+              <Label htmlFor="set-chunk-overlap">分块重叠 (token)</Label>
               <Input
                 id="set-chunk-overlap"
                 type="number"
                 min={0}
                 step={50}
-                placeholder="留空使用引擎默认（200 字符）"
+                placeholder="留空使用引擎默认（64 token）"
                 value={chunkOverlap}
                 onChange={(e) => setChunkOverlap(e.target.value)}
               />
@@ -1171,10 +1342,15 @@ function SettingsTab({ kb, onSaved }: { kb: KnowledgeBase; onSaved: (next: Knowl
             </div>
           </div>
           <p className="text-xs text-muted-foreground">
-            分块大小 / 重叠以字符为单位；留空则使用引擎默认（1500 / 200）。
+            分块大小 / 重叠以 token 为单位（留空使用引擎默认 512 / 64）。
             Embedding 批次大小为单次嵌入请求的文本条数，留空使用引擎默认。
             修改后对已摄入文档不回溯，新上传文档按新值分块与嵌入。
           </p>
+          {chunkSize.trim() !== "" && Number(chunkSize) > 8192 && (
+            <p className="text-xs text-amber-500">
+              分块大小 {chunkSize} token 超过常见嵌入模型上下文上限（通常 8192），可能截断或嵌入失败。
+            </p>
+          )}
         </CardContent>
       </Card>
 
@@ -1332,36 +1508,48 @@ function RetrievalTab({ kb }: { kb: KnowledgeBase }) {
 // 索引 Tab：索引状态查看 + 重建索引（按当前嵌入模型重嵌全部分块）
 // ---------------------------------------------------------------------------
 
-function IndexTab({ kb }: { kb: KnowledgeBase }) {
+function IndexTab({
+  kb,
+  status,
+  onRefresh,
+  active,
+}: {
+  kb: KnowledgeBase;
+  /** 索引统计（由父组件持有并刷新，删除文档后自动更新） */
+  status: IndexStatus | null;
+  /** 触发一次统计刷新（父组件实现） */
+  onRefresh: () => void;
+  /** 本 Tab 是否处于激活态（激活时周期性轮询，反映后台向量化进度） */
+  active: boolean;
+}) {
   const toast = useToast();
-  const [status, setStatus] = useState<IndexStatus | null>(null);
-  const [loading, setLoading] = useState(false);
   const [reindexing, setReindexing] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    try {
-      const s = await knowledgeApi.indexStatus(kb.id);
-      setStatus(s);
-    } catch (e) {
-      console.error("获取索引状态失败：", e);
-      toast.error(`获取索引状态失败：${errMsg(e) || "请重试"}`);
-    } finally {
-      setLoading(false);
-    }
-  }, [kb.id, toast]);
-
+  // 激活态下每 4s 轮询一次，让后台向量化进度（已向量化数 / token 数）自动反映，
+  // 不必手动刷新；切走即停止轮询。
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    if (!active) return;
+    const id = setInterval(() => onRefresh(), 4000);
+    return () => clearInterval(id);
+  }, [active, onRefresh]);
+
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    try {
+      await onRefresh();
+    } finally {
+      setRefreshing(false);
+    }
+  };
 
   const handleReindex = async () => {
     setConfirmOpen(false);
     setReindexing(true);
     try {
-      const s = await knowledgeApi.reindex(kb.id);
-      setStatus(s);
+      await knowledgeApi.reindex(kb.id);
+      onRefresh();
       toast.success("索引已重建：全部分块已按当前嵌入模型重新向量化");
     } catch (e) {
       console.error("重建索引失败：", e);
@@ -1427,8 +1615,8 @@ function IndexTab({ kb }: { kb: KnowledgeBase }) {
           )}
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={refresh} disabled={loading || reindexing}>
-            {loading ? "刷新中..." : "刷新"}
+          <Button variant="outline" size="sm" onClick={handleRefresh} disabled={refreshing || reindexing}>
+            {refreshing ? "刷新中..." : "刷新"}
           </Button>
           <Button
             size="sm"
@@ -2168,6 +2356,12 @@ export function KnowledgeBaseDetailPage() {
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
 
+  // 当前激活的 Tab（受控，便于在「索引」Tab 激活时轮询统计）
+  const [activeTab, setActiveTab] = useState("documents");
+  // 索引统计（文档数 / 分块数 / token 数等），由本组件统一持有与刷新，
+  // 删除文档 / 摄入后主动刷新，避免「索引」Tab 显示过时数据。
+  const [indexStatus, setIndexStatus] = useState<IndexStatus | null>(null);
+
   useEffect(() => {
     if (!kbId) return;
     setLoading(true);
@@ -2188,6 +2382,34 @@ export function KnowledgeBaseDetailPage() {
       })
       .finally(() => setLoading(false));
   }, [kbId]);
+
+  // 拉取索引统计（文档数 / 分块数 / 已向量化数 / token 数 / stale 数）
+  const refreshIndex = useCallback(async () => {
+    if (!kbId) return;
+    try {
+      const s = await knowledgeApi.indexStatus(kbId);
+      setIndexStatus(s);
+    } catch (e) {
+      console.error("获取索引状态失败：", e);
+    }
+  }, [kbId]);
+
+  // 重新拉取知识库自身（刷新面包屑的文档 / 切片计数）
+  const refreshKb = useCallback(async () => {
+    if (!kbId) return;
+    try {
+      const list = await knowledgeApi.list();
+      const found = list.find((k) => k.id === kbId) ?? null;
+      if (found) setKb(found);
+    } catch (e) {
+      console.error("刷新知识库失败：", e);
+    }
+  }, [kbId]);
+
+  // 进入页面即拉一次索引统计
+  useEffect(() => {
+    void refreshIndex();
+  }, [refreshIndex]);
 
   if (loading) {
     return (
@@ -2248,7 +2470,7 @@ export function KnowledgeBaseDetailPage() {
       </div>
 
       {/* 顶部水平 Tabs */}
-      <Tabs defaultValue="documents" className="mt-5 w-full">
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="mt-5 w-full">
         <TabsList className="w-full flex-wrap">
           {KB_TABS.map((t) => {
             const Icon = t.icon;
@@ -2262,7 +2484,13 @@ export function KnowledgeBaseDetailPage() {
         </TabsList>
 
         <TabsContent value="documents" className="mt-5">
-          <DocumentsTab kb={kb} />
+          <DocumentsTab
+            kb={kb}
+            onChanged={() => {
+              refreshKb();
+              refreshIndex();
+            }}
+          />
         </TabsContent>
 
         <TabsContent value="sources" className="mt-5">
@@ -2278,7 +2506,12 @@ export function KnowledgeBaseDetailPage() {
         </TabsContent>
 
         <TabsContent value="index" className="mt-5">
-          <IndexTab kb={kb} />
+          <IndexTab
+            kb={kb}
+            status={indexStatus}
+            onRefresh={refreshIndex}
+            active={activeTab === "index"}
+          />
         </TabsContent>
 
         <TabsContent value="settings" className="mt-5">

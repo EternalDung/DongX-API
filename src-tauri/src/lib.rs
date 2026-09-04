@@ -123,6 +123,7 @@ pub fn run() {
             commands::rag::ingest_kb_text,
             commands::rag::ask_kb,
             commands::rag::list_documents,
+            commands::rag::list_document_chunks,
             commands::rag::delete_document,
             commands::rag::import_source,
             commands::rag::list_sources,

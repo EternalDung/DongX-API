@@ -7,22 +7,64 @@ import "prismjs/components/prism-bash";
 import "prismjs/components/prism-javascript";
 import "prismjs/components/prism-typescript";
 import "prismjs/components/prism-python";
+import "prismjs/components/prism-yaml";
+import "prismjs/components/prism-markdown";
 import "prismjs/themes/prism-tomorrow.css";
 
 interface Props {
   code: string;
-  /** 语言标识：json / toml / bash / javascript / typescript / python 等 */
   lang: string;
 }
 
+/// 扩展名 / 别名 → Prism 注册的语法名。
+///
+/// 后端按文件扩展名存 `language`（如 `py` / `ts` / `rs`），而 Prism 以完整名
+/// 注册（`python` / `typescript` / `rust`）。这里做一层归一，避免 `py` 之类
+/// 查不到而回退到 `clike`（几乎无高亮）。
+const LANG_ALIAS: Record<string, string> = {
+  py: "python",
+  js: "javascript",
+  jsx: "javascript",
+  ts: "typescript",
+  tsx: "typescript",
+  sh: "bash",
+  zsh: "bash",
+  shell: "bash",
+  yml: "yaml",
+  md: "markdown",
+  markdown: "markdown",
+  rb: "ruby", // 未内置 → 回落 clike
+  kt: "kotlin",
+  rs: "rust",
+  go: "go",
+  java: "java",
+  c: "c",
+  cpp: "cpp",
+  cs: "csharp",
+  php: "php",
+  swift: "swift",
+  scala: "scala",
+  dart: "dart",
+  sql: "sql",
+  html: "markup",
+  htm: "markup",
+  xml: "markup",
+  svg: "markup",
+  toml: "toml",
+  json: "json",
+  csv: "csv",
+  log: "log",
+};
+
 /**
- * 语法高亮代码块（JSON / TOML / Bash / JS / TS / Python 等）。
+ * 语法高亮代码块（JSON / TOML / Bash / JS / TS / Python / YAML / Markdown 等）。
  * 沿用 prism-tomorrow 暗色主题，与配置文件预览区黑底风格一致。
  */
 export function CodeBlock({ code, lang }: Props) {
   const html = useMemo(() => {
-    const grammar = Prism.languages[lang] ?? Prism.languages.clike;
-    return Prism.highlight(code, grammar, lang);
+    const key = LANG_ALIAS[lang.toLowerCase()] ?? lang;
+    const grammar = Prism.languages[key] ?? Prism.languages.clike;
+    return Prism.highlight(code, grammar, key);
   }, [code, lang]);
 
   return (

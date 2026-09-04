@@ -528,9 +528,78 @@ pub async fn list_documents(
     )
     .bind(&kb_id)
     .fetch_all(&state.db)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(rows)
+}
+
+/// 文档分片摘要（用于前端「查看分片」下钻预览）。
+/// 返回完整 `content`，由前端按需内联展开全文；分页已限制单次体量。
+#[derive(Debug, Serialize)]
+pub struct DocumentChunk {
+    pub seq: i64,
+    pub token_count: i64,
+    pub symbol_name: Option<String>,
+    pub symbol_kind: Option<String>,
+    pub language: Option<String>,
+    pub line_start: Option<i64>,
+    pub line_end: Option<i64>,
+    pub content: String,
+}
+
+/// 分页分片结果。
+#[derive(Debug, Serialize)]
+pub struct DocumentChunksPage {
+    pub total: i64,
+    pub chunks: Vec<DocumentChunk>,
+}
+
+/// 列出某文档下的分片（分页），按 `seq` 升序。
+/// `limit` 默认 50（上限 200），`offset` 默认 0；用于前端「查看分片」下钻预览。
+#[tauri::command]
+pub async fn list_document_chunks(
+    state: State<'_, Arc<AppState>>,
+    doc_id: String,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> Result<DocumentChunksPage, String> {
+    let pool = &state.db;
+    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM kb_chunks WHERE doc_id = ?")
+        .bind(&doc_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let limit = limit.unwrap_or(50).clamp(1, 200);
+    let offset = offset.unwrap_or(0).max(0);
+
+    let rows = sqlx::query(
+        "SELECT seq, token_count, symbol_name, symbol_kind, language,
+                line_start, line_end, content
+         FROM kb_chunks WHERE doc_id = ? ORDER BY seq ASC LIMIT ? OFFSET ?",
+    )
+    .bind(&doc_id)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
     .await
     .map_err(|e| e.to_string())?;
-    Ok(rows)
+
+    let chunks = rows
+        .into_iter()
+        .map(|row| DocumentChunk {
+            seq: row.get("seq"),
+            token_count: row.get("token_count"),
+            symbol_name: row.get("symbol_name"),
+            symbol_kind: row.get("symbol_kind"),
+            language: row.get("language"),
+            line_start: row.get("line_start"),
+            line_end: row.get("line_end"),
+            content: row.get("content"),
+        })
+        .collect();
+
+    Ok(DocumentChunksPage { total, chunks })
 }
 
 /// 删除文档，并级联删除其下全部向量分块（本项目未开 FK，需手动级联）。
