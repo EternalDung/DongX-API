@@ -1,4 +1,10 @@
-//! MCP HTTP 路由：单端点 POST /mcp，按 JSON-RPC 2.0 分发。
+//! MCP HTTP 路由：单端点 POST /mcp（MCP Streamable HTTP transport），
+//! 按 JSON-RPC 2.0 分发。
+//!
+//! 传输层遵循 2025-03-26 引入的 Streamable HTTP 规范（取代已废弃的
+//! legacy HTTP+SSE 双端点）：客户端向同一 `POST /mcp` 发 JSON-RPC，并可在
+//! `Accept` 头声明 `text/event-stream` 以接收 SSE 事件流形式的响应；服务端
+//! 也可直接回 `application/json`。本实现为无状态模式（不持有跨请求连接）。
 //!
 //! 方法集（v1 最小实现）：
 //!   - initialize           返回 serverInfo + capabilities
@@ -16,8 +22,9 @@
 
 use std::sync::Arc;
 
+use axum::body::Body;
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::post;
 use axum::Router;
@@ -32,7 +39,7 @@ use crate::AppState;
 /// 网关内嵌路由（由 `services::mcp::McpService` 注册，状态类型为 `AppHandle`）。
 pub fn mcp_service_routes() -> Router<AppHandle> {
     Router::new()
-        // 主端点：Streamable HTTP（POST = JSON-RPC）
+        // 主端点：MCP Streamable HTTP（POST = JSON-RPC）
         .route("/mcp", post(mcp_endpoint_gateway))
         // 尾斜杠变体：部分客户端会发 /mcp/
         .route("/mcp/", post(mcp_endpoint_gateway))
@@ -56,21 +63,23 @@ pub fn create_mcp_router(pool: SqlitePool) -> Router {
 /// 网关版入口：从 `AppHandle` 托管的 `AppState` 取 pool。
 async fn mcp_endpoint_gateway(
     State(app): State<AppHandle>,
+    headers: HeaderMap,
     body: Result<Json<JsonRpcRequest>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
     let state: Arc<AppState> = app.state::<Arc<AppState>>().inner().clone();
     // SqlitePool 内部已是 Arc，clone 极廉价；外层再包 Arc 仅为满足
     // `tools::dispatch` 的签名（`handle_request` 需要 Arc<SqlitePool>）。
-    handle_http(Arc::new(state.db.clone()), body).await
+    handle_http(Arc::new(state.db.clone()), headers, body).await
 }
 
 /// 测试入口：State 本身就是 pool（对应 [`create_mcp_router`]）。
 #[cfg(test)]
 async fn mcp_endpoint(
     State(pool): State<Arc<SqlitePool>>,
+    headers: HeaderMap,
     body: Result<Json<JsonRpcRequest>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
-    handle_http(pool.clone(), body).await
+    handle_http(pool.clone(), headers, body).await
 }
 
 /// GET /mcp/tools —— 调试用，不走 JSON-RPC 包装（无状态依赖，两种挂载方式共用）。
@@ -83,42 +92,82 @@ async fn list_tools_debug() -> impl IntoResponse {
 /// HTTP 层：JSON 解析 → 协议版本校验 → 分发 → 回包。
 ///
 /// 与状态来源（AppHandle / 裸 pool）解耦，两种挂载方式共用。
+/// 遵循 MCP Streamable HTTP：若客户端在 `Accept` 头声明 `text/event-stream`，
+/// 响应以 SSE 事件流（`event: message`）下发；否则直接回 `application/json`。
 async fn handle_http(
     pool: Arc<SqlitePool>,
+    headers: HeaderMap,
     body: Result<Json<JsonRpcRequest>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
+    // Streamable HTTP：客户端请求 SSE 形式的响应（单个 JSON-RPC 消息包成
+    // 一条 `event: message` 事件，随后结束流）。无状态，无需 session 注册表。
+    let wants_sse = headers
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.contains("text/event-stream"))
+        .unwrap_or(false);
+
     let req = match body {
         Ok(Json(r)) => r,
         Err(e) => {
             // 顶层解析失败（无 id 可填）：按惯例回 null id
-            return (
-                StatusCode::OK,
-                Json(JsonRpcResponse::err(
-                    None,
-                    JsonRpcError::parse_error(format!("invalid JSON: {}", e)),
-                )),
-            )
-                .into_response();
+            let resp = JsonRpcResponse::err(
+                None,
+                JsonRpcError::parse_error(format!("invalid JSON: {}", e)),
+            );
+            return build_response(resp, wants_sse);
         }
     };
 
     if req.jsonrpc != "2.0" {
-        return JsonRpcResponse::for_request_or_log(
+        match JsonRpcResponse::for_request_or_log(
             &req,
             JsonRpcError::invalid_request("jsonrpc 字段必须为 \"2.0\""),
-        )
-        .map(|r| (StatusCode::OK, Json(r)).into_response())
-        .unwrap_or_else(|| StatusCode::NO_CONTENT.into_response());
+        ) {
+            Some(resp) => return build_response(resp, wants_sse),
+            // 无 id 的 notification 类请求：无需回包
+            None => return build_empty(wants_sse),
+        }
     }
 
     match handle_request(&pool, &req).await {
-        Ok(Some(resp)) => (StatusCode::OK, Json(resp)).into_response(),
-        Ok(None) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => (
-            StatusCode::OK,
-            Json(JsonRpcResponse::err(req.id.clone(), e)),
-        )
-            .into_response(),
+        Ok(Some(resp)) => build_response(resp, wants_sse),
+        Ok(None) => build_empty(wants_sse),
+        Err(e) => build_response(JsonRpcResponse::err(req.id.clone(), e), wants_sse),
+    }
+}
+
+/// 收尾（有响应体）：SSE 模式下把 JSON-RPC 响应包成单条 `event: message`
+/// 事件流；否则按原 Streamable HTTP 行为直接返回 JSON。
+fn build_response(resp: JsonRpcResponse, wants_sse: bool) -> Response {
+    if wants_sse {
+        let payload =
+            serde_json::to_string(&resp).unwrap_or_else(|_| "{}".to_string());
+        let body = format!("event: message\ndata: {}\n\n", payload);
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/event-stream")
+            .header(header::CACHE_CONTROL, "no-cache")
+            .body(Body::from(body))
+            .unwrap();
+    }
+    (StatusCode::OK, Json(resp)).into_response()
+}
+
+/// 收尾（notification 无回包）：SSE 与非 SSE 统一回 204 No Content，
+/// 符合 Streamable HTTP 对 notification 的处理。
+fn build_empty(_wants_sse: bool) -> Response {
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// Streamable HTTP 协议版本协商：在支持的版本集合中，优先回显客户端请求的版本，
+/// 不匹配则回退到最新支持版本。覆盖 `2024-11-05`（初版）与 `2025-03-26`
+/// （Streamable HTTP 引入版）。
+fn negotiate_protocol_version(requested: Option<&str>) -> String {
+    const SUPPORTED: &[&str] = &["2025-03-26", "2024-11-05"];
+    match requested {
+        Some(v) if SUPPORTED.contains(&v) => v.to_string(),
+        _ => SUPPORTED[0].to_string(),
     }
 }
 
@@ -131,7 +180,9 @@ async fn handle_request(
         "initialize" => Ok(JsonRpcResponse::for_request(
             req,
             json!({
-                "protocolVersion": "2024-11-05",
+                "protocolVersion": negotiate_protocol_version(
+                    req.params.get("protocolVersion").and_then(|v| v.as_str())
+                ),
                 "serverInfo": {
                     "name": "dongx-rag-mcp",
                     "version": env!("CARGO_PKG_VERSION"),
@@ -274,6 +325,19 @@ mod tests {
         assert_eq!(body["id"], 1);
         assert_eq!(body["result"]["serverInfo"]["name"], "dongx-rag-mcp");
         assert!(body["result"]["capabilities"]["tools"].is_object());
+    }
+
+    /// initialize 应回显客户端请求的协议版本（Streamable HTTP 协商）。
+    #[tokio::test]
+    async fn initialize_echoes_requested_protocol_version() {
+        let pool = test_pool().await;
+        let (status, body) = post_json(
+            pool,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["result"]["protocolVersion"], "2025-03-26");
     }
 
     // ---------- notifications/initialized ----------
