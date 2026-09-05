@@ -349,16 +349,18 @@ function DocumentsTab({
         </div>
       )}
 
-      {/* 文档列表 */}
-      <div className="flex items-center justify-between">
-        <h3 className="text-sm font-medium text-muted-foreground">文档</h3>
-        <Button variant="outline" size="sm" onClick={refresh} disabled={loading}>
-          <RefreshCw className={loading ? "animate-spin" : ""} />
-          刷新
-        </Button>
-      </div>
+      {/* 文档列表：包进 Card，与列表页 KB 列表基线一致 */}
+      <Card>
+        <CardContent className="space-y-3 pt-2">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-medium text-muted-foreground">文档</h3>
+            <Button variant="outline" size="sm" onClick={refresh} disabled={loading}>
+              <RefreshCw className={loading ? "animate-spin" : ""} />
+              刷新
+            </Button>
+          </div>
 
-      {loading ? (
+          {loading ? (
         <div className="space-y-2">
           <Skeleton className="h-12 w-full" />
           <Skeleton className="h-12 w-full" />
@@ -466,6 +468,8 @@ function DocumentsTab({
           </div>
         </div>
       )}
+        </CardContent>
+      </Card>
 
       <Dialog
         open={docDeleteTarget !== null}
@@ -1486,8 +1490,11 @@ function RetrievalTab({ kb }: { kb: KnowledgeBase }) {
 
   return (
     <div className="space-y-4">
-      {/* 同一行：查询框 + 返回条数 + 检索按钮（带 Search 图标） */}
-      <div className="flex flex-col gap-2 md:flex-row md:items-end">
+      {/* 检索参数：查询行 + 配置折叠行，包进 Card（方案 B 卡片式白底） */}
+      <Card>
+        <CardContent className="space-y-4 pt-4">
+          {/* 同一行：查询框 + 返回条数 + 检索按钮（带 Search 图标） */}
+          <div className="flex flex-col gap-2 md:flex-row md:items-end">
         <div className="grid grow gap-2">
           <Label htmlFor="ret-query">查询内容</Label>
           <Input
@@ -1626,8 +1633,13 @@ function RetrievalTab({ kb }: { kb: KnowledgeBase }) {
           </div>
         )}
       </div>
+        </CardContent>
+      </Card>
 
-      {!searched ? (
+      {/* 检索结果：包进 Card（方案 B 卡片式白底） */}
+      <Card>
+        <CardContent className="space-y-3 pt-4">
+          {!searched ? (
         <EmptyState
           icon={Search}
           title="检索调试"
@@ -1670,6 +1682,8 @@ function RetrievalTab({ kb }: { kb: KnowledgeBase }) {
           })}
         </div>
       )}
+        </CardContent>
+      </Card>
     </div>
   );
 }
@@ -2400,20 +2414,23 @@ function SourcesTab({ kb }: { kb: KnowledgeBase }) {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h3 className="text-sm font-medium">来源</h3>
-          <p className="text-xs text-muted-foreground">
-            一次导入任务的记录，可追踪进度、复跑与删除。
-          </p>
-        </div>
-        <Button size="sm" onClick={() => setImportOpen(true)}>
-          <Plus />
-          导入来源
-        </Button>
-      </div>
+      {/* 来源列表：包进 Card，与列表页基线一致 */}
+      <Card>
+        <CardContent className="space-y-3 pt-2">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="text-sm font-medium">来源</h3>
+              <p className="text-xs text-muted-foreground">
+                一次导入任务的记录，可追踪进度、复跑与删除。
+              </p>
+            </div>
+            <Button size="sm" onClick={() => setImportOpen(true)}>
+              <Plus />
+              导入来源
+            </Button>
+          </div>
 
-      {loading ? (
+          {loading ? (
         <div className="space-y-2">
           <Skeleton className="h-12 w-full" />
           <Skeleton className="h-12 w-full" />
@@ -2473,6 +2490,8 @@ function SourcesTab({ kb }: { kb: KnowledgeBase }) {
           })}
         </div>
       )}
+        </CardContent>
+      </Card>
 
       <ImportSourceDialog
         kbId={kb.id}
