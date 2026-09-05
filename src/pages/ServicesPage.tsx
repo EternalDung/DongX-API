@@ -31,10 +31,10 @@ import type { KnowledgeBase, KnowledgeBaseInput, McpStatus } from "@/types";
 
 /** 服务分类标签（服务页右上角切换）。desc 用于标题下方动态描述（随激活页签切换）。 */
 const TABS = [
-  { id: "rag", label: "RAG", desc: "以知识库为单元进行检索增强，摄入文档后可在问答中检索并引用。", icon: BookOpen },
-  { id: "wiki", label: "Wiki", desc: "Wiki 知识沉淀模块，后续接入。", icon: Globe },
-  { id: "mcp", label: "MCP", desc: "将知识库以 MCP 工具暴露，供外部 Agent 直接调用检索与问答。", icon: Server },
-  { id: "skill", label: "Skill", desc: "Skill 扩展模块，后续接入。", icon: Zap },
+  { id: "rag", label: "RAG", desc: "以知识库为单元进行检索增强，摄入文档后可在问答中检索并引用。", icon: BookOpen, emphasis: true },
+  { id: "wiki", label: "Wiki", desc: "Wiki 知识沉淀模块，后续接入。", icon: Globe, emphasis: true },
+  { id: "mcp", label: "MCP", desc: "将知识库以 MCP 工具暴露，供外部 Agent 直接调用检索与问答。", icon: Server, emphasis: false },
+  { id: "skill", label: "Skill", desc: "Skill 扩展模块，后续接入。", icon: Zap, emphasis: false },
 ] as const;
 
 function fmtTime(iso: string | null): string {
@@ -631,7 +631,10 @@ export function ServicesPage() {
               <TabsTrigger
                 key={t.id}
                 value={t.id}
-                className="gap-1.5 data-[state=active]:!bg-primary data-[state=active]:!text-primary-foreground data-[state=active]:!shadow-none"
+                className={cn(
+                  "gap-1.5 data-[state=active]:!bg-primary data-[state=active]:!text-primary-foreground data-[state=active]:!shadow-none",
+                  t.emphasis && "!text-base"
+                )}
               >
                 <t.icon className="size-3.5" />
                 {t.label}
