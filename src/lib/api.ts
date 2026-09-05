@@ -89,6 +89,30 @@ export interface ChannelStats {
   success_rate: number;
   /** 平均耗时（毫秒） */
   avg_latency_ms: number;
+  /** Prompt token 累计 */
+  prompt_tokens_sum: number;
+  /** Completion token 累计 */
+  completion_tokens_sum: number;
+  /** 最后调用时间（RFC3339），无记录时为 null */
+  last_called_at: string | null;
+}
+
+/** 单网关密钥近 30 天运行概览（成功率由后端按 successes/total 计算） */
+export interface ApiKeyStats {
+  /** 总请求数 */
+  total: number;
+  /** 成功请求数（error_message 为空） */
+  successes: number;
+  /** 成功率（0-100 整数） */
+  success_rate: number;
+  /** 平均耗时（毫秒） */
+  avg_latency_ms: number;
+  /** Prompt token 累计 */
+  prompt_tokens_sum: number;
+  /** Completion token 累计 */
+  completion_tokens_sum: number;
+  /** 最后调用时间（RFC3339），无记录时为 null */
+  last_called_at: string | null;
 }
 
 /** 日志查询过滤 — 对应 Rust LogQuery */
@@ -202,6 +226,11 @@ export const keyApi = {
   /** 启用 / 禁用密钥（status: 0=禁用 1=启用） */
   setStatus: (id: string, status: number): Promise<void> =>
     invoke<void>("set_api_key_status", { id, status }),
+
+  /** 单密钥运行概览（近 30 天）：成功率 / 平均延迟 / 最后调用时间。
+   *  Tauri v2 约定：Rust 参数 name 在 JS 端用 camelCase 透传。 */
+  stats: (name: string): Promise<ApiKeyStats> =>
+    invoke<ApiKeyStats>("get_api_key_stats", { name }),
 };
 
 // ============================================================

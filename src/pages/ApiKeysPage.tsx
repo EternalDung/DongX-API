@@ -9,6 +9,7 @@ import {
   CheckCircle2,
   Ban,
   AlertTriangle,
+  Activity,
 } from "lucide-react";
 import {
   Card,
@@ -22,6 +23,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { StatusBadge, type StatusTone } from "@/components/ui/status-badge";
 import { useToast } from "@/components/ui/toast";
 import { ExpiryPicker } from "@/components/ExpiryPicker";
+import { CallStatsCard, type CallStatsData } from "@/components/CallStatsCard";
 import {
   Dialog,
   DialogContent,
@@ -60,6 +62,25 @@ export function ApiKeysPage() {
 
   const [deleteTarget, setDeleteTarget] = useState<ApiKey | null>(null);
   const [deleting, setDeleting] = useState(false);
+
+  // 「统计」Dialog：按需拉取该密钥的运行概览。
+  const [statsTarget, setStatsTarget] = useState<ApiKey | null>(null);
+  const [statsData, setStatsData] = useState<CallStatsData | null>(null);
+  const [statsLoading, setStatsLoading] = useState(false);
+
+  const openStats = async (k: ApiKey) => {
+    setStatsTarget(k);
+    setStatsData(null);
+    setStatsLoading(true);
+    try {
+      setStatsData(await keyApi.stats(k.name));
+    } catch (e) {
+      console.error("Failed to load api key stats:", e);
+      toast.error("统计加载失败");
+    } finally {
+      setStatsLoading(false);
+    }
+  };
 
   const load = async () => {
     setLoading(true);
@@ -233,6 +254,15 @@ export function ApiKeysPage() {
                       <Button
                         variant="ghost"
                         size="sm"
+                        onClick={() => openStats(k)}
+                        title="查看运行统计"
+                      >
+                        <Activity />
+                        统计
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
                         onClick={() => handleCopyKey(k.key)}
                         title="复制密钥明文"
                       >
@@ -385,6 +415,46 @@ export function ApiKeysPage() {
               {deleting ? "删除中..." : "确认删除"}
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 运行统计 Dialog */}
+      <Dialog
+        open={statsTarget !== null}
+        onOpenChange={(o) => {
+          if (!o) {
+            setStatsTarget(null);
+            setStatsData(null);
+          }
+        }}
+      >
+        <DialogContent className="sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Activity className="h-5 w-5 text-muted-foreground" />
+              密钥「{statsTarget?.name}」运行统计
+            </DialogTitle>
+            <DialogDescription>近 30 天该密钥的调用情况</DialogDescription>
+          </DialogHeader>
+          {statsLoading ? (
+            <div className="rounded-lg border bg-card p-4 text-sm text-muted-foreground">
+              加载中…
+            </div>
+          ) : (
+            <CallStatsCard
+              stats={
+                statsData ?? {
+                  total: 0,
+                  successes: 0,
+                  success_rate: 0,
+                  avg_latency_ms: 0,
+                  prompt_tokens_sum: 0,
+                  completion_tokens_sum: 0,
+                  last_called_at: null,
+                }
+              }
+            />
+          )}
         </DialogContent>
       </Dialog>
     </div>

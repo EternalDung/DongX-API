@@ -20,6 +20,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { channelApi, type ChannelInput, type ChannelStats } from "@/lib/api";
+import { CallStatsCard } from "@/components/CallStatsCard";
 import type {
   Channel,
   ChannelProtocol,
@@ -664,19 +665,19 @@ export function ChannelsPage() {
                               ))}
                             </div>
                           </div>
-                          {/* 最近测试 */}
-                          <div className="grid gap-1.5">
-                            <p className="text-xs font-medium text-muted-foreground">最近测试</p>
+                          {/* 最近测试（单行） */}
+                          <div className="text-[13px] text-muted-foreground">
+                            最近测试：{" "}
                             {ch.last_test_at ? (
-                              <span className="text-[13px]">
-                                {fmtTime(ch.last_test_at)} ·{" "}
+                              <span>
+                                <span className="tabular-nums">{fmtTime(ch.last_test_at)}</span>
                                 <span
                                   className={
                                     ch.last_test_ok === 1
-                                      ? "text-success"
+                                      ? "ml-1.5 inline-flex items-center rounded-full bg-rose-50 px-2 py-0.5 text-xs font-medium text-rose-600 dark:bg-rose-950/30"
                                       : ch.last_test_ok === 0
-                                        ? "text-destructive"
-                                        : "text-muted-foreground"
+                                        ? "ml-1.5 inline-flex items-center rounded-full bg-rose-50 px-2 py-0.5 text-xs font-medium text-rose-600 dark:bg-rose-950/30"
+                                        : "ml-1.5 inline-flex items-center rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground"
                                   }
                                 >
                                   {ch.last_test_ok === 1
@@ -687,36 +688,29 @@ export function ChannelsPage() {
                                 </span>
                               </span>
                             ) : (
-                              <span className="text-muted-foreground">尚未测试</span>
+                              <span>尚未测试</span>
                             )}
                           </div>
                           {/* 运行概览（近 30 天） */}
-                          <div className="grid gap-1.5">
-                            <p className="text-xs font-medium text-muted-foreground">
-                              运行概览（近 30 天）
-                            </p>
-                            {chanStatsLoading ? (
-                              <span className="text-muted-foreground">加载中…</span>
-                            ) : chanStats && chanStats.total > 0 ? (
-                              <div className="flex flex-col gap-0.5 text-[13px]">
-                                <span>
-                                  成功率{" "}
-                                  <span className="font-medium text-foreground">
-                                    {chanStats.success_rate}%
-                                  </span>{" "}
-                                  · 平均延迟{" "}
-                                  <span className="font-medium text-foreground">
-                                    {chanStats.avg_latency_ms} ms
-                                  </span>
-                                </span>
-                                <span className="text-xs text-muted-foreground">
-                                  总请求 {chanStats.total} 次
-                                </span>
-                              </div>
-                            ) : (
-                              <span className="text-muted-foreground">暂无请求记录</span>
-                            )}
-                          </div>
+                          {chanStatsLoading ? (
+                            <div className="rounded-lg border bg-card p-4 text-sm text-muted-foreground">
+                              加载中…
+                            </div>
+                          ) : (
+                            <CallStatsCard
+                              stats={
+                                chanStats ?? {
+                                  total: 0,
+                                  successes: 0,
+                                  success_rate: 0,
+                                  avg_latency_ms: 0,
+                                  prompt_tokens_sum: 0,
+                                  completion_tokens_sum: 0,
+                                  last_called_at: null,
+                                }
+                              }
+                            />
+                          )}
                         </div>
                       </div>
                     )}
