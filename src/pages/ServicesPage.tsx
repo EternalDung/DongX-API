@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Plus, Trash2, BookOpen, Globe, Zap, RefreshCw, AlertTriangle, Copy, Check, Terminal, Layers, Wifi, Server, Code2 } from "lucide-react";
+import { Plus, Trash2, BookOpen, Globe, Zap, RefreshCw, AlertTriangle, Copy, Check, Terminal, Layers, Wifi, Server, Code2, Info } from "lucide-react";
 import {
   Tabs,
   TabsContent,
@@ -493,6 +493,23 @@ export function ServicesPage() {
   // 激活页签（受控，用于标题区动态展示该页签的标题 + 描述）
   const [activeTab, setActiveTab] = useState<string>("rag");
 
+  // 首次进入提示：按 Tab 切换服务分类。localStorage 记"已看过"后不再弹。
+  const [showTabHint, setShowTabHint] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("dongx.services.tabhint") !== "1";
+    } catch {
+      return true;
+    }
+  });
+  const dismissTabHint = useCallback(() => {
+    try {
+      localStorage.setItem("dongx.services.tabhint", "1");
+    } catch {
+      /* localStorage 不可用时静默忽略，仅隐藏本次会话 */
+    }
+    setShowTabHint(false);
+  }, []);
+
   // 键盘 TAB 切换服务分类：Tab=下一个，Shift+Tab=上一个，到达末尾循环回开头。
   // 输入框/文本域/可编辑区内不劫持，保留浏览器正常的焦点移动。
   useEffect(() => {
@@ -635,6 +652,24 @@ export function ServicesPage() {
 
   return (
     <div>
+      {showTabHint && (
+        <div className="mb-4 flex items-center gap-3 rounded-lg border border-primary/30 bg-primary/5 px-4 py-2.5 text-sm">
+          <Info className="h-4 w-4 shrink-0 text-primary" />
+          <span className="flex-1 leading-snug text-foreground">
+            提示：按 <kbd className="rounded border bg-background px-1.5 py-0.5 font-mono text-xs">Tab</kbd> 键可在 RAG / Wiki / MCP / Skill 间切换分类（
+            <kbd className="rounded border bg-background px-1.5 py-0.5 font-mono text-xs">Shift</kbd> +
+            <kbd className="rounded border bg-background px-1.5 py-0.5 font-mono text-xs">Tab</kbd> 反向）。
+          </span>
+          <Button
+            size="sm"
+            variant="outline"
+            className="shrink-0 border-primary/40 text-primary hover:bg-primary/10"
+            onClick={dismissTabHint}
+          >
+            不再提示
+          </Button>
+        </div>
+      )}
       <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
         {/* 标题 + 右上角分类标签：标题区随激活页签动态切换 */}
         <div className="flex items-start justify-between gap-4">
