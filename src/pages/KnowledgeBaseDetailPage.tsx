@@ -306,9 +306,9 @@ function DocumentsTab({
         }}
         onDragLeave={() => setDragOver(false)}
         onDrop={onDrop}
-        className={`flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed px-6 py-10 text-center transition-colors ${
+        className={`flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed bg-card px-6 py-10 text-center transition-colors ${
           dragOver
-            ? "border-primary bg-primary/5"
+            ? "border-primary ring-2 ring-primary/20"
             : "border-muted-foreground/25 hover:border-primary/50"
         }`}
       >
@@ -1035,11 +1035,6 @@ function AskTab({ kb }: { kb: KnowledgeBase }) {
             {asking ? "发送中" : "发送"}
           </Button>
         </div>
-        <p className="mt-1.5 px-1 text-[11px] text-muted-foreground">
-          {asking
-            ? "正在检索与生成回答..."
-            : `已选 ${selectedModel || "—"} · 渠道${channels.find((c) => c.id === selectedChannelId)?.name || "自动"}`}
-        </p>
       </div>
     </div>
   );

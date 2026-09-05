@@ -29,12 +29,12 @@ import { cn } from "@/lib/utils";
 import { knowledgeApi, mcpApi } from "@/lib/api";
 import type { KnowledgeBase, KnowledgeBaseInput, McpStatus } from "@/types";
 
-/** 服务分类标签（服务页右上角切换）。 */
+/** 服务分类标签（服务页右上角切换）。desc 用于标题下方动态描述（随激活页签切换）。 */
 const TABS = [
-  { id: "rag", label: "RAG" },
-  { id: "wiki", label: "Wiki" },
-  { id: "mcp", label: "MCP" },
-  { id: "skill", label: "Skill" },
+  { id: "rag", label: "RAG", desc: "以知识库为单元进行检索增强，摄入文档后可在问答中检索并引用。" },
+  { id: "wiki", label: "Wiki", desc: "Wiki 知识沉淀模块，后续接入。" },
+  { id: "mcp", label: "MCP", desc: "将知识库以 MCP 工具暴露，供外部 Agent 直接调用检索与问答。" },
+  { id: "skill", label: "Skill", desc: "Skill 扩展模块，后续接入。" },
 ] as const;
 
 function fmtTime(iso: string | null): string {
@@ -490,6 +490,9 @@ export function ServicesPage() {
   const navigate = useNavigate();
   const toast = useToast();
 
+  // 激活页签（受控，用于标题区动态展示该页签的标题 + 描述）
+  const [activeTab, setActiveTab] = useState<string>("rag");
+
   // RAG 知识库列表
   const [kbs, setKbs] = useState<KnowledgeBase[]>([]);
   const [loading, setLoading] = useState(true);
@@ -612,13 +615,15 @@ export function ServicesPage() {
 
   return (
     <div>
-      <Tabs defaultValue="rag" className="w-full">
-        {/* 标题 + 右上角分类标签 */}
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
+        {/* 标题 + 右上角分类标签：标题区随激活页签动态切换 */}
         <div className="flex items-start justify-between gap-4">
           <div>
-            <h1 className="text-2xl font-semibold tracking-tight">服务</h1>
+            <h1 className="text-2xl font-semibold tracking-tight">
+              {TABS.find((t) => t.id === activeTab)?.label}
+            </h1>
             <p className="mt-1 text-sm text-muted-foreground">
-              管理网关的业务能力模块。RAG 以知识库为单元进行检索增强；Wiki / MCP / Skill 后续接入。
+              {TABS.find((t) => t.id === activeTab)?.desc}
             </p>
           </div>
           <TabsList>
