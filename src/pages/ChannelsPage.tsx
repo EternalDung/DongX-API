@@ -19,7 +19,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { channelApi, type ChannelInput } from "@/lib/api";
+import { channelApi, type ChannelInput, type ChannelStats } from "@/lib/api";
 import type {
   Channel,
   ChannelProtocol,
@@ -157,6 +157,10 @@ export function ChannelsPage() {
 
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
+  // 展开渠道时拉取的运行概览（近 30 天）
+  const [chanStats, setChanStats] = useState<ChannelStats | null>(null);
+  const [chanStatsLoading, setChanStatsLoading] = useState(false);
+
   // ── preset registry (single source of truth for the picker) ──────────────
   const [presetGroups, setPresetGroups] = useState<ChannelProtocolPresetGroup[]>([]);
   const [presetsLoading, setPresetsLoading] = useState(true);
@@ -184,6 +188,32 @@ export function ChannelsPage() {
   useEffect(() => {
     load();
   }, []);
+
+  // 跟随展开状态拉取该渠道近 30 天运行概览（成功率 / 平均延迟 / 总请求）
+  useEffect(() => {
+    if (!expandedId) {
+      setChanStats(null);
+      return;
+    }
+    const ch = channels.find((c) => c.id === expandedId);
+    if (!ch) return;
+    let cancelled = false;
+    setChanStatsLoading(true);
+    channelApi
+      .stats(ch.name)
+      .then((s) => {
+        if (!cancelled) setChanStats(s);
+      })
+      .catch(() => {
+        if (!cancelled) setChanStats(null);
+      })
+      .finally(() => {
+        if (!cancelled) setChanStatsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [expandedId, channels]);
 
   const openCreate = () => {
     setEditingId(null);
@@ -658,6 +688,33 @@ export function ChannelsPage() {
                               </span>
                             ) : (
                               <span className="text-muted-foreground">尚未测试</span>
+                            )}
+                          </div>
+                          {/* 运行概览（近 30 天） */}
+                          <div className="grid gap-1.5">
+                            <p className="text-xs font-medium text-muted-foreground">
+                              运行概览（近 30 天）
+                            </p>
+                            {chanStatsLoading ? (
+                              <span className="text-muted-foreground">加载中…</span>
+                            ) : chanStats && chanStats.total > 0 ? (
+                              <div className="flex flex-col gap-0.5 text-[13px]">
+                                <span>
+                                  成功率{" "}
+                                  <span className="font-medium text-foreground">
+                                    {chanStats.success_rate}%
+                                  </span>{" "}
+                                  · 平均延迟{" "}
+                                  <span className="font-medium text-foreground">
+                                    {chanStats.avg_latency_ms} ms
+                                  </span>
+                                </span>
+                                <span className="text-xs text-muted-foreground">
+                                  总请求 {chanStats.total} 次
+                                </span>
+                              </div>
+                            ) : (
+                              <span className="text-muted-foreground">暂无请求记录</span>
                             )}
                           </div>
                         </div>

@@ -79,6 +79,18 @@ export interface ApiKeyInput {
   expires_at: string | null;
 }
 
+/** 渠道运行概览（近 30 天）— 对应 Rust get_channel_stats */
+export interface ChannelStats {
+  /** 总请求数 */
+  total: number;
+  /** 成功请求数（error_message 为空） */
+  successes: number;
+  /** 成功率（0-100 整数） */
+  success_rate: number;
+  /** 平均耗时（毫秒） */
+  avg_latency_ms: number;
+}
+
 /** 日志查询过滤 — 对应 Rust LogQuery */
 export interface LogQuery {
   keyword?: string;
@@ -159,6 +171,11 @@ export const channelApi = {
       baseUrl: params.base_url,
       apiKey: params.api_key,
     }),
+
+  /** 渠道运行概览（近 30 天）：成功率 / 平均延迟 / 总请求数。
+   *  Tauri v2 约定：Rust 参数 channel_name 在 JS 端用 camelCase channelName。 */
+  stats: (channelName: string): Promise<ChannelStats> =>
+    invoke<ChannelStats>("get_channel_stats", { channelName }),
 };
 
 // ============================================================
