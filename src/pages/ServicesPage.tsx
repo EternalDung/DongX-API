@@ -493,6 +493,26 @@ export function ServicesPage() {
   // 激活页签（受控，用于标题区动态展示该页签的标题 + 描述）
   const [activeTab, setActiveTab] = useState<string>("rag");
 
+  // 键盘 TAB 切换服务分类：Tab=下一个，Shift+Tab=上一个，到达末尾循环回开头。
+  // 输入框/文本域/可编辑区内不劫持，保留浏览器正常的焦点移动。
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Tab") return;
+      const el = e.target as HTMLElement | null;
+      const tag = el?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || el?.isContentEditable) return;
+      e.preventDefault();
+      const ids = TABS.map((t) => t.id);
+      const idx = ids.indexOf(activeTab as (typeof ids)[number]);
+      if (idx < 0) return;
+      const delta = e.shiftKey ? -1 : 1;
+      const next = ids[(idx + delta + ids.length) % ids.length];
+      setActiveTab(next);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [activeTab]);
+
   // RAG 知识库列表
   const [kbs, setKbs] = useState<KnowledgeBase[]>([]);
   const [loading, setLoading] = useState(true);
