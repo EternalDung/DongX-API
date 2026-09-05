@@ -97,6 +97,7 @@ pub fn run() {
             commands::channel::test_channel,
             commands::channel::list_provider_presets,
             commands::channel::list_provider_models,
+            commands::channel::get_channel_stats,
             commands::key::list_api_keys,
             commands::key::create_api_key,
             commands::key::update_api_key,

@@ -599,6 +599,33 @@ pub mod stats {
         .fetch_one(pool)
         .await
     }
+
+    /// 单渠道近 30 天运行概览：总请求数、成功数、平均耗时。
+    /// 成功 = `error_message` 为空。供渠道详情「运行概览」展示。
+    #[derive(Debug, Clone, sqlx::FromRow)]
+    pub struct ChannelStatsRow {
+        pub total: i64,
+        pub successes: i64,
+        pub avg_latency_ms: i64,
+    }
+
+    pub async fn channel_stats(
+        pool: &SqlitePool,
+        channel_name: &str,
+    ) -> Result<ChannelStatsRow, sqlx::Error> {
+        sqlx::query_as::<_, ChannelStatsRow>(
+            "SELECT
+                COALESCE(COUNT(*), 0) AS total,
+                COALESCE(SUM(CASE WHEN error_message IS NULL OR error_message = '' THEN 1 ELSE 0 END), 0) AS successes,
+                COALESCE(CAST(AVG(duration_ms) AS INTEGER), 0) AS avg_latency_ms
+            FROM request_logs
+            WHERE channel_name = ?1
+              AND created_at >= strftime('%Y-%m-%d %H:%M:%S', 'now', '-30 days')",
+        )
+        .bind(channel_name)
+        .fetch_one(pool)
+        .await
+    }
 }
 
 // ============================================================

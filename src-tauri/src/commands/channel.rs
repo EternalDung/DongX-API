@@ -320,3 +320,27 @@ pub async fn list_provider_presets(
 ) -> AppResult<Vec<crate::models::channel_presets::ProtocolPresetGroup>> {
     Ok(crate::models::channel_presets::groups_for_protocols())
 }
+
+/// 渠道运行概览（近 30 天）：成功率 + 平均延迟 + 总请求数。
+///
+/// 日志按 `channel_name`（= 渠道显示名 `ChannelRow.name`）聚合，
+/// 成功率 = `error_message` 为空的占比。前端渠道详情展开区调用。
+#[tauri::command]
+pub async fn get_channel_stats(
+    state: State<'_, Arc<AppState>>,
+    channel_name: String,
+) -> AppResult<serde_json::Value> {
+    let stats =
+        crate::db::repository::stats::channel_stats(&state.db, &channel_name).await?;
+    let success_rate = if stats.total > 0 {
+        (stats.successes as f64 * 100.0 / stats.total as f64).round() as i64
+    } else {
+        0
+    };
+    Ok(serde_json::json!({
+        "total": stats.total,
+        "successes": stats.successes,
+        "success_rate": success_rate,
+        "avg_latency_ms": stats.avg_latency_ms,
+    }))
+}
