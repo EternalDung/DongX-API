@@ -820,14 +820,20 @@ pub async fn delete_source(
 
 /// 检索调试：对单个知识库执行查询，返回 Top-K 最相似分块（含内容与相似度）。
 ///
-/// 复用知识库绑定的嵌入配置向量化查询，再调用 `rag::retrieve::retrieve`
-/// （暴力余弦，v1）取 Top-K。`top_k` 缺省 5。
+/// `mode` 支持 `vector`（默认）/ `keyword` / `hybrid`，语义同 `ask_kb`；
+/// `keyword_weight` 仅在混合模式生效，缺省 0.3。
+///
+/// 关键：只有向量 / 混合模式才把查询词向量化。关键词模式走 FTS5，必须保持
+/// 纯本地——若此处无条件调嵌入，嵌入渠道不可用时会让本可离线完成的关键词
+/// 检索一起失败（功能倒退）。`top_k` 缺省 5。
 #[tauri::command]
 pub async fn retrieve_kb(
     state: State<'_, Arc<AppState>>,
     kb_id: String,
     query: String,
     top_k: Option<i64>,
+    mode: Option<String>,
+    keyword_weight: Option<f32>,
 ) -> Result<Vec<RetrievalHit>, String> {
     let pool = &state.db;
     let q = query.trim().to_string();
@@ -835,34 +841,35 @@ pub async fn retrieve_kb(
         return Err("查询内容不能为空".to_string());
     }
 
+    let mode = RetrievalMode::from_str_opt(mode.as_deref());
+    // 与问答命令保持同一默认权重口径。
+    let kw = keyword_weight.unwrap_or(0.3).clamp(0.0, 1.0);
+
     let kb = crate::rag::store::get_kb(pool, &kb_id)
         .await
         .map_err(|e| e.to_string())?;
-    let q_vec = crate::rag::embed::embed_texts(
-        pool,
-        &kb.embedding_channel_id,
-        &kb.embedding_model,
-        vec![q.clone()],
-    )
-    .await
-    .map_err(|e| e.to_string())?
-    .0
-    .into_iter()
-    .next()
-    .ok_or_else(|| "嵌入结果为空".to_string())?;
+
+    let q_vec: Vec<f32> = if matches!(mode, RetrievalMode::Vector | RetrievalMode::Hybrid) {
+        crate::rag::embed::embed_texts(
+            pool,
+            &kb.embedding_channel_id,
+            &kb.embedding_model,
+            vec![q.clone()],
+        )
+        .await
+        .map_err(|e| e.to_string())?
+        .0
+        .into_iter()
+        .next()
+        .ok_or_else(|| "嵌入结果为空".to_string())?
+    } else {
+        Vec::new()
+    };
 
     let k = top_k.unwrap_or(5).max(1) as usize;
-    let hits = crate::rag::retrieve::retrieve(
-        pool,
-        &[kb_id.clone()],
-        &q,
-        &q_vec,
-        k,
-        RetrievalMode::Vector,
-        0.0,
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+    let hits = crate::rag::retrieve::retrieve(pool, &[kb_id.clone()], &q, &q_vec, k, mode, kw)
+        .await
+        .map_err(|e| e.to_string())?;
 
     Ok(hits
         .into_iter()

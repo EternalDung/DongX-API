@@ -25,6 +25,7 @@ import {
   SlidersHorizontal,
   MessageCircle,
   ChevronRight,
+  ChevronDown,
   Send,
   User,
   Bot,
@@ -659,7 +660,8 @@ function AskTab({ kb }: { kb: KnowledgeBase }) {
   const [selectedModel, setSelectedModel] = useState<string>(kb.embedding_model || "");
   const [deepResearch, setDeepResearch] = useState(false);
   const [retrieval, setRetrieval] = useState<RetrievalConfig>(DEFAULT_RETRIEVAL);
-  const [showRetrievalDialog, setShowRetrievalDialog] = useState(false);
+  /** 检索配置折叠行展开态（替代原弹窗：原位展开、实时生效、无需保存） */
+  const [configOpen, setConfigOpen] = useState(false);
   const [messages, setMessages] = useState<AskMessage[]>([]);
   const [query, setQuery] = useState("");
   const [asking, setAsking] = useState(false);
@@ -818,17 +820,145 @@ function AskTab({ kb }: { kb: KnowledgeBase }) {
               title="Deep Search：在线扩展检索（UI 预留，后端待对接）"
             />
           </label>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => setShowRetrievalDialog(true)}
-            title="检索配置"
-          >
-            <SlidersHorizontal />
-            检索配置
-          </Button>
         </div>
       </div>
+
+      {/* ===== 检索配置：折叠行（与检索 tab 同一套样式约定，不共用组件） ===== */}
+      <button
+        type="button"
+        onClick={() => setConfigOpen((v) => !v)}
+        className={cn(
+          "flex w-full items-center gap-2 rounded-md border bg-muted/30 px-3 py-2 text-left transition-colors hover:bg-muted/50",
+          configOpen && "rounded-b-none border-b-0",
+        )}
+      >
+        <SlidersHorizontal className="h-3.5 w-3.5 text-muted-foreground" />
+        <span className="text-sm">检索配置</span>
+        <span className="font-mono text-xs text-muted-foreground">
+          {RETRIEVAL_MODES.find((m) => m.id === retrieval.mode)?.label} · Top{" "}
+          {retrieval.topK}
+          {retrieval.mode === "hybrid" &&
+            ` · ${retrieval.vectorWeight.toFixed(2)} / ${retrieval.keywordWeight.toFixed(2)}`}
+        </span>
+        <ChevronDown
+          className={cn(
+            "ml-auto h-4 w-4 text-muted-foreground transition-transform",
+            configOpen && "rotate-180",
+          )}
+        />
+      </button>
+      {configOpen && (
+        <div className="grid gap-4 rounded-b-md border border-t-0 p-3">
+          <div className="grid gap-2">
+            <Label>检索模式</Label>
+            <div className="inline-flex rounded-md border bg-muted/30 p-1">
+              {RETRIEVAL_MODES.map((m) => {
+                const active = retrieval.mode === m.id;
+                return (
+                  <button
+                    key={m.id}
+                    type="button"
+                    title={m.hint}
+                    onClick={() => setRetrieval((p) => ({ ...p, mode: m.id }))}
+                    className={cn(
+                      "rounded-sm px-3 py-1 text-sm transition-colors",
+                      active
+                        ? "bg-background shadow-sm"
+                        : "text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    {m.label}
+                  </button>
+                );
+              })}
+            </div>
+            <p className="text-[11px] text-muted-foreground">
+              {RETRIEVAL_MODES.find((m) => m.id === retrieval.mode)?.hint}
+            </p>
+          </div>
+
+          <div className="grid gap-2">
+            <div className="flex items-center justify-between">
+              <Label htmlFor="ask-topk">Top K</Label>
+              <span className="font-mono text-xs text-muted-foreground">
+                {retrieval.topK}
+              </span>
+            </div>
+            <Slider
+              id="ask-topk"
+              min={1}
+              max={20}
+              step={1}
+              value={[retrieval.topK]}
+              onValueChange={(v) => setRetrieval((p) => ({ ...p, topK: v[0] }))}
+            />
+          </div>
+
+          {retrieval.mode === "hybrid" && (
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="grid gap-2">
+                <div className="flex items-center justify-between">
+                  <Label htmlFor="ask-vw">向量权重</Label>
+                  <span className="font-mono text-xs text-muted-foreground">
+                    {retrieval.vectorWeight.toFixed(2)}
+                  </span>
+                </div>
+                <Slider
+                  id="ask-vw"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={[retrieval.vectorWeight]}
+                  onValueChange={(v) =>
+                    setRetrieval((p) => ({
+                      ...p,
+                      vectorWeight: v[0],
+                      keywordWeight: Number((1 - v[0]).toFixed(2)),
+                    }))
+                  }
+                />
+              </div>
+              <div className="grid gap-2">
+                <div className="flex items-center justify-between">
+                  <Label htmlFor="ask-kw">关键词权重</Label>
+                  <span className="font-mono text-xs text-muted-foreground">
+                    {retrieval.keywordWeight.toFixed(2)}
+                  </span>
+                </div>
+                <Slider
+                  id="ask-kw"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={[retrieval.keywordWeight]}
+                  onValueChange={(v) =>
+                    setRetrieval((p) => ({
+                      ...p,
+                      keywordWeight: v[0],
+                      vectorWeight: Number((1 - v[0]).toFixed(2)),
+                    }))
+                  }
+                />
+              </div>
+            </div>
+          )}
+
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-[11px] leading-relaxed text-muted-foreground">
+              向量 / 关键词（BM25）/ 混合检索均已由后端支持，模式与权重实时生效；
+              混合模式按向量权重 = 1 − 关键词权重做归一化加权融合。
+            </p>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="shrink-0"
+              onClick={() => setRetrieval(DEFAULT_RETRIEVAL)}
+            >
+              恢复默认
+            </Button>
+          </div>
+        </div>
+      )}
 
       {/* ===== 消息列表区 ===== */}
       <div
@@ -845,10 +975,6 @@ function AskTab({ kb }: { kb: KnowledgeBase }) {
             </p>
             <p className="mt-1 text-xs text-muted-foreground">
               {kb.doc_count} 文档 · {kb.chunk_count} 切片可供检索
-            </p>
-            <p className="mt-3 max-w-md text-[11px] text-muted-foreground/70">
-              检索模式：{RETRIEVAL_MODES.find((m) => m.id === retrieval.mode)?.label} ·
-              Top {retrieval.topK}
             </p>
           </div>
         ) : (
@@ -901,142 +1027,6 @@ function AskTab({ kb }: { kb: KnowledgeBase }) {
             : `已选 ${selectedModel || "—"} · 渠道${channels.find((c) => c.id === selectedChannelId)?.name || "自动"}`}
         </p>
       </div>
-
-      {/* ===== 检索配置 Dialog ===== */}
-      <Dialog open={showRetrievalDialog} onOpenChange={setShowRetrievalDialog}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <SlidersHorizontal className="h-4 w-4" />
-              检索配置
-            </DialogTitle>
-            <DialogDescription>
-              调整召回方式与权重；混合模式下向量与关键词分数会按权重融合。
-              向量检索会先于关键词检索进行。
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className="space-y-5">
-            {/* 检索模式：3 选 1 */}
-            <div className="grid gap-2">
-              <Label>检索模式</Label>
-              <div className="inline-flex rounded-md border bg-muted/30 p-1">
-                {RETRIEVAL_MODES.map((m) => {
-                  const active = retrieval.mode === m.id;
-                  return (
-                    <button
-                      key={m.id}
-                      type="button"
-                      title={m.hint}
-                      onClick={() =>
-                        setRetrieval((p) => ({ ...p, mode: m.id }))
-                      }
-                      className={cn(
-                        "rounded-sm px-3 py-1 text-sm transition-colors",
-                        active
-                          ? "bg-background shadow-sm"
-                          : "text-muted-foreground hover:text-foreground",
-                      )}
-                    >
-                      {m.label}
-                    </button>
-                  );
-                })}
-              </div>
-              <p className="text-[11px] text-muted-foreground">
-                {RETRIEVAL_MODES.find((m) => m.id === retrieval.mode)?.hint}
-              </p>
-            </div>
-
-            {/* Top K */}
-            <div className="grid gap-2">
-              <div className="flex items-center justify-between">
-                <Label htmlFor="ask-topk">Top K</Label>
-                <span className="font-mono text-xs text-muted-foreground">
-                  {retrieval.topK}
-                </span>
-              </div>
-              <Slider
-                id="ask-topk"
-                min={1}
-                max={20}
-                step={1}
-                value={[retrieval.topK]}
-                onValueChange={(v) =>
-                  setRetrieval((p) => ({ ...p, topK: v[0] }))
-                }
-              />
-            </div>
-
-            {/* 向量权重 */}
-            <div className="grid gap-2">
-              <div className="flex items-center justify-between">
-                <Label htmlFor="ask-vw">向量权重</Label>
-                <span className="font-mono text-xs text-muted-foreground">
-                  {retrieval.vectorWeight.toFixed(2)}
-                </span>
-              </div>
-              <Slider
-                id="ask-vw"
-                min={0}
-                max={1}
-                step={0.05}
-                value={[retrieval.vectorWeight]}
-                disabled={retrieval.mode !== "hybrid"}
-                onValueChange={(v) =>
-                  setRetrieval((p) => ({ ...p, vectorWeight: v[0] }))
-                }
-              />
-              {retrieval.mode === "hybrid" && (
-                <p className="text-[11px] text-muted-foreground">
-                  关键词权重会按 1 - 向量权重 自动联动（{retrieval.keywordWeight.toFixed(2)}）。
-                </p>
-              )}
-            </div>
-
-            {/* 关键词权重 */}
-            <div className="grid gap-2">
-              <div className="flex items-center justify-between">
-                <Label htmlFor="ask-kw">关键词权重</Label>
-                <span className="font-mono text-xs text-muted-foreground">
-                  {retrieval.keywordWeight.toFixed(2)}
-                </span>
-              </div>
-              <Slider
-                id="ask-kw"
-                min={0}
-                max={1}
-                step={0.05}
-                value={[retrieval.keywordWeight]}
-                disabled={retrieval.mode !== "hybrid"}
-                onValueChange={(v) => {
-                  const kw = v[0];
-                  setRetrieval((p) => ({
-                    ...p,
-                    keywordWeight: kw,
-                    vectorWeight: Number((1 - kw).toFixed(2)),
-                  }));
-                }}
-              />
-            </div>
-
-            <p className="rounded-md bg-muted/40 px-3 py-2 text-[11px] leading-relaxed text-muted-foreground">
-              向量 / 关键词（BM25）/ 混合检索均已由后端支持，模式与权重实时生效；
-              混合模式按向量权重 = 1 − 关键词权重做归一化加权融合。
-            </p>
-          </div>
-
-          <DialogFooter>
-            <Button
-              variant="ghost"
-              onClick={() => setRetrieval(DEFAULT_RETRIEVAL)}
-            >
-              恢复默认
-            </Button>
-            <Button onClick={() => setShowRetrievalDialog(false)}>完成</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }
@@ -1457,6 +1447,12 @@ function RetrievalTab({ kb }: { kb: KnowledgeBase }) {
   const [hits, setHits] = useState<RetrievalHit[]>([]);
   const [searched, setSearched] = useState(false);
   const [loading, setLoading] = useState(false);
+  /**
+   * 检索模式与权重，与问答 tab 共用同一套默认值与模式常量（仅共用数据，不共用组件）。
+   * Top K 在本 tab 由首行输入框控制，故不使用 retrieval.topK。
+   */
+  const [retrieval, setRetrieval] = useState<RetrievalConfig>(DEFAULT_RETRIEVAL);
+  const [configOpen, setConfigOpen] = useState(false);
 
   const handleSearch = async () => {
     if (!query.trim()) {
@@ -1469,6 +1465,8 @@ function RetrievalTab({ kb }: { kb: KnowledgeBase }) {
         kb.id,
         query.trim(),
         topK.trim() === "" ? undefined : Number(topK),
+        retrieval.mode,
+        retrieval.keywordWeight,
       );
       setHits(res);
       setSearched(true);
@@ -1512,6 +1510,110 @@ function RetrievalTab({ kb }: { kb: KnowledgeBase }) {
           {loading ? "检索中..." : "检索"}
         </Button>
       </div>
+
+      {/* ===== 检索配置：折叠行（无弹窗，实时生效） ===== */}
+      <button
+        type="button"
+        onClick={() => setConfigOpen((v) => !v)}
+        className={cn(
+          "flex w-full items-center gap-2 rounded-md border bg-muted/30 px-3 py-2 text-left transition-colors hover:bg-muted/50",
+          configOpen && "rounded-b-none border-b-0",
+        )}
+      >
+        <SlidersHorizontal className="h-3.5 w-3.5 text-muted-foreground" />
+        <span className="text-sm">检索配置</span>
+        <span className="font-mono text-xs text-muted-foreground">
+          {RETRIEVAL_MODES.find((m) => m.id === retrieval.mode)?.label}
+          {retrieval.mode === "hybrid" &&
+            ` · ${retrieval.vectorWeight.toFixed(2)} / ${retrieval.keywordWeight.toFixed(2)}`}
+        </span>
+        <ChevronDown
+          className={cn(
+            "ml-auto h-4 w-4 text-muted-foreground transition-transform",
+            configOpen && "rotate-180",
+          )}
+        />
+      </button>
+      {configOpen && (
+        <div className="grid gap-4 rounded-b-md border border-t-0 p-3">
+          <div className="grid gap-2">
+            <Label>检索模式</Label>
+            <div className="inline-flex rounded-md border bg-muted/30 p-1">
+              {RETRIEVAL_MODES.map((m) => {
+                const active = retrieval.mode === m.id;
+                return (
+                  <button
+                    key={m.id}
+                    type="button"
+                    title={m.hint}
+                    onClick={() => setRetrieval((p) => ({ ...p, mode: m.id }))}
+                    className={cn(
+                      "rounded-sm px-3 py-1 text-sm transition-colors",
+                      active
+                        ? "bg-background shadow-sm"
+                        : "text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    {m.label}
+                  </button>
+                );
+              })}
+            </div>
+            <p className="text-[11px] text-muted-foreground">
+              {RETRIEVAL_MODES.find((m) => m.id === retrieval.mode)?.hint}
+            </p>
+          </div>
+
+          {retrieval.mode === "hybrid" && (
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="grid gap-2">
+                <div className="flex items-center justify-between">
+                  <Label htmlFor="ret-vw">向量权重</Label>
+                  <span className="font-mono text-xs text-muted-foreground">
+                    {retrieval.vectorWeight.toFixed(2)}
+                  </span>
+                </div>
+                <Slider
+                  id="ret-vw"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={[retrieval.vectorWeight]}
+                  onValueChange={(v) =>
+                    setRetrieval((p) => ({
+                      ...p,
+                      vectorWeight: v[0],
+                      keywordWeight: Number((1 - v[0]).toFixed(2)),
+                    }))
+                  }
+                />
+              </div>
+              <div className="grid gap-2">
+                <div className="flex items-center justify-between">
+                  <Label htmlFor="ret-kw">关键词权重</Label>
+                  <span className="font-mono text-xs text-muted-foreground">
+                    {retrieval.keywordWeight.toFixed(2)}
+                  </span>
+                </div>
+                <Slider
+                  id="ret-kw"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={[retrieval.keywordWeight]}
+                  onValueChange={(v) =>
+                    setRetrieval((p) => ({
+                      ...p,
+                      keywordWeight: v[0],
+                      vectorWeight: Number((1 - v[0]).toFixed(2)),
+                    }))
+                  }
+                />
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {!searched ? (
         <EmptyState

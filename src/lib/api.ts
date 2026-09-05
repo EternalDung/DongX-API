@@ -429,9 +429,18 @@ export const knowledgeApi = {
   deleteSource: (sourceId: string): Promise<void> =>
     invoke<void>("delete_source", { id: sourceId }),
 
-  /** 检索调试：对知识库执行查询，返回 Top-K 最相似分块（含内容与相似度） */
-  retrieve: (kbId: string, query: string, topK?: number): Promise<RetrievalHit[]> =>
-    invoke<RetrievalHit[]>("retrieve_kb", { kbId, query, topK }),
+  /**
+   * 检索调试：对知识库执行查询，返回 Top-K 最相似分块（含内容与相似度）。
+   * `mode` 支持 vector（默认）/ keyword / hybrid；`keywordWeight` 仅混合模式生效。
+   */
+  retrieve: (
+    kbId: string,
+    query: string,
+    topK?: number,
+    mode?: string,
+    keywordWeight?: number,
+  ): Promise<RetrievalHit[]> =>
+    invoke<RetrievalHit[]>("retrieve_kb", { kbId, query, topK, mode, keywordWeight }),
 
   /** 查询索引状态：文档数 / 分块数 / 已向量化数 / stale 数 / 是否完整 */
   indexStatus: (kbId: string): Promise<IndexStatus> =>
