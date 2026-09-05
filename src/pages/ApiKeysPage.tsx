@@ -21,6 +21,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { EmptyState } from "@/components/ui/empty-state";
 import { StatusBadge, type StatusTone } from "@/components/ui/status-badge";
 import { useToast } from "@/components/ui/toast";
+import { ExpiryPicker } from "@/components/ExpiryPicker";
 import {
   Dialog,
   DialogContent,
@@ -51,6 +52,7 @@ export function ApiKeysPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [name, setName] = useState("");
   const [quota, setQuota] = useState("0");
+  const [expiresAt, setExpiresAt] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
 
   const [plainKey, setPlainKey] = useState<string | null>(null);
@@ -84,12 +86,13 @@ export function ApiKeysPage() {
         allowed_models: [],
         allowed_channels: [],
         quota_limit: Number(quota) || 0,
-        expires_at: null,
+        expires_at: expiresAt,
       });
       setCreateOpen(false);
       setPlainKey(result.key);
       setName("");
       setQuota("0");
+      setExpiresAt(null);
       toast.success("密钥已生成");
       await load();
     } catch (e) {
@@ -309,6 +312,13 @@ export function ApiKeysPage() {
               />
               <p className="text-xs text-muted-foreground">
                 超出配额后密钥自动禁用，累计 usage.total_tokens
+              </p>
+            </div>
+            <div className="grid gap-2">
+              <Label>过期时间</Label>
+              <ExpiryPicker value={expiresAt} onChange={setExpiresAt} />
+              <p className="text-xs text-muted-foreground">
+                留空为永久有效；也可从快捷项选择 24 小时 / 30 天 / 180 天 / 1 年。
               </p>
             </div>
           </div>
