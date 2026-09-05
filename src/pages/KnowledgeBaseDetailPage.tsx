@@ -1492,10 +1492,9 @@ function RetrievalTab({ kb }: { kb: KnowledgeBase }) {
       {/* 检索参数：查询行 + 配置折叠行，包进 Card（方案 B 卡片式白底） */}
       <Card>
         <CardContent className="space-y-4 pt-4">
-          {/* 同一行：查询框 + 返回条数 + 检索按钮（带 Search 图标） */}
-          <div className="flex flex-col gap-2 md:flex-row md:items-end">
+          {/* 同一行：查询框 + Top K(label 与输入框左右并排) + 检索按钮 */}
+          <div className="flex flex-col gap-2 md:flex-row md:items-center">
             <div className="grid grow gap-2">
-              <Label htmlFor="ret-query">查询内容</Label>
               <Input
                 id="ret-query"
                 placeholder="例如：如何配置鉴权中间件？"
@@ -1506,8 +1505,8 @@ function RetrievalTab({ kb }: { kb: KnowledgeBase }) {
                 }}
               />
             </div>
-            <div className="grid gap-2 md:w-24">
-              <Label htmlFor="ret-k">Top K</Label>
+            <div className="flex items-center gap-2 md:shrink-0">
+              <Label htmlFor="ret-k" className="shrink-0">Top K</Label>
               <Input
                 id="ret-k"
                 type="number"
@@ -1515,9 +1514,10 @@ function RetrievalTab({ kb }: { kb: KnowledgeBase }) {
                 max={20}
                 value={topK}
                 onChange={(e) => setTopK(e.target.value)}
+                className="w-20"
               />
             </div>
-            <Button onClick={handleSearch} disabled={loading} className="md:self-end">
+            <Button onClick={handleSearch} disabled={loading}>
               <Search />
               {loading ? "检索中..." : "检索"}
             </Button>
