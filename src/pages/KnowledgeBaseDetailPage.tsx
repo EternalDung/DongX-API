@@ -766,9 +766,11 @@ function AskTab({ kb }: { kb: KnowledgeBase }) {
   };
 
   return (
-    <div className="-mx-4 flex h-[70vh] min-h-[520px] flex-col">
-      {/* ===== 顶部栏：渠道 / 模型 / Deep Search / 检索配置 ===== */}
-      <div className="flex flex-wrap items-center gap-2 border-b px-4 py-3">
+    <div className="flex h-[70vh] min-h-[520px] flex-col">
+      {/* ===== 顶部栏：渠道 / 模型 / Deep Search / 检索配置（包进 Card，与检索 tab 对齐，方案 B 卡片式白底） ===== */}
+      <Card>
+        <CardContent className="space-y-3 p-3">
+          <div className="flex flex-wrap items-center gap-2">
         <div className="flex items-center gap-1.5">
           <span className="text-xs text-muted-foreground">渠道</span>
           <Select
@@ -969,6 +971,8 @@ function AskTab({ kb }: { kb: KnowledgeBase }) {
           </div>
         )}
       </div>
+      </CardContent>
+      </Card>
 
       {/* ===== 消息列表区 ===== */}
       <div
