@@ -94,18 +94,33 @@ async fn ask_route(
     Json(payload): Json<AskRequest>,
 ) -> impl IntoResponse {
     let state: Arc<AppState> = app.state::<Arc<AppState>>().inner().clone();
-    match crate::rag::ask::ask(
-        &state.db,
-        &payload.kb_ids,
-        &payload.question,
-        &payload.model,
-        payload.channel_id.as_deref(),
-        crate::rag::retrieve::RetrievalMode::Vector,
-        5,
-        0.3,
-    )
-    .await
-    {
+    let result = if payload.deep_research {
+        crate::rag::ask::ask_deep_research(
+            &state.db,
+            &payload.kb_ids,
+            &payload.question,
+            &payload.model,
+            payload.channel_id.as_deref(),
+            crate::rag::retrieve::RetrievalMode::Vector,
+            5,
+            0.3,
+            payload.max_rounds as usize,
+        )
+        .await
+    } else {
+        crate::rag::ask::ask(
+            &state.db,
+            &payload.kb_ids,
+            &payload.question,
+            &payload.model,
+            payload.channel_id.as_deref(),
+            crate::rag::retrieve::RetrievalMode::Vector,
+            5,
+            0.3,
+        )
+        .await
+    };
+    match result {
         Ok(res) => (StatusCode::OK, Json(res)).into_response(),
         Err(e) => e.into_response(),
     }
@@ -125,4 +140,15 @@ struct AskRequest {
     /// 前端 RAG 问答 UI 在用户显式选择渠道时传此字段。
     #[serde(default)]
     channel_id: Option<String>,
+    /// 可选：开启 Deep Research 多轮迭代检索
+    #[serde(default)]
+    deep_research: bool,
+    /// 可选：Deep Research 最大轮数（默认 5）
+    #[serde(default = "default_max_rounds")]
+    max_rounds: u32,
+}
+
+/// Deep Research 默认轮数，与 Tauri 命令 `ask_kb` 保持一致。
+fn default_max_rounds() -> u32 {
+    5
 }

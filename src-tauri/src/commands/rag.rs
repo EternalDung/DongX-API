@@ -477,10 +477,28 @@ pub async fn ask_kb(
     mode: Option<String>,
     top_k: Option<u32>,
     keyword_weight: Option<f32>,
+    deep_research: Option<bool>,
+    max_rounds: Option<u32>,
 ) -> Result<AskResult, String> {
     let mode = RetrievalMode::from_str_opt(mode.as_deref());
     let top_k = top_k.unwrap_or(5).max(1) as usize;
     let kw = keyword_weight.unwrap_or(0.3);
+    if deep_research.unwrap_or(false) {
+        let rounds = max_rounds.unwrap_or(5).max(1) as usize;
+        return crate::rag::ask::ask_deep_research(
+            &state.db,
+            &kb_ids,
+            &question,
+            &model,
+            channel_id.as_deref(),
+            mode,
+            top_k,
+            kw,
+            rounds,
+        )
+        .await
+        .map_err(|e| e.to_string());
+    }
     crate::rag::ask::ask(
         &state.db,
         &kb_ids,

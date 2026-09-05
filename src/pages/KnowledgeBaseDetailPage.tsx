@@ -1494,34 +1494,34 @@ function RetrievalTab({ kb }: { kb: KnowledgeBase }) {
         <CardContent className="space-y-4 pt-4">
           {/* 同一行：查询框 + 返回条数 + 检索按钮（带 Search 图标） */}
           <div className="flex flex-col gap-2 md:flex-row md:items-end">
-        <div className="grid grow gap-2">
-          <Label htmlFor="ret-query">查询内容</Label>
-          <Input
-            id="ret-query"
-            placeholder="例如：如何配置鉴权中间件？"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") handleSearch();
-            }}
-          />
-        </div>
-        <div className="grid gap-2 md:w-24">
-          <Label htmlFor="ret-k">Top K</Label>
-          <Input
-            id="ret-k"
-            type="number"
-            min={1}
-            max={20}
-            value={topK}
-            onChange={(e) => setTopK(e.target.value)}
-          />
-        </div>
-        <Button onClick={handleSearch} disabled={loading} className="md:self-end">
-          <Search />
-          {loading ? "检索中..." : "检索"}
-        </Button>
-      </div>
+            <div className="grid grow gap-2">
+              <Label htmlFor="ret-query">查询内容</Label>
+              <Input
+                id="ret-query"
+                placeholder="例如：如何配置鉴权中间件？"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") handleSearch();
+                }}
+              />
+            </div>
+            <div className="grid gap-2 md:w-24">
+              <Label htmlFor="ret-k">Top K</Label>
+              <Input
+                id="ret-k"
+                type="number"
+                min={1}
+                max={20}
+                value={topK}
+                onChange={(e) => setTopK(e.target.value)}
+              />
+            </div>
+            <Button onClick={handleSearch} disabled={loading} className="md:self-end">
+              <Search />
+              {loading ? "检索中..." : "检索"}
+            </Button>
+          </div>
 
       {/* ===== 检索配置：折叠行（无弹窗，实时生效） ===== */}
       {/* 同问答 tab：单一外框包住折叠条+面板，消除 button/div 宽度对齐问题。

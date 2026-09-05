@@ -386,6 +386,7 @@ export const knowledgeApi = {
     model: string,
     channelId?: string,
     retrieval?: { mode: "vector" | "keyword" | "hybrid"; topK: number; keywordWeight: number },
+    deepResearch?: boolean,
   ): Promise<AskResult> =>
     invoke<AskResult>("ask_kb", {
       kbIds,
@@ -395,6 +396,7 @@ export const knowledgeApi = {
       mode: retrieval?.mode ?? "vector",
       topK: retrieval?.topK ?? 5,
       keywordWeight: retrieval?.keywordWeight ?? 0.3,
+      deepResearch: deepResearch ?? false,
     }),
 
   /** 列出某知识库下的全部文档（含片段数与状态），按创建时间倒序 */
