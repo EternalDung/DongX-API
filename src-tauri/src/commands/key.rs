@@ -136,3 +136,29 @@ pub async fn set_api_key_status(
         .map_err(|e| AppError::Internal(e.to_string()))?;
     Ok(())
 }
+
+/// 单网关密钥近 30 天运行概览：总请求数、成功数、成功率、平均耗时、Token 用量、最后调用时间。
+/// 成功 = `error_message` 为空。供密钥列表展开区「运行统计」展示。
+#[tauri::command]
+pub async fn get_api_key_stats(
+    name: String,
+    state: State<'_, Arc<AppState>>,
+) -> AppResult<serde_json::Value> {
+    let row = crate::db::repository::stats::api_key_stats(&state.db, &name)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let success_rate = if row.total > 0 {
+        (row.successes as f64 * 100.0 / row.total as f64).round() as i64
+    } else {
+        0
+    };
+    Ok(serde_json::json!({
+        "total": row.total,
+        "successes": row.successes,
+        "success_rate": success_rate,
+        "avg_latency_ms": row.avg_latency_ms,
+        "prompt_tokens_sum": row.prompt_tokens_sum,
+        "completion_tokens_sum": row.completion_tokens_sum,
+        "last_called_at": row.last_called_at,
+    }))
+}

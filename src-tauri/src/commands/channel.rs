@@ -342,5 +342,8 @@ pub async fn get_channel_stats(
         "successes": stats.successes,
         "success_rate": success_rate,
         "avg_latency_ms": stats.avg_latency_ms,
+        "prompt_tokens_sum": stats.prompt_tokens_sum,
+        "completion_tokens_sum": stats.completion_tokens_sum,
+        "last_called_at": stats.last_called_at,
     }))
 }

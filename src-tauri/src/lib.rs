@@ -103,6 +103,7 @@ pub fn run() {
             commands::key::update_api_key,
             commands::key::delete_api_key,
             commands::key::set_api_key_status,
+            commands::key::get_api_key_stats,
             commands::log::list_logs,
             commands::log::get_log_detail,
             commands::log::get_log_security_findings,

@@ -600,13 +600,16 @@ pub mod stats {
         .await
     }
 
-    /// 单渠道近 30 天运行概览：总请求数、成功数、平均耗时。
+    /// 单渠道近 30 天运行概览：总请求数、成功数、平均耗时、Token 用量。
     /// 成功 = `error_message` 为空。供渠道详情「运行概览」展示。
     #[derive(Debug, Clone, sqlx::FromRow)]
     pub struct ChannelStatsRow {
         pub total: i64,
         pub successes: i64,
         pub avg_latency_ms: i64,
+        pub prompt_tokens_sum: i64,
+        pub completion_tokens_sum: i64,
+        pub last_called_at: Option<String>,
     }
 
     pub async fn channel_stats(
@@ -617,12 +620,48 @@ pub mod stats {
             "SELECT
                 COALESCE(COUNT(*), 0) AS total,
                 COALESCE(SUM(CASE WHEN error_message IS NULL OR error_message = '' THEN 1 ELSE 0 END), 0) AS successes,
-                COALESCE(CAST(AVG(duration_ms) AS INTEGER), 0) AS avg_latency_ms
+                COALESCE(CAST(AVG(duration_ms) AS INTEGER), 0) AS avg_latency_ms,
+                COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens_sum,
+                COALESCE(SUM(completion_tokens), 0) AS completion_tokens_sum,
+                MAX(created_at) AS last_called_at
             FROM request_logs
             WHERE channel_name = ?1
               AND created_at >= strftime('%Y-%m-%d %H:%M:%S', 'now', '-30 days')",
         )
         .bind(channel_name)
+        .fetch_one(pool)
+        .await
+    }
+
+    /// 单个网关密钥近 30 天运行概览：总请求数、成功数、平均耗时、Token 用量、最后调用时间。
+    /// 成功 = `error_message` 为空。供密钥列表展开区的「运行统计」展示。
+    #[derive(Debug, Clone, sqlx::FromRow)]
+    pub struct ApiKeyStatsRow {
+        pub total: i64,
+        pub successes: i64,
+        pub avg_latency_ms: i64,
+        pub prompt_tokens_sum: i64,
+        pub completion_tokens_sum: i64,
+        pub last_called_at: Option<String>,
+    }
+
+    pub async fn api_key_stats(
+        pool: &SqlitePool,
+        api_key_name: &str,
+    ) -> Result<ApiKeyStatsRow, sqlx::Error> {
+        sqlx::query_as::<_, ApiKeyStatsRow>(
+            "SELECT
+                COALESCE(COUNT(*), 0) AS total,
+                COALESCE(SUM(CASE WHEN error_message IS NULL OR error_message = '' THEN 1 ELSE 0 END), 0) AS successes,
+                COALESCE(CAST(AVG(duration_ms) AS INTEGER), 0) AS avg_latency_ms,
+                COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens_sum,
+                COALESCE(SUM(completion_tokens), 0) AS completion_tokens_sum,
+                MAX(created_at) AS last_called_at
+            FROM request_logs
+            WHERE api_key_name = ?1
+              AND created_at >= strftime('%Y-%m-%d %H:%M:%S', 'now', '-30 days')",
+        )
+        .bind(api_key_name)
         .fetch_one(pool)
         .await
     }
