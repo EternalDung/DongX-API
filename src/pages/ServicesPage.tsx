@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useCallback, useEffect, useState, useRef } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { Plus, Trash2, BookOpen, Globe, Zap, RefreshCw, AlertTriangle, Copy, Check, Terminal, Layers, Wifi, Server, Code2, Info } from "lucide-react";
 import {
   Tabs,
@@ -27,12 +27,15 @@ import {
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import { knowledgeApi, mcpApi } from "@/lib/api";
+import { sleep } from "@/lib/async";
+import { WikiTabPanel } from "@/components/wiki/WikiTabPanel";
+import { useTabKeyNavigation } from "@/hooks/useTabKeyNavigation";
 import type { KnowledgeBase, KnowledgeBaseInput, McpStatus } from "@/types";
 
 /** 服务分类标签（服务页右上角切换）。desc 用于标题下方动态描述（随激活页签切换）。 */
 const TABS = [
   { id: "rag", label: "RAG", desc: "以知识库为单元进行检索增强，摄入文档后可在问答中检索并引用。", icon: BookOpen },
-  { id: "wiki", label: "Wiki", desc: "Wiki 知识沉淀模块，后续接入。", icon: Globe },
+  { id: "wiki", label: "Wiki", desc: "以项目为单元沉淀知识：摄入来源后由模型消化成结构化页面，并在后续摄入中增量更新。", icon: Globe },
   { id: "mcp", label: "MCP", desc: "将知识库以 MCP 工具暴露，供外部 Agent 直接调用检索与问答。", icon: Server },
   { id: "skill", label: "Skill", desc: "Skill 扩展模块，后续接入。", icon: Zap },
 ] as const;
@@ -241,7 +244,10 @@ function McpTab({ kbs }: { kbs: KnowledgeBase[] }) {
 
   const endpoint = status?.endpoint ?? "http://127.0.0.1:9842/mcp";
   const running = status?.running ?? false;
-  const exposedCount = kbs.filter((k) => k.mcp_exposed === 1 && k.status === 1).length;
+  const exposedKbs = kbs.filter((k) => k.mcp_exposed === 1 && k.status === 1);
+  const exposedCount = exposedKbs.length;
+  const exposedDocs = exposedKbs.reduce((s, k) => s + (k.doc_count ?? 0), 0);
+  const exposedChunks = exposedKbs.reduce((s, k) => s + (k.chunk_count ?? 0), 0);
   const toolCount = status?.toolsCount ?? 0;
 
   // 统一复制：用 key 区分多个复制源，各自短暂显示 ✓。
@@ -299,14 +305,6 @@ function McpTab({ kbs }: { kbs: KnowledgeBase[] }) {
 
   return (
     <div className="space-y-6">
-      {/* 头部说明 */}
-      <div>
-        <h2 className="text-lg font-semibold tracking-tight">MCP 服务</h2>
-        <p className="mt-1 text-sm text-muted-foreground">
-          通过 Model Context Protocol 把本地 RAG 暴露给 AI Agent / MCP 客户端（如 Claude Desktop、Cursor）。
-          端点与网关同源，无需单独配置端口，开启知识库的「MCP 暴露」后即可被检索。
-        </p>
-      </div>
 
       {/* 状态 + 概览 */}
       <div className="grid gap-4 sm:grid-cols-2">
@@ -316,11 +314,14 @@ function McpTab({ kbs }: { kbs: KnowledgeBase[] }) {
               <div className="flex items-center gap-3">
                 <span
                   className={cn(
-                    "flex h-9 w-9 items-center justify-center rounded-lg",
+                    "relative flex h-9 w-9 items-center justify-center rounded-lg",
                     running ? "bg-emerald-500/15 text-emerald-600" : "bg-rose-500/15 text-rose-600",
                   )}
                 >
-                  <Wifi size={18} />
+                  {running && (
+                    <span className="absolute inset-0 animate-ping rounded-lg bg-emerald-400/40" />
+                  )}
+                  <Wifi size={18} className="relative" />
                 </span>
                 <div>
                   <p className="text-sm font-medium">MCP 端点</p>
@@ -330,14 +331,6 @@ function McpTab({ kbs }: { kbs: KnowledgeBase[] }) {
                 </div>
               </div>
               <div className="flex flex-col items-end gap-2">
-                <span
-                  className={cn(
-                    "rounded-full px-2 py-0.5 text-xs font-medium",
-                    running ? "bg-emerald-500/15 text-emerald-600" : "bg-rose-500/15 text-rose-500",
-                  )}
-                >
-                  {running ? "就绪" : "离线"}
-                </span>
                 <Button variant="outline" size="sm" onClick={handleTest} disabled={conn.state === "testing"}>
                   {conn.state === "testing" ? "测试中…" : "测试连接"}
                 </Button>
@@ -372,7 +365,9 @@ function McpTab({ kbs }: { kbs: KnowledgeBase[] }) {
               </span>
               <div>
                 <p className="text-sm font-medium">已暴露知识库</p>
-                <p className="text-xs text-muted-foreground">可在 MCP 中被检索的启用知识库</p>
+                <p className="text-xs text-muted-foreground">
+                  已暴露 {exposedCount} 个知识库 · {exposedDocs} 篇文档 · {exposedChunks} 个分片
+                </p>
               </div>
             </div>
             <span className="text-2xl font-semibold tabular-nums">{exposedCount}</span>
@@ -488,10 +483,15 @@ function McpTab({ kbs }: { kbs: KnowledgeBase[] }) {
 
 export function ServicesPage() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const toast = useToast();
 
-  // 激活页签（受控，用于标题区动态展示该页签的标题 + 描述）
-  const [activeTab, setActiveTab] = useState<string>("rag");
+  // 激活页签（受控，用于标题区动态展示该页签的标题 + 描述）。
+  // 支持从 URL ?tab= 读取初始分类：从 Wiki 详情返回时停留在 Wiki，而非默认 RAG。
+  const [activeTab, setActiveTab] = useState<string>(() => {
+    const t = searchParams.get("tab");
+    return TABS.some((x) => x.id === t) ? (t as string) : "rag";
+  });
 
   // 首次进入提示：按 Tab 切换服务分类。localStorage 记"已看过"后不再弹。
   const [showTabHint, setShowTabHint] = useState<boolean>(() => {
@@ -510,25 +510,9 @@ export function ServicesPage() {
     setShowTabHint(false);
   }, []);
 
-  // 键盘 TAB 切换服务分类：Tab=下一个，Shift+Tab=上一个，到达末尾循环回开头。
+  // 键盘 TAB 切换服务分类：Tab=下一个，Shift+Tab=上一个，首尾循环。
   // 输入框/文本域/可编辑区内不劫持，保留浏览器正常的焦点移动。
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Tab") return;
-      const el = e.target as HTMLElement | null;
-      const tag = el?.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA" || el?.isContentEditable) return;
-      e.preventDefault();
-      const ids = TABS.map((t) => t.id);
-      const idx = ids.indexOf(activeTab as (typeof ids)[number]);
-      if (idx < 0) return;
-      const delta = e.shiftKey ? -1 : 1;
-      const next = ids[(idx + delta + ids.length) % ids.length];
-      setActiveTab(next);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [activeTab]);
+  useTabKeyNavigation(TABS.map((t) => t.id), activeTab, setActiveTab);
 
   // RAG 知识库列表
   const [kbs, setKbs] = useState<KnowledgeBase[]>([]);
@@ -541,8 +525,17 @@ export function ServicesPage() {
   const [form, setForm] = useState<KbForm>(emptyForm());
   const [saving, setSaving] = useState(false);
 
-  const load = async () => {
-    setLoading(true);
+  // 方案A：解耦「内容出现」与「刷新按钮旋转」。
+  // loading 仅用于首屏骨架（确无数据时才显）；其余刷新/切 tab 保留旧数据、只让按钮转。
+  // spinning 用最小可见时长保证旋转稳定可见，但不再拖慢内容渲染。
+  const [spinning, setSpinning] = useState(false);
+  const kbsRef = useRef<KnowledgeBase[]>([]);
+  kbsRef.current = kbs;
+  const load = useCallback(async () => {
+    const showSkeleton = kbsRef.current.length === 0;
+    if (showSkeleton) setLoading(true);
+    setSpinning(true);
+    const started = Date.now();
     try {
       const list = await knowledgeApi.list();
       setKbs(list);
@@ -551,13 +544,17 @@ export function ServicesPage() {
       console.warn("知识库列表加载失败（RAG 后端可能未接入）：", e);
       setKbs([]);
     } finally {
-      setLoading(false);
+      if (showSkeleton) setLoading(false);
+      const elapsed = Date.now() - started;
+      if (elapsed < 400) await sleep(400 - elapsed);
+      setSpinning(false);
     }
-  };
-
-  useEffect(() => {
-    load();
   }, []);
+
+  // 每次切到 RAG 分类即刷新列表（与 Wiki 列表「切换激活即刷新」行为一致）。
+  useEffect(() => {
+    if (activeTab === "rag") void load();
+  }, [activeTab, load]);
 
   const openCreate = () => {
     setForm(emptyForm());
@@ -700,8 +697,8 @@ export function ServicesPage() {
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-medium text-muted-foreground">知识库</h2>
             <div className="flex gap-2">
-              <Button variant="outline" size="sm" onClick={load} disabled={loading}>
-                <RefreshCw className={loading ? "animate-spin" : ""} />
+              <Button variant="outline" size="sm" onClick={load} disabled={spinning}>
+                <RefreshCw className={spinning ? "animate-spin" : ""} />
                 刷新
               </Button>
               <Button
@@ -754,9 +751,9 @@ export function ServicesPage() {
           </Card>
         </TabsContent>
 
-        {/* 其余分类：暂未实现 */}
+        {/* Wiki：项目列表 */}
         <TabsContent value="wiki" className="mt-6">
-          <Placeholder name="Wiki" />
+          <WikiTabPanel />
         </TabsContent>
         <TabsContent value="mcp" className="mt-6">
           <McpTab kbs={kbs} />

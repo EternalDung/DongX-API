@@ -6,5 +6,6 @@ pub mod mcp;
 pub mod rag;
 pub mod services;
 pub mod settings;
+pub mod wiki;
 pub mod security;
 pub mod server;

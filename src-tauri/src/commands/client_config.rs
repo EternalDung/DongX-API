@@ -16,7 +16,10 @@ pub struct ClientInfo {
     pub description: String,
     pub config_path: String,
     pub config_format: String,
+    /// 可配置：CLI 已装 或 配置文件已存在（可写入）
     pub available: bool,
+    /// 已安装：探测到 CLI 可执行文件（强信号，不再仅凭配置目录存在判断）
+    pub installed: bool,
     pub applied: bool,
     pub download_url: String,
 }
@@ -47,7 +50,10 @@ struct AppDef {
     download_url: &'static str,
     config_dir_fn: fn() -> PathBuf,
     config_file: &'static str,
-    check_installed_fn: fn(&PathBuf) -> bool,
+    /// CLI 可执行文件名（在 PATH 中查找，覆盖 npm/nvm 全局安装）
+    cli_names: &'static [&'static str],
+    /// 额外安装点：相对 home 的路径（覆盖官方安装脚本等不在 PATH 的情况）
+    extra_exe: &'static [&'static str],
 }
 
 fn home_dir() -> PathBuf {
@@ -71,13 +77,54 @@ fn hermes_dir() -> PathBuf {
     home_dir().join(".hermes")
 }
 
-// 仅检测配置目录是否存在（方案 B）
-fn dir_exists(dir: &PathBuf) -> bool {
-    dir.exists()
+// ── 安装检测：探测 CLI 可执行文件 ──
+// 注意：不能仅凭「配置目录存在」判断已安装。
+// ~/.claude 这类目录会由 Claude 桌面端创建（内含 sessions/，并生成 ~/.claude.json），
+// 与 Claude Code CLI 是否安装无关；本程序写入配置时也会 create_dir_all 创建目录，
+// 若以目录为准会形成「写入一次即永久显示已安装」的自证循环。
+
+/// 在 PATH 中查找可执行文件（Windows 需遍历 PATHEXT，如 .cmd/.exe）
+fn command_exists(prog: &str) -> bool {
+    let Some(path_var) = std::env::var_os("PATH") else {
+        return false;
+    };
+    let exts: Vec<String> = if cfg!(windows) {
+        std::env::var("PATHEXT")
+            .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string())
+            .split(';')
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    for dir in std::env::split_paths(&path_var) {
+        if dir.join(prog).is_file() {
+            return true;
+        }
+        for ext in &exts {
+            if dir.join(format!("{prog}{ext}")).is_file() {
+                return true;
+            }
+        }
+    }
+    false
 }
-// Claude Code 配置目录（~/.claude）存在即视为已安装；不再误判桌面端 .claude.json
-fn claude_installed(dir: &PathBuf) -> bool {
-    dir.exists()
+
+/// 额外安装点（相对 home），Windows 下补测 .exe
+fn extra_exe_exists(rel: &str) -> bool {
+    let base = home_dir().join(rel);
+    if base.is_file() {
+        return true;
+    }
+    cfg!(windows) && base.with_extension("exe").is_file()
+}
+
+/// 是否已安装：PATH 中能找到 CLI，或命中额外安装点
+fn detect_cli(app: &AppDef) -> bool {
+    app.cli_names.iter().any(|c| command_exists(c))
+        || app.extra_exe.iter().any(|r| extra_exe_exists(r))
 }
 
 const APPS: &[AppDef] = &[
@@ -90,7 +137,12 @@ const APPS: &[AppDef] = &[
         download_url: "https://docs.anthropic.com/en/docs/claude-code/overview",
         config_dir_fn: claude_dir,
         config_file: "settings.json",
-        check_installed_fn: claude_installed,
+        cli_names: &["claude"],
+        extra_exe: &[
+            ".local/bin/claude",
+            ".claude/local/claude",
+            "AppData/Local/Programs/claude-code/claude",
+        ],
     },
     AppDef {
         name: "codex",
@@ -101,7 +153,8 @@ const APPS: &[AppDef] = &[
         download_url: "https://github.com/openai/codex",
         config_dir_fn: codex_dir,
         config_file: "config.toml",
-        check_installed_fn: dir_exists,
+        cli_names: &["codex"],
+        extra_exe: &[".local/bin/codex"],
     },
     AppDef {
         name: "opencode",
@@ -112,7 +165,8 @@ const APPS: &[AppDef] = &[
         download_url: "https://opencode.ai",
         config_dir_fn: opencode_dir,
         config_file: "opencode.json",
-        check_installed_fn: dir_exists,
+        cli_names: &["opencode"],
+        extra_exe: &[".local/bin/opencode"],
     },
     AppDef {
         name: "openclaw",
@@ -123,7 +177,8 @@ const APPS: &[AppDef] = &[
         download_url: "https://openclaw.ai",
         config_dir_fn: openclaw_dir,
         config_file: "config.json",
-        check_installed_fn: dir_exists,
+        cli_names: &["openclaw", "qclaw"],
+        extra_exe: &[".local/bin/openclaw"],
     },
     AppDef {
         name: "hermes",
@@ -134,7 +189,8 @@ const APPS: &[AppDef] = &[
         download_url: "https://github.com/openai/hermes",
         config_dir_fn: hermes_dir,
         config_file: "config.json",
-        check_installed_fn: dir_exists,
+        cli_names: &["hermes"],
+        extra_exe: &[".local/bin/hermes"],
     },
 ];
 
@@ -549,7 +605,9 @@ pub async fn get_client_configs() -> Result<Vec<ClientInfo>, String> {
         .map(|app| {
             let config_dir = (app.config_dir_fn)();
             let config_path = config_dir.join(app.config_file);
-            let available = (app.check_installed_fn)(&config_dir);
+            // installed = 探测到 CLI；available = 已装 CLI 或已有配置文件（可写入）
+            let installed = detect_cli(app);
+            let available = installed || config_path.exists();
             let applied = detect_applied(&config_path, app.name);
 
             ClientInfo {
@@ -560,6 +618,7 @@ pub async fn get_client_configs() -> Result<Vec<ClientInfo>, String> {
                 config_path: config_path.to_string_lossy().to_string(),
                 config_format: app.config_format.to_string(),
                 available,
+                installed,
                 applied,
                 download_url: app.download_url.to_string(),
             }

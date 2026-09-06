@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
+import { sleep } from "@/lib/async";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   ArrowLeft,
@@ -13,6 +14,7 @@ import {
   UploadCloud,
   Trash2,
   RefreshCw,
+  DatabaseZap,
   AlertTriangle,
   Loader2,
   GitBranch,
@@ -44,7 +46,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardAction } from "@/componen
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Select } from "@/components/ui/select";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import { Slider } from "@/components/ui/slider";
@@ -71,6 +73,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
+import { useTabKeyNavigation } from "@/hooks/useTabKeyNavigation";
 import { knowledgeApi, channelApi, mcpApi } from "@/lib/api";
 import type {
   AskResult,
@@ -224,8 +227,16 @@ function DocumentsTab({
     loadChunks(doc, 0);
   };
 
+  // 方案A：骨架仅在「确无数据」(首屏) 显示；刷新时保留旧列表，只让按钮图标旋转。
+  const [spinning, setSpinning] = useState(false);
+  const docsRef = useRef<KbDocument[]>([]);
+  docsRef.current = documents;
+
   const refresh = async () => {
-    setLoading(true);
+    const showSkeleton = docsRef.current.length === 0;
+    if (showSkeleton) setLoading(true);
+    setSpinning(true);
+    const started = Date.now();
     try {
       const docs = await knowledgeApi.documents(kb.id);
       setDocuments(docs);
@@ -233,7 +244,10 @@ function DocumentsTab({
       console.error("加载文档失败：", e);
       setDocuments([]);
     } finally {
-      setLoading(false);
+      if (showSkeleton) setLoading(false);
+      const elapsed = Date.now() - started;
+      if (elapsed < 400) await sleep(400 - elapsed);
+      setSpinning(false);
     }
   };
 
@@ -354,8 +368,8 @@ function DocumentsTab({
         <CardContent className="space-y-3 pt-2">
           <div className="flex items-center justify-between">
             <h3 className="text-sm font-medium text-muted-foreground">文档</h3>
-            <Button variant="outline" size="sm" onClick={refresh} disabled={loading}>
-              <RefreshCw className={loading ? "animate-spin" : ""} />
+            <Button variant="outline" size="sm" onClick={refresh} disabled={spinning}>
+              <RefreshCw className={spinning ? "animate-spin" : ""} />
               刷新
             </Button>
           </div>
@@ -774,40 +788,44 @@ function AskTab({ kb }: { kb: KnowledgeBase }) {
         <div className="flex items-center gap-1.5">
           <span className="text-xs text-muted-foreground">渠道</span>
           <Select
-            value={selectedChannelId}
-            onChange={(e) => setSelectedChannelId(e.target.value)}
-            className="h-8 w-auto min-w-[120px] text-sm"
+            value={selectedChannelId || undefined}
+            onValueChange={setSelectedChannelId}
             disabled={channels.length === 0}
           >
-            {channels.length === 0 ? (
-              <option value="">无可用渠道</option>
-            ) : (
-              channels.map((c) => (
-                <option key={c.id} value={c.id}>
+            <SelectTrigger className="h-8 w-auto min-w-[120px] text-sm">
+              <SelectValue placeholder="无可用渠道" />
+            </SelectTrigger>
+            <SelectContent>
+              {channels.map((c) => (
+                <SelectItem key={c.id} value={c.id}>
                   {c.name}
-                </option>
-              ))
-            )}
+                </SelectItem>
+              ))}
+            </SelectContent>
           </Select>
         </div>
         <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/60" />
         <div className="flex items-center gap-1.5">
           <span className="text-xs text-muted-foreground">模型</span>
           <Select
-            value={selectedModel}
-            onChange={(e) => setSelectedModel(e.target.value)}
-            className="h-8 w-auto min-w-[160px] text-sm"
+            value={selectedModel || undefined}
+            onValueChange={setSelectedModel}
             disabled={modelsForChannel.length === 0}
           >
-            {modelsForChannel.length === 0 ? (
-              <option value="">该渠道未列出模型</option>
-            ) : (
-              modelsForChannel.map((m) => (
-                <option key={m} value={m}>
+            <SelectTrigger className="h-8 w-auto min-w-[160px] text-sm">
+              <SelectValue
+                placeholder={
+                  modelsForChannel.length === 0 ? "该渠道未列出模型" : "选择模型"
+                }
+              />
+            </SelectTrigger>
+            <SelectContent>
+              {modelsForChannel.map((m) => (
+                <SelectItem key={m} value={m}>
                   {m}
-                </option>
-              ))
-            )}
+                </SelectItem>
+              ))}
+            </SelectContent>
           </Select>
         </div>
         {selectedModel && (
@@ -1267,20 +1285,20 @@ function SettingsTab({ kb, onSaved }: { kb: KnowledgeBase; onSaved: (next: Knowl
           <div className="grid gap-2">
             <Label htmlFor="set-channel">绑定渠道</Label>
             <Select
-              id="set-channel"
-              value={embedChannelId}
-              onChange={(e) => setEmbedChannelId(e.target.value)}
+              value={embedChannelId || undefined}
+              onValueChange={setEmbedChannelId}
               disabled={channels.length === 0}
             >
-              {channels.length === 0 ? (
-                <option value="">无可用渠道</option>
-              ) : (
-                channels.map((c) => (
-                  <option key={c.id} value={c.id}>
+              <SelectTrigger id="set-channel" className="w-full">
+                <SelectValue placeholder="无可用渠道" />
+              </SelectTrigger>
+              <SelectContent>
+                {channels.map((c) => (
+                  <SelectItem key={c.id} value={c.id}>
                     {c.name}
-                  </option>
-                ))
-              )}
+                  </SelectItem>
+                ))}
+              </SelectContent>
             </Select>
             <p className="text-xs text-muted-foreground">
               仅列出已启用的渠道；换渠道通常也要换模型
@@ -1314,7 +1332,7 @@ function SettingsTab({ kb, onSaved }: { kb: KnowledgeBase; onSaved: (next: Knowl
                   {reindexing ? (
                     <Loader2 className="h-3.5 w-3.5 animate-spin" />
                   ) : (
-                    <RefreshCw className="h-3.5 w-3.5" />
+                    <DatabaseZap className="h-3.5 w-3.5" />
                   )}
                   重建索引
                 </Button>
@@ -1720,9 +1738,13 @@ function IndexTab({
 
   const handleRefresh = async () => {
     setRefreshing(true);
+    const started = Date.now();
     try {
       await onRefresh();
     } finally {
+      // 保活最小可见时长：本地调用过快时旋转会一闪而过，用户看不出是否刷新过
+      const elapsed = Date.now() - started;
+      if (elapsed < 400) await sleep(400 - elapsed);
       setRefreshing(false);
     }
   };
@@ -1799,14 +1821,19 @@ function IndexTab({
         </div>
         <div className="flex items-center gap-2">
           <Button variant="outline" size="sm" onClick={handleRefresh} disabled={refreshing || reindexing}>
-            {refreshing ? "刷新中..." : "刷新"}
+            <RefreshCw className={refreshing ? "animate-spin" : ""} />
+            刷新
           </Button>
           <Button
             size="sm"
             onClick={() => setConfirmOpen(true)}
             disabled={reindexing || (status?.chunk_count ?? 0) === 0}
           >
-            <RefreshCw className={reindexing ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+            {reindexing ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <DatabaseZap className="h-4 w-4" />
+            )}
             {reindexing ? "重建中..." : "重建索引"}
           </Button>
         </div>
@@ -2546,6 +2573,8 @@ export function KnowledgeBaseDetailPage() {
 
   // 当前激活的 Tab（受控，便于在「索引」Tab 激活时轮询统计）
   const [activeTab, setActiveTab] = useState("documents");
+  // 键盘 Tab 切换顶部页签（与服务页一致）：Tab=下一个，Shift+Tab=上一个，首尾循环。
+  useTabKeyNavigation(KB_TABS.map((t) => t.id), activeTab, setActiveTab);
   // 索引统计（文档数 / 分块数 / token 数等），由本组件统一持有与刷新，
   // 删除文档 / 摄入后主动刷新，避免「索引」Tab 显示过时数据。
   const [indexStatus, setIndexStatus] = useState<IndexStatus | null>(null);

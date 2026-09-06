@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState, Fragment } from "react";
+import { useEffect, useMemo, useRef, useState, Fragment } from "react";
+import { sleep } from "@/lib/async";
 import { Plus, Pencil, Trash2, Zap, RefreshCw, Network, AlertTriangle, ChevronDown, ChevronRight, X, Power } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Card, CardContent } from "@/components/ui/card";
@@ -7,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { EmptyState } from "@/components/ui/empty-state";
 import { StatusBadge, type StatusTone } from "@/components/ui/status-badge";
 import { useCopyToClipboard } from "@/components/ui/copy-button";
@@ -173,8 +175,16 @@ export function ChannelsPage() {
       .finally(() => setPresetsLoading(false));
   }, []);
 
+  // 方案A：骨架仅在「确无数据」(首屏) 显示；刷新时保留旧列表，只让按钮图标旋转。
+  const [spinning, setSpinning] = useState(false);
+  const channelsRef = useRef<Channel[]>([]);
+  channelsRef.current = channels;
+
   const load = async () => {
-    setLoading(true);
+    const showSkeleton = channelsRef.current.length === 0;
+    if (showSkeleton) setLoading(true);
+    setSpinning(true);
+    const started = Date.now();
     try {
       const list = await channelApi.list();
       setChannels(list);
@@ -182,7 +192,10 @@ export function ChannelsPage() {
       console.error("Failed to load channels:", e);
       toast.error("渠道列表加载失败");
     } finally {
-      setLoading(false);
+      if (showSkeleton) setLoading(false);
+      const elapsed = Date.now() - started;
+      if (elapsed < 400) await sleep(400 - elapsed);
+      setSpinning(false);
     }
   };
 
@@ -512,8 +525,8 @@ export function ChannelsPage() {
           </p>
         </div>
         <div className="flex gap-2">
-          <Button variant="outline" size="sm" onClick={load} disabled={loading}>
-            <RefreshCw className={loading ? "animate-spin" : ""} />
+          <Button variant="outline" size="sm" onClick={load} disabled={spinning}>
+            <RefreshCw className={spinning ? "animate-spin" : ""} />
             刷新
           </Button>
           <Button
@@ -1000,21 +1013,24 @@ export function ChannelsPage() {
                       className="flex-1"
                     />
                     <span className="text-muted-foreground">→</span>
-                    <select
-                      value={m.to}
-                      onChange={(e) => updateMapping(i, "to", e.target.value)}
+                    <Select
+                      value={m.to || undefined}
+                      onValueChange={(v) => updateMapping(i, "to", v)}
                       disabled={!modelsList.length}
-                      className="flex-1 rounded-lg border border-border bg-background px-3 py-2 text-sm outline-none focus:border-primary disabled:opacity-50"
                     >
-                      <option value="">
-                        {modelsList.length ? "选择上游模型" : "先填写模型列表"}
-                      </option>
-                      {modelsList.map((md) => (
-                        <option key={md} value={md}>
-                          {md}
-                        </option>
-                      ))}
-                    </select>
+                      <SelectTrigger className="flex-1">
+                        <SelectValue
+                          placeholder={modelsList.length ? "选择上游模型" : "先填写模型列表"}
+                        />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {modelsList.map((md) => (
+                          <SelectItem key={md} value={md}>
+                            {md}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                     {form.mappings.length > 1 && (
                       <Button variant="ghost" size="sm" onClick={() => removeMapping(i)}>
                         <Trash2 />

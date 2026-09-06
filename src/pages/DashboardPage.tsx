@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { sleep } from "@/lib/async";
 import {
   Activity,
   Coins,
@@ -152,8 +153,18 @@ export function DashboardPage() {
   const [channels, setChannels] = useState<Channel[]>([]);
   const [loading, setLoading] = useState(true);
 
+  // 方案A：骨架仅在「确无数据」(首屏) 显示；刷新时保留旧卡片，只让按钮图标旋转。
+  const [spinning, setSpinning] = useState(false);
+  const statsRef = useRef<DashboardStats | null>(null);
+  statsRef.current = stats;
+  const channelsRef = useRef<Channel[]>([]);
+  channelsRef.current = channels;
+
   const load = async () => {
-    setLoading(true);
+    const showSkeleton = statsRef.current === null && channelsRef.current.length === 0;
+    if (showSkeleton) setLoading(true);
+    setSpinning(true);
+    const started = Date.now();
     try {
       const [s, c] = await Promise.all([statsApi.getDashboard(), channelApi.list()]);
       setStats(s);
@@ -161,7 +172,10 @@ export function DashboardPage() {
     } catch (e) {
       console.error("Failed to load dashboard:", e);
     } finally {
-      setLoading(false);
+      if (showSkeleton) setLoading(false);
+      const elapsed = Date.now() - started;
+      if (elapsed < 400) await sleep(400 - elapsed);
+      setSpinning(false);
     }
   };
 
@@ -236,8 +250,8 @@ export function DashboardPage() {
             请求统计、Token 消耗、渠道状态概览
           </p>
         </div>
-        <Button variant="outline" size="sm" onClick={load} disabled={loading}>
-          <RefreshCw className={loading ? "animate-spin" : ""} />
+        <Button variant="outline" size="sm" onClick={load} disabled={spinning}>
+          <RefreshCw className={spinning ? "animate-spin" : ""} />
           刷新
         </Button>
       </div>

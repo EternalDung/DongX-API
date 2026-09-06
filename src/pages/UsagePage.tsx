@@ -21,7 +21,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
-import { Select } from "@/components/ui/select";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { EmptyState } from "@/components/ui/empty-state";
 import { useToast } from "@/components/ui/toast";
 import { CopyButton } from "@/components/ui/copy-button";
@@ -722,20 +722,26 @@ export function UsagePage() {
             <FieldRow label="API KEY" icon={<span className="font-mono text-[10px]">SK</span>}>
               <div className="space-y-1.5">
                 <Select
-                  value={selectedKeyId}
-                  onChange={(e) => setSelectedKeyId(e.target.value)}
+                  value={selectedKeyId || undefined}
+                  onValueChange={setSelectedKeyId}
                   disabled={availableKeys.length === 0}
-                  className="font-mono text-xs"
                 >
-                  {availableKeys.length === 0 ? (
-                    <option value="">（暂无可用密钥，请先到「密钥管理」创建）</option>
-                  ) : (
-                    availableKeys.map((k) => (
-                      <option key={k.id} value={k.id}>
+                  <SelectTrigger className="font-mono text-xs w-full">
+                    <SelectValue
+                      placeholder={
+                        availableKeys.length === 0
+                          ? "（暂无可用密钥，请先到「密钥管理」创建）"
+                          : "选择密钥"
+                      }
+                    />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {availableKeys.map((k) => (
+                      <SelectItem key={k.id} value={k.id}>
                         {k.name} · {maskKeyForDisplay(k.key)}
-                      </option>
-                    ))
-                  )}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
                 </Select>
                 <p className="text-[11px] leading-relaxed text-muted-foreground">
                   选择已创建的网关密钥（本地明文存储，可直接选用）。若列表为空，请先到
@@ -751,15 +757,19 @@ export function UsagePage() {
                 </div>
               ) : (
                 <Select
-                  value={model}
-                  onChange={(e) => setModel(e.target.value)}
-                  className="font-mono text-xs"
+                  value={model || undefined}
+                  onValueChange={setModel}
                 >
-                  {modelOptions.map((m) => (
-                    <option key={m} value={m}>
-                      {m}
-                    </option>
-                  ))}
+                  <SelectTrigger className="font-mono text-xs w-full">
+                    <SelectValue placeholder="选择模型" />
+                  </SelectTrigger>
+                  <SelectContent className="font-mono text-xs w-full">
+                    {modelOptions.map((m) => (
+                      <SelectItem key={m} value={m}>
+                        {m}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
                 </Select>
               )}
             </FieldRow>

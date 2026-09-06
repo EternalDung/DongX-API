@@ -318,8 +318,10 @@ export interface ClientInfo {
   description: string;
   config_path: string;
   config_format: string;
-  /** 是否已安装（方案 B：配置目录存在即视为已安装） */
+  /** 可配置：CLI 已装 或 配置文件已存在（可写入） */
   available: boolean;
+  /** 已安装：探测到 CLI 可执行文件（强信号；不再仅凭配置目录存在判断） */
+  installed: boolean;
   /** 是否已接入本网关（配置中含 _dongx 标记 / DongX provider） */
   applied: boolean;
   download_url: string;
@@ -570,4 +572,140 @@ export interface ImportSourceInput {
   included_files?: string;
   /** MB */
   max_file_size_mb?: number;
+}
+
+// ============================================================
+// Wiki
+// Wiki 项目：以「源」为输入，由 LLM 阅读消化后生成结构化的「页面」，
+// 页面之间通过 [[wikilink]] 交叉引用，并在后续摄入中增量更新。
+// 与 RAG 的区别：RAG 每次检索原文片段（不积累），Wiki 沉淀为页面（会积累）。
+// ============================================================
+
+/** Wiki 项目状态：0 禁用 / 1 就绪 */
+export type WikiProjectStatus = 0 | 1;
+
+export interface WikiProject {
+  id: string;
+  name: string;
+  description: string;
+  /** 生成页面所用的渠道 id */
+  channel_id: string;
+  /** 生成页面所用的模型名 */
+  model: string;
+  /** 维护规则：约束页面生成与增量更新风格的 system 提示片段 */
+  maintenance_prompt: string;
+  /** 对话（搜索/问答）所用渠道 id；默认与生成渠道一致，可单独指定 */
+  chat_channel_id: string;
+  /** 对话（搜索/问答）所用模型名 */
+  chat_model: string;
+  /** MCP 暴露开关（预留：后端接入后启用，将 Wiki 以 MCP 工具暴露给外部 Agent） */
+  mcp_exposed: number;
+  status: WikiProjectStatus;
+  /** 已配置来源数 */
+  source_count: number;
+  /** 已生成页面数（含目录页 index.md） */
+  page_count: number;
+  /** 页面间 [[wikilink]] 引用关系数 */
+  link_count: number;
+  /** 全部页面正文的 token 估算 */
+  token_estimate: number;
+  /** 最近一次摄入完成时间 */
+  last_ingest_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** 新建 Wiki 项目参数（空白项目，源留到详情页添加） */
+export interface WikiProjectInput {
+  name: string;
+  description: string;
+  channel_id: string;
+  model: string;
+  /** MCP 暴露开关（预留） */
+  mcp_exposed?: number;
+}
+
+/** 更新 Wiki 项目参数（部分更新） */
+export interface WikiProjectUpdate {
+  name?: string;
+  description?: string;
+  /** 0=禁用 1=就绪 */
+  status?: number;
+  channel_id?: string;
+  model?: string;
+  maintenance_prompt?: string;
+  /** 对话（搜索/问答）渠道 id（可选更新） */
+  chat_channel_id?: string;
+  /** 对话（搜索/问答）模型名（可选更新） */
+  chat_model?: string;
+  /** MCP 暴露开关（预留，可选更新） */
+  mcp_exposed?: number;
+}
+
+/** 来源类型：git 仓库 / 网页 URL / 本地目录 */
+export type WikiSourceKind = "git" | "url" | "local_dir";
+
+/** 来源状态。注意：摄入中状态只存在于「源」粒度，不会冒泡成项目状态。 */
+export type WikiSourceStatus = "pending" | "ingesting" | "ready" | "failed";
+
+/** 页面分类。LLM 摄入时强制带 kind，用于页面 Tab 的分类过滤。 */
+export type WikiPageKind = "概念" | "实体" | "日志" | "索引" | "摘要";
+
+export interface WikiSource {
+  id: string;
+  project_id: string;
+  kind: WikiSourceKind;
+  /** git 仓库 URL / 网页 URL / 本地目录绝对路径 */
+  locator: string;
+  branch: string | null;
+  status: WikiSourceStatus;
+  /** 摄入进度：已处理文档数 */
+  ingested: number;
+  /** 摄入进度：文档总数 */
+  total: number;
+  /** 最近一次摄入的错误信息 */
+  error: string | null;
+  last_ingest_at: string | null;
+  created_at: string;
+}
+
+export interface WikiSourceInput {
+  kind: WikiSourceKind;
+  locator: string;
+  branch?: string;
+}
+
+export interface WikiPage {
+  id: string;
+  project_id: string;
+  title: string;
+  /** URL 友好标识，用于 [[wikilink]] 定位 */
+  slug: string;
+  /** Markdown 正文 */
+  content: string;
+  /** 是否为目录页 index.md（查询引擎的导航入口，列表中置顶） */
+  is_index: boolean;
+  /** 页面分类：概念/实体/日志/索引/摘要 */
+  kind: WikiPageKind;
+  /** 正文中 [[wikilink]] 指向的页面标题 */
+  links: string[];
+  tokens: number;
+  updated_at: string;
+  created_at: string;
+}
+
+/** Wiki 问答引用到的页面片段 */
+export interface WikiCitation {
+  title: string;
+  slug: string;
+  /** 命中片段节选 */
+  excerpt: string;
+}
+
+export interface WikiAskResult {
+  answer: string;
+  citations: WikiCitation[];
+  prompt_tokens: number;
+  completion_tokens: number;
+  duration_ms: number;
 }

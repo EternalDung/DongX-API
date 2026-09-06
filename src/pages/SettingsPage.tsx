@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { sleep } from "@/lib/async";
 import { RefreshCw, Save, RotateCw, Play, Square, Plus, Pencil, Trash2, ChevronUp, ChevronDown } from "lucide-react";
 import {
   Card,
@@ -11,7 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import { Select } from "@/components/ui/select";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import {
   Dialog,
@@ -118,15 +119,20 @@ function CustomRulesCard() {
   const [editing, setEditing] = useState<CustomRule | null>(null);
   const [form, setForm] = useState<CustomRuleInput>(EMPTY_FORM);
 
+  // 方案A：骨架仅在「确无数据」(首屏) 显示；新增/编辑后重载保留旧内容，不再整块闪。
+  const rulesRef = useRef<CustomRule[]>([]);
+  rulesRef.current = rules;
+
   const loadRules = async () => {
-    setLoading(true);
+    const showSkeleton = rulesRef.current.length === 0;
+    if (showSkeleton) setLoading(true);
     try {
       setRules(await customRuleApi.list());
     } catch (e) {
       console.error("Failed to load custom rules:", e);
       toast.error("加载自定义规则失败");
     } finally {
-      setLoading(false);
+      if (showSkeleton) setLoading(false);
     }
   };
 
@@ -287,32 +293,40 @@ function CustomRulesCard() {
             <div className="grid gap-2">
               <Label htmlFor="cr-type">规则类型</Label>
               <Select
-                id="cr-type"
                 value={form.rule_type}
-                onChange={(e) =>
-                  setForm({ ...form, rule_type: e.target.value as CustomRuleInput["rule_type"] })
+                onValueChange={(v) =>
+                  setForm({ ...form, rule_type: v as CustomRuleInput["rule_type"] })
                 }
               >
-                <option value="blacklist">黑名单（命中即处置）</option>
-                <option value="whitelist" disabled>
-                  白名单（暂未接入）
-                </option>
+                <SelectTrigger id="cr-type" className="w-full">
+                  <SelectValue placeholder="规则类型" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="blacklist">黑名单（命中即处置）</SelectItem>
+                  <SelectItem value="whitelist" disabled>
+                    白名单（暂未接入）
+                  </SelectItem>
+                </SelectContent>
               </Select>
             </div>
 
             <div className="grid gap-2">
               <Label htmlFor="cr-category">匹配类别</Label>
               <Select
-                id="cr-category"
                 value={form.category}
-                onChange={(e) =>
-                  setForm({ ...form, category: e.target.value as CustomRuleInput["category"] })
+                onValueChange={(v) =>
+                  setForm({ ...form, category: v as CustomRuleInput["category"] })
                 }
               >
-                <option value="domain">域名</option>
-                <option value="tool">工具</option>
-                <option value="path">路径</option>
-                <option value="keyword">关键词</option>
+                <SelectTrigger id="cr-category" className="w-full">
+                  <SelectValue placeholder="匹配类别" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="domain">域名</SelectItem>
+                  <SelectItem value="tool">工具</SelectItem>
+                  <SelectItem value="path">路径</SelectItem>
+                  <SelectItem value="keyword">关键词</SelectItem>
+                </SelectContent>
               </Select>
             </div>
 
@@ -333,29 +347,37 @@ function CustomRulesCard() {
               <div className="grid gap-2">
                 <Label htmlFor="cr-severity">风险等级</Label>
                 <Select
-                  id="cr-severity"
                   value={form.severity}
-                  onChange={(e) =>
-                    setForm({ ...form, severity: e.target.value as CustomRuleInput["severity"] })
+                  onValueChange={(v) =>
+                    setForm({ ...form, severity: v as CustomRuleInput["severity"] })
                   }
                 >
-                  <option value="low">低</option>
-                  <option value="medium">中</option>
-                  <option value="high">高</option>
-                  <option value="critical">严重</option>
+                  <SelectTrigger id="cr-severity" className="w-full">
+                    <SelectValue placeholder="风险等级" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="low">低</SelectItem>
+                    <SelectItem value="medium">中</SelectItem>
+                    <SelectItem value="high">高</SelectItem>
+                    <SelectItem value="critical">严重</SelectItem>
+                  </SelectContent>
                 </Select>
               </div>
               <div className="grid gap-2">
                 <Label htmlFor="cr-action">命中动作</Label>
                 <Select
-                  id="cr-action"
                   value={form.action}
-                  onChange={(e) =>
-                    setForm({ ...form, action: e.target.value as CustomRuleInput["action"] })
+                  onValueChange={(v) =>
+                    setForm({ ...form, action: v as CustomRuleInput["action"] })
                   }
                 >
-                  <option value="warn">告警</option>
-                  <option value="block">阻断</option>
+                  <SelectTrigger id="cr-action" className="w-full">
+                    <SelectValue placeholder="命中动作" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="warn">告警</SelectItem>
+                    <SelectItem value="block">阻断</SelectItem>
+                  </SelectContent>
                 </Select>
               </div>
             </div>
@@ -469,15 +491,20 @@ function BuiltinRulesCard({ settings }: { settings: Settings }) {
   const [cat, setCat] = useState<"all" | BuiltinRule["category"]>("all");
   const [collapsed, setCollapsed] = useState(false);
 
+  // 方案A：骨架仅在「确无数据」显示；「恢复默认」后的重载保留旧列表，不再整块闪。
+  const rulesRef = useRef<BuiltinRule[]>([]);
+  rulesRef.current = rules;
+
   const load = async () => {
-    setLoading(true);
+    const showSkeleton = rulesRef.current.length === 0;
+    if (showSkeleton) setLoading(true);
     try {
       setRules(await builtinRuleApi.list());
     } catch (e) {
       console.error("Failed to load builtin rules:", e);
       toast.error("加载内置规则失败");
     } finally {
-      setLoading(false);
+      if (showSkeleton) setLoading(false);
     }
   };
 
@@ -501,6 +528,7 @@ function BuiltinRulesCard({ settings }: { settings: Settings }) {
 
   const handleReset = async () => {
     setBusy(true);
+    const started = Date.now();
     try {
       await builtinRuleApi.reset();
       toast.success("已恢复默认规则配置");
@@ -509,6 +537,8 @@ function BuiltinRulesCard({ settings }: { settings: Settings }) {
       console.error(e);
       toast.error(String(e));
     } finally {
+      const elapsed = Date.now() - started;
+      if (elapsed < 400) await sleep(400 - elapsed);
       setBusy(false);
     }
   };
@@ -586,13 +616,16 @@ function BuiltinRulesCard({ settings }: { settings: Settings }) {
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
               />
-              <Select value={cat} onChange={(e) => setCat(e.target.value as typeof cat)}>
-                <option value="all">全部类目</option>
-                {BUILTIN_GROUP_ORDER.map((c) => (
-                  <option key={c} value={c}>
-                    {BUILTIN_CATEGORY_LABEL[c]}
-                  </option>
-                ))}
+              <Select value={cat} onValueChange={(v) => setCat(v as typeof cat)}>
+                <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">全部类目</SelectItem>
+                  {BUILTIN_GROUP_ORDER.map((c) => (
+                    <SelectItem key={c} value={c}>
+                      {BUILTIN_CATEGORY_LABEL[c]}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
               </Select>
             </div>
 
@@ -652,22 +685,26 @@ function BuiltinRulesCard({ settings }: { settings: Settings }) {
                             </p>
                           )}
                         </div>
-                        <div className="flex shrink-0 items-center gap-2">
+                        <div className="flex shrink-0 items-center gap-3">
                           <Select
                             value={r.severity}
                             disabled={locked}
-                            onChange={(e) =>
+                            onValueChange={(v) =>
                               patchRule(r, {
-                                severity: e.target.value as BuiltinRuleUpdate["severity"],
+                                severity: v as BuiltinRuleUpdate["severity"],
                               })
                             }
-                            aria-label="风险等级"
                           >
-                            <option value="info">提示</option>
-                            <option value="low">低</option>
-                            <option value="medium">中</option>
-                            <option value="high">高</option>
-                            <option value="critical">严重</option>
+                            <SelectTrigger aria-label="风险等级" className="w-24">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="info">提示</SelectItem>
+                              <SelectItem value="low">低</SelectItem>
+                              <SelectItem value="medium">中</SelectItem>
+                              <SelectItem value="high">高</SelectItem>
+                              <SelectItem value="critical">严重</SelectItem>
+                            </SelectContent>
                           </Select>
                           <Switch
                             checked={r.enabled}
@@ -710,14 +747,24 @@ export function SettingsPage() {
     }
   };
 
+  // 方案A：整页骨架仅在 settings 尚未就绪（首屏）时出现；
+  // 点「重置」时 settings 已存在，保留已渲染的设置项，只让按钮图标旋转 —— 不再整页闪。
+  const [spinning, setSpinning] = useState(false);
+
   const load = async () => {
-    setLoading(true);
+    const showSkeleton = settings === null;
+    if (showSkeleton) setLoading(true);
+    setSpinning(true);
+    const started = Date.now();
     try {
       setSettings(await settingsApi.get());
     } catch (e) {
       console.error("Failed to load settings:", e);
     } finally {
-      setLoading(false);
+      if (showSkeleton) setLoading(false);
+      const elapsed = Date.now() - started;
+      if (elapsed < 400) await sleep(400 - elapsed);
+      setSpinning(false);
     }
   };
 
@@ -835,8 +882,8 @@ export function SettingsPage() {
           <p className="mt-1 text-sm text-muted-foreground">服务配置、通用设置、界面、限流与重试</p>
         </div>
         <div className="flex gap-2">
-          <Button variant="outline" size="sm" onClick={load} disabled={loading}>
-            <RefreshCw className={loading ? "animate-spin" : ""} />
+          <Button variant="outline" size="sm" onClick={load} disabled={spinning}>
+            <RefreshCw className={spinning ? "animate-spin" : ""} />
             重置
           </Button>
           <Button size="sm" onClick={handleSave} disabled={saving}>
@@ -868,12 +915,16 @@ export function SettingsPage() {
               <div className="grid max-w-sm grid-cols-[100px_1fr] items-center gap-4">
                 <Label htmlFor="st-host">监听地址</Label>
                 <Select
-                  id="st-host"
                   value={settings.server_host}
-                  onChange={(e) => patch({ server_host: e.target.value })}
+                  onValueChange={(v) => patch({ server_host: v })}
                 >
-                  <option value="127.0.0.1">127.0.0.1（仅本机）</option>
-                  <option value="0.0.0.0">0.0.0.0（局域网可访问）</option>
+                  <SelectTrigger id="st-host" className="w-full">
+                    <SelectValue placeholder="监听地址" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="127.0.0.1">127.0.0.1（仅本机）</SelectItem>
+                    <SelectItem value="0.0.0.0">0.0.0.0（局域网可访问）</SelectItem>
+                  </SelectContent>
                 </Select>
               </div>
               <div className="grid max-w-sm grid-cols-[100px_1fr] items-center gap-4">
@@ -923,7 +974,7 @@ export function SettingsPage() {
                     disabled={serverBusy}
                     title="按当前配置重启服务"
                   >
-                    <RotateCw className={serverBusy ? "animate-spin" : ""} />
+                    <RotateCw className={serverBusy ? "animate-spin rounded-md bg-blue-500/10 text-blue-500" : "rounded-md bg-blue-500/10 text-blue-500"} />
                     重启
                   </Button>
                   {serverStatus?.running ? (
@@ -933,7 +984,7 @@ export function SettingsPage() {
                       onClick={handleStop}
                       disabled={serverBusy}
                     >
-                      <Square />
+                      <Square className="rounded-md bg-rose-500/10 text-rose-500" />
                       停止
                     </Button>
                   ) : (
@@ -943,7 +994,7 @@ export function SettingsPage() {
                       onClick={handleStart}
                       disabled={serverBusy}
                     >
-                      <Play />
+                      <Play className="rounded-md bg-muted p-0.5" />
                       启动
                     </Button>
                   )}
@@ -1032,28 +1083,36 @@ export function SettingsPage() {
               <div className="grid max-w-sm grid-cols-[100px_1fr] items-center gap-4">
                 <Label htmlFor="ap-theme">主题</Label>
                 <Select
-                  id="ap-theme"
                   value={settings.ui_theme}
-                  onChange={(e) => {
-                    const mode = e.target.value as ThemeMode;
+                  onValueChange={(v) => {
+                    const mode = v as ThemeMode;
                     patch({ ui_theme: mode });
                     applyTheme(mode);
                   }}
                 >
-                  <option value="system">跟随系统</option>
-                  <option value="light">浅色</option>
-                  <option value="dark">深色</option>
+                  <SelectTrigger id="ap-theme" className="w-full">
+                    <SelectValue placeholder="主题" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="system">跟随系统</SelectItem>
+                    <SelectItem value="light">浅色</SelectItem>
+                    <SelectItem value="dark">深色</SelectItem>
+                  </SelectContent>
                 </Select>
               </div>
               <div className="grid max-w-sm grid-cols-[100px_1fr] items-center gap-4">
                 <Label htmlFor="ap-lang">语言</Label>
                 <Select
-                  id="ap-lang"
                   value={settings.ui_language}
-                  onChange={(e) => patch({ ui_language: e.target.value })}
+                  onValueChange={(v) => patch({ ui_language: v })}
                 >
-                  <option value="zh-CN">简体中文</option>
-                  <option value="en-US">English</option>
+                  <SelectTrigger id="ap-lang" className="w-full">
+                    <SelectValue placeholder="语言" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="zh-CN">简体中文</SelectItem>
+                    <SelectItem value="en-US">English</SelectItem>
+                  </SelectContent>
                 </Select>
               </div>
             </CardContent>
@@ -1160,17 +1219,19 @@ export function SettingsPage() {
                 <div className="grid gap-2 md:border-l md:pl-8">
                   <Label htmlFor="sec-mode">安全模式</Label>
                   <Select
-                    id="sec-mode"
                     disabled={!settings.security_enabled}
                     value={settings.security_mode}
-                    onChange={(e) =>
-                      patch({ security_mode: e.target.value as SecurityMode })
-                    }
+                    onValueChange={(v) => patch({ security_mode: v as SecurityMode })}
                   >
-                    <option value="audit">只审计（仅记录风险，不影响请求）</option>
-                    <option value="warn">警告（中高风险标记告警）</option>
-                    <option value="redact">脱敏（高风险脱敏转发）</option>
-                    <option value="block">阻断（高风险直接阻断）</option>
+                    <SelectTrigger id="sec-mode" className="w-full">
+                      <SelectValue placeholder="安全模式" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="audit">只审计（仅记录风险，不影响请求）</SelectItem>
+                      <SelectItem value="warn">警告（中高风险标记告警）</SelectItem>
+                      <SelectItem value="redact">脱敏（高风险脱敏转发）</SelectItem>
+                      <SelectItem value="block">阻断（高风险直接阻断）</SelectItem>
+                    </SelectContent>
                   </Select>
                 </div>
               </div>

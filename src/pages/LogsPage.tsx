@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { sleep } from "@/lib/async";
 import Prism from "prismjs";
 import "prismjs/components/prism-json";
 import {
@@ -20,7 +21,7 @@ import {
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Select } from "@/components/ui/select";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Badge } from "@/components/ui/badge";
@@ -59,7 +60,12 @@ function statusTone(code: number): StatusTone {
 // 两层粒度：列表行只显示最高等级徽章；展开明细里逐条列出全部 findings，
 // 每条自带自己的 severity。MAX 只决定动作与汇总徽章，不决定展示条数。
 
-type RiskVariant = "destructive" | "warning" | "outline" | "secondary";
+type RiskVariant =
+  | "destructive"
+  | "warning"
+  | "outline"
+  | "secondary"
+  | "success";
 
 /** 风险等级 → 徽章文案与样式。汇总头与逐条明细共用同一套色板。 */
 const RISK_META: Record<
@@ -75,7 +81,7 @@ const RISK_META: Record<
   },
   low: { label: "低风险", variant: "secondary" },
   info: { label: "提示", variant: "secondary" },
-  none: { label: "安全", variant: "secondary" },
+  none: { label: "安全", variant: "success" },
 };
 
 /** 闸门动作 → 徽章文案与样式（与后端 SecurityAction::as_str 对齐）。 */
@@ -100,9 +106,10 @@ function RiskBadge({
   className?: string;
 }) {
   const meta = riskMeta(level);
+  const Icon = level === "none" ? ShieldCheck : ShieldAlert;
   return (
     <Badge variant={meta.variant} className={cn("gap-1", meta.className, className)}>
-      <ShieldAlert className="h-3 w-3" />
+      <Icon className="h-3 w-3" />
       {meta.label}
       {score ? ` ${score}` : ""}
     </Badge>
@@ -158,8 +165,16 @@ export function LogsPage() {
   };
 
   // Load one page from the backend with current filters.
+  // 方案A：骨架仅首屏（确无日志）显示；刷新/翻页保留旧表格，只让按钮图标旋转。
+  const [spinning, setSpinning] = useState(false);
+  const logsRef = useRef<RequestLog[]>([]);
+  logsRef.current = logs;
+
   const load = async (p: number) => {
-    setLoading(true);
+    const showSkeleton = logsRef.current.length === 0;
+    if (showSkeleton) setLoading(true);
+    setSpinning(true);
+    const started = Date.now();
     try {
       const list = await logApi.list({
         keyword: keyword.trim() || undefined,
@@ -174,7 +189,10 @@ export function LogsPage() {
       console.error("Failed to load logs:", e);
       toast.error("日志加载失败");
     } finally {
-      setLoading(false);
+      if (showSkeleton) setLoading(false);
+      const elapsed = Date.now() - started;
+      if (elapsed < 400) await sleep(400 - elapsed);
+      setSpinning(false);
     }
   };
 
@@ -260,8 +278,8 @@ export function LogsPage() {
           </p>
         </div>
         <div className="flex gap-2">
-          <Button variant="outline" size="sm" onClick={() => load(page)} disabled={loading}>
-            <RefreshCw className={loading ? "animate-spin" : ""} />
+          <Button variant="outline" size="sm" onClick={() => load(page)} disabled={spinning}>
+            <RefreshCw className={spinning ? "animate-spin" : ""} />
             刷新
           </Button>
           <Button
@@ -287,27 +305,36 @@ export function LogsPage() {
             onChange={(e) => setKeyword(e.target.value)}
           />
         </div>
-        <Select className="w-40" value={channelFilter} onChange={(e) => setChannelFilter(e.target.value)}>
-          <option value="all">全部渠道</option>
-          {channels.map((c) => (
-            <option key={c.id} value={c.name}>
-              {c.name}
-            </option>
-          ))}
+        <Select value={channelFilter} onValueChange={setChannelFilter}>
+          <SelectTrigger className="w-40"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">全部渠道</SelectItem>
+            {channels.map((c) => (
+              <SelectItem key={c.id} value={c.name}>
+                {c.name}
+              </SelectItem>
+            ))}
+          </SelectContent>
         </Select>
-        <Select className="w-44" value={modelFilter} onChange={(e) => setModelFilter(e.target.value)}>
-          <option value="all">全部模型</option>
-          {modelOptions.map((m) => (
-            <option key={m} value={m}>
-              {m}
-            </option>
-          ))}
+        <Select value={modelFilter} onValueChange={setModelFilter}>
+          <SelectTrigger className="w-44"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">全部模型</SelectItem>
+            {modelOptions.map((m) => (
+              <SelectItem key={m} value={m}>
+                {m}
+              </SelectItem>
+            ))}
+          </SelectContent>
         </Select>
-        <Select className="w-32" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
-          <option value="all">全部状态</option>
-          <option value="2">2xx 成功</option>
-          <option value="4">4xx 客户端</option>
-          <option value="5">5xx 服务端</option>
+        <Select value={statusFilter} onValueChange={setStatusFilter}>
+          <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">全部状态</SelectItem>
+            <SelectItem value="2">2xx 成功</SelectItem>
+            <SelectItem value="4">4xx 客户端</SelectItem>
+            <SelectItem value="5">5xx 服务端</SelectItem>
+          </SelectContent>
         </Select>
       </div>
 
@@ -349,7 +376,7 @@ export function LogsPage() {
                     <TableHead>上游</TableHead>
                     <TableHead>模型</TableHead>
                     <TableHead>状态</TableHead>
-                    <TableHead>风险</TableHead>
+                    <TableHead>安全</TableHead>
                     <TableHead className="text-right">Tokens</TableHead>
                     <TableHead className="text-right">耗时</TableHead>
                     <TableHead className="w-10 text-center">操作</TableHead>
@@ -388,7 +415,7 @@ export function LogsPage() {
                             </StatusBadge>
                           </TableCell>
                           <TableCell>
-                            {l.risk_level && l.risk_level !== "none" ? (
+                            {l.risk_level ? (
                               <RiskBadge level={l.risk_level} score={l.risk_score} />
                             ) : (
                               <span className="text-xs text-muted-foreground">-</span>
@@ -626,6 +653,7 @@ function SecurityAuditSection({ detail }: { detail: RequestLog }) {
       <div className="flex items-center gap-2 rounded-lg border bg-background px-3 py-2 text-sm text-muted-foreground">
         <ShieldCheck className="h-4 w-4 text-success" />
         安全审计：未发现风险
+        <Badge variant="success">{ACTION_META.allow.label}</Badge>
       </div>
     );
   }

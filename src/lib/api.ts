@@ -38,6 +38,13 @@ import type {
   KbDocument,
   KbDocumentChunksPage,
   KbSource,
+  WikiProject,
+  WikiProjectInput,
+  WikiProjectUpdate,
+  WikiPage,
+  WikiSource,
+  WikiSourceInput,
+  WikiAskResult,
   ImportSourceInput,
   RetrievalHit,
   IndexStatus,
@@ -507,4 +514,54 @@ export const knowledgeApi = {
 export const mcpApi = {
   /** 获取 MCP server 运行态：是否在监听 / 端点 URL / 工具数量 */
   status: (): Promise<McpStatus> => invoke<McpStatus>("get_mcp_status"),
+};
+
+// ============================================================
+// Wiki API
+// 直接调用真实 Tauri 命令（迁移 019 + commands/wiki.rs 已落地）。
+// 命令名与参数键对齐 src-tauri/src/commands/wiki.rs；返回值字段为蛇形命名，
+// 与 src/types/index.ts 的 Wiki* 完全一致（Tauri 返回值不自动转驼峰）。
+// ============================================================
+
+async function wikiInvoke<T>(cmd: string, args: Record<string, unknown>): Promise<T> {
+  return invoke<T>(cmd, args);
+}
+
+export const wikiApi = {
+  /** 列出全部 Wiki 项目（含派生统计） */
+  list: (): Promise<WikiProject[]> => wikiInvoke<WikiProject[]>("list_wiki_projects", {}),
+
+  /** 新建空白 Wiki 项目：创建时不选源，源留到详情页添加 */
+  create: (input: WikiProjectInput): Promise<WikiProject> =>
+    wikiInvoke<WikiProject>("create_wiki_project", { input }),
+
+  /** 部分更新项目（含启用/禁用） */
+  update: (id: string, patch: WikiProjectUpdate): Promise<WikiProject> =>
+    wikiInvoke<WikiProject>("update_wiki_project", { id, patch }),
+
+  /** 删除项目（级联删除其页面与来源） */
+  remove: (id: string): Promise<void> => wikiInvoke<void>("delete_wiki_project", { id }),
+
+  /** 页面列表（目录页 index.md 由后端保证置顶） */
+  pages: (projectId: string): Promise<WikiPage[]> =>
+    wikiInvoke<WikiPage[]>("list_wiki_pages", { projectId }),
+
+  /** 来源列表 */
+  sources: (projectId: string): Promise<WikiSource[]> =>
+    wikiInvoke<WikiSource[]>("list_wiki_sources", { projectId }),
+
+  /** 新增来源：本地目录 / 文件（v1 仅 local_dir） */
+  addSource: (projectId: string, input: WikiSourceInput): Promise<WikiSource> =>
+    wikiInvoke<WikiSource>("add_wiki_source", { projectId, input }),
+
+  /** 删除来源 */
+  removeSource: (id: string): Promise<void> => wikiInvoke<void>("delete_wiki_source", { id }),
+
+  /** 触发某个来源的摄入（长耗时，返回即代表已开始） */
+  ingestSource: (id: string): Promise<WikiSource> =>
+    wikiInvoke<WikiSource>("ingest_wiki_source", { id }),
+
+  /** 在项目知识体上问答：检索页面 → 组装上下文 → 生成答案 + [[页面]] 引用 */
+  ask: (projectId: string, question: string): Promise<WikiAskResult> =>
+    wikiInvoke<WikiAskResult>("ask_wiki", { projectId, question }),
 };

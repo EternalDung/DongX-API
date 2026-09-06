@@ -13,6 +13,7 @@ mod models;
 mod protocol;
 mod rag;
 mod security;
+mod wiki;
 mod server;
 mod services;
 mod settings;
@@ -145,6 +146,17 @@ pub fn run() {
             commands::client_config::apply_client_config,
             commands::client_config::restore_client_config,
             commands::client_config::get_client_config_content,
+            // Wiki 知识库模块
+            commands::wiki::list_wiki_projects,
+            commands::wiki::create_wiki_project,
+            commands::wiki::update_wiki_project,
+            commands::wiki::delete_wiki_project,
+            commands::wiki::list_wiki_pages,
+            commands::wiki::list_wiki_sources,
+            commands::wiki::add_wiki_source,
+            commands::wiki::delete_wiki_source,
+            commands::wiki::ingest_wiki_source,
+            commands::wiki::ask_wiki,
         ])
         .setup(|app| {
             // Initialize logging before anything else

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { sleep } from "@/lib/async";
 import {
   Bot,
   Boxes,
@@ -21,7 +22,7 @@ import {
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Select } from "@/components/ui/select";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useToast } from "@/components/ui/toast";
 import { clientConfigApi } from "@/lib/api";
@@ -103,15 +104,17 @@ export function ClientConfigView({
   );
 
   // 切换客户端时重新加载配置文件内容
-  const loadContent = async () => {
-    setLoadingContent(true);
+  // 方案A：skeleton=true 仅用于「切换客户端」（内容确实未知）；
+  // 点刷新传 false：保留旧 CodeBlock，只让按钮图标旋转，避免高度塌缩导致代码块闪 + 上方两卡左右抖。
+  const loadContent = async (skeleton = true) => {
+    if (skeleton) setLoadingContent(true);
     try {
       const c = await clientConfigApi.content(client.name);
       setContent(c);
     } catch {
       setContent({ exists: false, content: "", error: "读取失败" });
     } finally {
-      setLoadingContent(false);
+      if (skeleton) setLoadingContent(false);
     }
   };
 
@@ -142,10 +145,13 @@ export function ClientConfigView({
   // （用于「打开页面后才安装客户端」的场景）
   const handleRefresh = async () => {
     setRefreshing(true);
+    const started = Date.now();
     try {
-      await loadContent();
+      await loadContent(false);
       onRefresh?.();
     } finally {
+      const elapsed = Date.now() - started;
+      if (elapsed < 400) await sleep(400 - elapsed);
       setRefreshing(false);
     }
   };
@@ -166,16 +172,24 @@ export function ClientConfigView({
       return;
     }
     const dir = dirnameOf(client.config_path);
-    try {
-      // 优先：在资源管理器中定位到该配置文件（打开所在目录并高亮 config.toml）
-      await revealItemInDir(client.config_path);
-    } catch {
+    // 配置文件已存在 → 在资源管理器中定位并高亮它
+    if (content?.exists) {
       try {
-        // 兜底：配置文件尚不存在时，直接打开所在目录
-        await openPath(dir);
+        await revealItemInDir(client.config_path);
+        return;
       } catch {
-        toast.error(`无法打开目录，请手动定位：${dir}`);
+        /* 落到下面直接打开目录 */
       }
+    }
+    // 配置文件不存在（或定位失败）→ 直接打开所在目录，目录不存在时明确提示
+    try {
+      await openPath(dir);
+    } catch {
+      toast.error(
+        content?.exists
+          ? `无法打开目录，请手动定位：${dir}`
+          : `配置文件与目录均不存在：${dir}\n安装 ${client.label} 并写入配置后即可打开`,
+      );
     }
   };
 
@@ -236,9 +250,17 @@ export function ClientConfigView({
                 <h2 className="text-lg font-semibold tracking-tight">
                   {client.label}
                 </h2>
-                {client.available ? (
+                {client.installed ? (
                   <Badge variant="success" className="text-[11px]">
                     已安装
+                  </Badge>
+                ) : client.available ? (
+                  <Badge
+                    variant="outline"
+                    className="text-[11px] text-amber-600 dark:text-amber-400"
+                    title={`已找到配置文件，但未在 PATH 中探测到 ${client.label} 可执行文件`}
+                  >
+                    有配置 · 未检测到 CLI
                   </Badge>
                 ) : (
                   <Badge variant="secondary" className="text-[11px]">
@@ -317,16 +339,20 @@ export function ClientConfigView({
               ) : (
                 <div className="flex items-center gap-2">
                   <Select
-                    value={selectedKeyId}
-                    onChange={(e) => setSelectedKeyId(e.target.value)}
-                    className="font-mono text-xs"
+                    value={selectedKeyId || undefined}
+                    onValueChange={setSelectedKeyId}
                   >
-                    {availableKeys.map((k) => (
-                      <option key={k.id} value={k.id}>
-                        {k.name}（{maskKeyForDisplay(k.key)}） ·{" "}
-                        {keyStatusInfo(k).label}
-                      </option>
-                    ))}
+                    <SelectTrigger className="font-mono text-xs w-full">
+                      <SelectValue placeholder="选择密钥" />
+                    </SelectTrigger>
+                    <SelectContent className="font-mono text-xs w-full">
+                      {availableKeys.map((k) => (
+                        <SelectItem key={k.id} value={k.id}>
+                          {k.name}（{maskKeyForDisplay(k.key)}） ·{" "}
+                          {keyStatusInfo(k).label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
                   </Select>
                   {selectedKeyStatus && (
                     <span
@@ -358,17 +384,21 @@ export function ClientConfigView({
                   暂无可用模型，请先在「渠道管理」启用至少一个渠道
                 </div>
               ) : (
-                <Select
-                  value={model}
-                  onChange={(e) => setModel(e.target.value)}
-                  className="font-mono text-xs"
-                >
-                  {modelOptions.map((m) => (
-                    <option key={m} value={m}>
-                      {m}
-                    </option>
-                  ))}
-                </Select>
+                  <Select
+                    value={model || undefined}
+                    onValueChange={setModel}
+                  >
+                    <SelectTrigger className="font-mono text-xs w-full">
+                      <SelectValue placeholder="选择模型" />
+                    </SelectTrigger>
+                    <SelectContent className="font-mono text-xs w-full">
+                      {modelOptions.map((m) => (
+                        <SelectItem key={m} value={m}>
+                          {m}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
               )}
             </div>
           </div>
@@ -443,12 +473,21 @@ export function ClientConfigView({
           </div>
         </CardHeader>
         <CardContent>
-          {!client.available && (
+          {!client.installed && (
             <div className="mb-3 flex items-start gap-2 rounded-md border border-dashed border-amber-500/40 bg-amber-500/5 px-3 py-2 text-xs text-amber-600 dark:text-amber-400">
               <CircleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
               <span>
-                未检测到 {client.label} 安装痕迹（{client.config_format}
-                ）。若你刚安装，请点击右上角「刷新」重新检测；或先安装后重试。
+                {client.available ? (
+                  <>
+                    已找到配置文件，但未在 PATH 中探测到 {client.label}{" "}
+                    可执行文件。若已安装，请确认其命令行工具已加入 PATH，再点击右上角「刷新」重新检测。
+                  </>
+                ) : (
+                  <>
+                    未检测到 {client.label} 安装痕迹（{client.config_format}
+                    ）。若你刚安装，请点击右上角「刷新」重新检测；或先安装后重试。
+                  </>
+                )}
               </span>
             </div>
           )}
