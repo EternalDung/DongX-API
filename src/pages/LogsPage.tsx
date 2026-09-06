@@ -652,11 +652,17 @@ function SecurityAuditSection({ detail }: { detail: RequestLog }) {
   }, [detail.id, detail.risk_score]);
 
   if (!hasRisk) {
+    // risk_level==="skipped" 表示本次请求「安全审计未开启」（区别于开启后无发现的 none）
+    const skipped = detail.risk_level === "skipped";
     return (
       <div className="flex items-center gap-2 rounded-lg border bg-background px-3 py-2 text-sm text-muted-foreground">
-        <ShieldCheck className="h-4 w-4 text-success" />
-        安全审计：未发现风险
-        <Badge variant="success">{ACTION_META.allow.label}</Badge>
+        {skipped ? (
+          <ShieldOff className="h-4 w-4 text-muted-foreground" />
+        ) : (
+          <ShieldCheck className="h-4 w-4 text-success" />
+        )}
+        安全审计：{skipped ? "未开启" : "未发现风险"}
+        {!skipped && <Badge variant="success">{ACTION_META.allow.label}</Badge>}
       </div>
     );
   }
