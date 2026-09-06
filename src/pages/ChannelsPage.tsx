@@ -177,11 +177,10 @@ export function ChannelsPage() {
 
   // 方案A：骨架仅在「确无数据」(首屏) 显示；刷新时保留旧列表，只让按钮图标旋转。
   const [spinning, setSpinning] = useState(false);
-  const channelsRef = useRef<Channel[]>([]);
-  channelsRef.current = channels;
+  const loadedRef = useRef(false);
 
   const load = async () => {
-    const showSkeleton = channelsRef.current.length === 0;
+    const showSkeleton = !loadedRef.current;
     if (showSkeleton) setLoading(true);
     setSpinning(true);
     const started = Date.now();
@@ -192,6 +191,7 @@ export function ChannelsPage() {
       console.error("Failed to load channels:", e);
       toast.error("渠道列表加载失败");
     } finally {
+      loadedRef.current = true;
       if (showSkeleton) setLoading(false);
       const elapsed = Date.now() - started;
       if (elapsed < 400) await sleep(400 - elapsed);

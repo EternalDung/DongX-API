@@ -97,11 +97,10 @@ export function ApiKeysPage() {
 
   // 方案A：骨架仅在「确无数据」(首屏) 显示；刷新时保留旧列表，只让按钮图标旋转。
   const [spinning, setSpinning] = useState(false);
-  const keysRef = useRef<ApiKey[]>([]);
-  keysRef.current = keys;
+  const loadedRef = useRef(false);
 
   const load = async () => {
-    const showSkeleton = keysRef.current.length === 0;
+    const showSkeleton = !loadedRef.current;
     if (showSkeleton) setLoading(true);
     setSpinning(true);
     const started = Date.now();
@@ -111,6 +110,7 @@ export function ApiKeysPage() {
       console.error("Failed to load api keys:", e);
       toast.error("密钥列表加载失败");
     } finally {
+      loadedRef.current = true;
       if (showSkeleton) setLoading(false);
       const elapsed = Date.now() - started;
       if (elapsed < 400) await sleep(400 - elapsed);

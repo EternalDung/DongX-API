@@ -120,11 +120,10 @@ function CustomRulesCard() {
   const [form, setForm] = useState<CustomRuleInput>(EMPTY_FORM);
 
   // 方案A：骨架仅在「确无数据」(首屏) 显示；新增/编辑后重载保留旧内容，不再整块闪。
-  const rulesRef = useRef<CustomRule[]>([]);
-  rulesRef.current = rules;
+  const loadedRef = useRef(false);
 
   const loadRules = async () => {
-    const showSkeleton = rulesRef.current.length === 0;
+    const showSkeleton = !loadedRef.current;
     if (showSkeleton) setLoading(true);
     try {
       setRules(await customRuleApi.list());
@@ -132,6 +131,7 @@ function CustomRulesCard() {
       console.error("Failed to load custom rules:", e);
       toast.error("加载自定义规则失败");
     } finally {
+      loadedRef.current = true;
       if (showSkeleton) setLoading(false);
     }
   };
@@ -492,11 +492,10 @@ function BuiltinRulesCard({ settings }: { settings: Settings }) {
   const [collapsed, setCollapsed] = useState(false);
 
   // 方案A：骨架仅在「确无数据」显示；「恢复默认」后的重载保留旧列表，不再整块闪。
-  const rulesRef = useRef<BuiltinRule[]>([]);
-  rulesRef.current = rules;
+  const loadedRef = useRef(false);
 
   const load = async () => {
-    const showSkeleton = rulesRef.current.length === 0;
+    const showSkeleton = !loadedRef.current;
     if (showSkeleton) setLoading(true);
     try {
       setRules(await builtinRuleApi.list());
@@ -504,6 +503,7 @@ function BuiltinRulesCard({ settings }: { settings: Settings }) {
       console.error("Failed to load builtin rules:", e);
       toast.error("加载内置规则失败");
     } finally {
+      loadedRef.current = true;
       if (showSkeleton) setLoading(false);
     }
   };

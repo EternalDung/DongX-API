@@ -167,11 +167,10 @@ export function LogsPage() {
   // Load one page from the backend with current filters.
   // 方案A：骨架仅首屏（确无日志）显示；刷新/翻页保留旧表格，只让按钮图标旋转。
   const [spinning, setSpinning] = useState(false);
-  const logsRef = useRef<RequestLog[]>([]);
-  logsRef.current = logs;
+  const loadedRef = useRef(false);
 
   const load = async (p: number) => {
-    const showSkeleton = logsRef.current.length === 0;
+    const showSkeleton = !loadedRef.current;
     if (showSkeleton) setLoading(true);
     setSpinning(true);
     const started = Date.now();
@@ -189,6 +188,7 @@ export function LogsPage() {
       console.error("Failed to load logs:", e);
       toast.error("日志加载失败");
     } finally {
+      loadedRef.current = true;
       if (showSkeleton) setLoading(false);
       const elapsed = Date.now() - started;
       if (elapsed < 400) await sleep(400 - elapsed);

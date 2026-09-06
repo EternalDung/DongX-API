@@ -229,11 +229,10 @@ function DocumentsTab({
 
   // 方案A：骨架仅在「确无数据」(首屏) 显示；刷新时保留旧列表，只让按钮图标旋转。
   const [spinning, setSpinning] = useState(false);
-  const docsRef = useRef<KbDocument[]>([]);
-  docsRef.current = documents;
+  const loadedRef = useRef(false);
 
   const refresh = async () => {
-    const showSkeleton = docsRef.current.length === 0;
+    const showSkeleton = !loadedRef.current;
     if (showSkeleton) setLoading(true);
     setSpinning(true);
     const started = Date.now();
@@ -244,6 +243,7 @@ function DocumentsTab({
       console.error("加载文档失败：", e);
       setDocuments([]);
     } finally {
+      loadedRef.current = true;
       if (showSkeleton) setLoading(false);
       const elapsed = Date.now() - started;
       if (elapsed < 400) await sleep(400 - elapsed);
@@ -252,6 +252,7 @@ function DocumentsTab({
   };
 
   useEffect(() => {
+    loadedRef.current = false; // 切换知识库 → 重新启用首屏骨架
     refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [kb.id]);

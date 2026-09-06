@@ -529,10 +529,9 @@ export function ServicesPage() {
   // loading 仅用于首屏骨架（确无数据时才显）；其余刷新/切 tab 保留旧数据、只让按钮转。
   // spinning 用最小可见时长保证旋转稳定可见，但不再拖慢内容渲染。
   const [spinning, setSpinning] = useState(false);
-  const kbsRef = useRef<KnowledgeBase[]>([]);
-  kbsRef.current = kbs;
+  const loadedRef = useRef(false);
   const load = useCallback(async () => {
-    const showSkeleton = kbsRef.current.length === 0;
+    const showSkeleton = !loadedRef.current;
     if (showSkeleton) setLoading(true);
     setSpinning(true);
     const started = Date.now();
@@ -544,6 +543,7 @@ export function ServicesPage() {
       console.warn("知识库列表加载失败（RAG 后端可能未接入）：", e);
       setKbs([]);
     } finally {
+      loadedRef.current = true;
       if (showSkeleton) setLoading(false);
       const elapsed = Date.now() - started;
       if (elapsed < 400) await sleep(400 - elapsed);

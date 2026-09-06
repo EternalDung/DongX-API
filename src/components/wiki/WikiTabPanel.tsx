@@ -182,10 +182,9 @@ export function WikiTabPanel() {
 
   // 方案A：解耦「内容出现」与「刷新按钮旋转」。
   const [spinning, setSpinning] = useState(false);
-  const projectsRef = useRef<WikiProject[]>([]);
-  projectsRef.current = projects;
+  const loadedRef = useRef(false);
   const load = useCallback(async () => {
-    const showSkeleton = projectsRef.current.length === 0;
+    const showSkeleton = !loadedRef.current;
     if (showSkeleton) setLoading(true);
     setSpinning(true);
     const started = Date.now();
@@ -196,6 +195,7 @@ export function WikiTabPanel() {
       console.error("Wiki 项目列表加载失败：", e);
       setProjects([]);
     } finally {
+      loadedRef.current = true;
       if (showSkeleton) setLoading(false);
       const elapsed = Date.now() - started;
       if (elapsed < 400) await sleep(400 - elapsed);

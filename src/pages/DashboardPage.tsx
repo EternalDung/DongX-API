@@ -155,13 +155,10 @@ export function DashboardPage() {
 
   // 方案A：骨架仅在「确无数据」(首屏) 显示；刷新时保留旧卡片，只让按钮图标旋转。
   const [spinning, setSpinning] = useState(false);
-  const statsRef = useRef<DashboardStats | null>(null);
-  statsRef.current = stats;
-  const channelsRef = useRef<Channel[]>([]);
-  channelsRef.current = channels;
+  const loadedRef = useRef(false);
 
   const load = async () => {
-    const showSkeleton = statsRef.current === null && channelsRef.current.length === 0;
+    const showSkeleton = !loadedRef.current;
     if (showSkeleton) setLoading(true);
     setSpinning(true);
     const started = Date.now();
@@ -172,6 +169,7 @@ export function DashboardPage() {
     } catch (e) {
       console.error("Failed to load dashboard:", e);
     } finally {
+      loadedRef.current = true;
       if (showSkeleton) setLoading(false);
       const elapsed = Date.now() - started;
       if (elapsed < 400) await sleep(400 - elapsed);
