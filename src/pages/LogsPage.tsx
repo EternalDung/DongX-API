@@ -16,6 +16,7 @@ import {
   Lightbulb,
   ShieldAlert,
   ShieldCheck,
+  ShieldOff,
   X,
 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
@@ -82,6 +83,7 @@ const RISK_META: Record<
   low: { label: "低风险", variant: "secondary" },
   info: { label: "提示", variant: "secondary" },
   none: { label: "安全", variant: "success" },
+  skipped: { label: "未审计", variant: "secondary", className: "text-muted-foreground" },
 };
 
 /** 闸门动作 → 徽章文案与样式（与后端 SecurityAction::as_str 对齐）。 */
@@ -106,7 +108,8 @@ function RiskBadge({
   className?: string;
 }) {
   const meta = riskMeta(level);
-  const Icon = level === "none" ? ShieldCheck : ShieldAlert;
+  const Icon =
+    level === "none" ? ShieldCheck : level === "skipped" ? ShieldOff : ShieldAlert;
   return (
     <Badge variant={meta.variant} className={cn("gap-1", meta.className, className)}>
       <Icon className="h-3 w-3" />

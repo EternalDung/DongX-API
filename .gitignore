@@ -33,3 +33,5 @@ Thumbs.db
 
 # Vite build-artifact backups (workaround for safe-delete shim)
 dist_bak*/
+# 前导下划线变体（如 _dist_bak_old）同样排除，避免 git add -A 误提交备份目录
+_dist_bak*/

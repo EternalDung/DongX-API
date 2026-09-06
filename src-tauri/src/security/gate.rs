@@ -36,6 +36,17 @@ impl GateOutput {
             action: SecurityAction::Allow,
         }
     }
+
+    /// 审计未启用（关闭）时的 fail-open：原样返回请求体，但标记 risk_level="skipped"，
+    /// 以区别于「审计开启且无风险 = 安全(none)」。落库与前端均据此区分。
+    pub fn skipped(body: Value) -> Self {
+        GateOutput {
+            forward_body: body,
+            outcome: SecurityOutcome::skipped(),
+            findings: Vec::new(),
+            action: SecurityAction::Allow,
+        }
+    }
 }
 
 async fn bool_setting(pool: &SqlitePool, key: &str, default: bool) -> bool {
@@ -120,7 +131,7 @@ pub async fn run_gate(pool: &SqlitePool, body: Value) -> Result<GateOutput, sqlx
         }
     };
     if !ctx.settings.enabled {
-        return Ok(GateOutput::allow(body));
+        return Ok(GateOutput::skipped(body));
     }
     Ok(run_gate_ctx(&ctx, body))
 }
@@ -132,7 +143,7 @@ pub async fn run_gate(pool: &SqlitePool, body: Value) -> Result<GateOutput, sqlx
 pub fn run_gate_ctx(ctx: &SecurityContext, body: Value) -> GateOutput {
     let sec = &ctx.settings;
     if !sec.enabled {
-        return GateOutput::allow(body);
+        return GateOutput::skipped(body);
     }
 
     let result = scanner::scan(&body, sec, &ctx.builtin_rules, &ctx.custom_rules, "request");
@@ -242,6 +253,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn disabled_audit_marks_skipped_not_safe() {
+        // 审计关闭时明确标记 skipped，区别于「启用且无风险 = 安全(none)」，
+        // 避免前端把「没开审计」误渲染成「安全」。
+        let ctx = SecurityContext::disabled();
+        let body = json!({"content":"sk-abcdefghijklmnopqrstuvwx"});
+        let out = run_gate_ctx(&ctx, body);
+        assert_eq!(out.outcome.risk_level, "skipped", "关闭审计不应误标为安全(none)");
+        assert_eq!(out.action, SecurityAction::Allow, "关闭审计仍 fail-open 放行");
+        assert!(out.findings.is_empty(), "关闭审计不扫描");
+    }
+
+    #[tokio::test]
     async fn block_mode_blocks_secret() {
         let pool = test_pool().await;
         set(&pool, "security_mode", "\"block\"").await;
@@ -259,7 +282,8 @@ mod tests {
         let secret = "sk-abcdefghijklmnopqrstuvwx";
         let body = json!({"content": format!("key {}", secret)});
         let out = run_gate(&pool, body).await.expect("gate");
-        let fwd = serde_json::to_string(&out.forward_body).unwrap();
+        let fwd = serde_json::to_string(&out.forward_body)
+            .expect("序列化转发体失败（测试）");
         assert!(fwd.contains("[REDACTED]"), "转发体应被脱敏: {}", fwd);
         assert!(!fwd.contains(secret), "转发体不应含明文密钥");
         assert_eq!(out.outcome.security_action, "allow");

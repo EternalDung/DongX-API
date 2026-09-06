@@ -148,6 +148,19 @@ impl SecurityOutcome {
             blocked_reason: None,
         }
     }
+
+    /// 审计未启用（关闭）时的占位结果：明确区别于「启用且无风险 = 安全(none)」。
+    /// 前端据此渲染灰色「未审计」徽章，避免把「没开审计」误展示成「安全」。
+    pub fn skipped() -> Self {
+        SecurityOutcome {
+            risk_level: "skipped".to_string(),
+            risk_score: 0,
+            risk_summary: None,
+            security_action: "allow".to_string(),
+            sanitized: false,
+            blocked_reason: None,
+        }
+    }
 }
 
 /// toggle_key -> 对应的 3 个可切换扫描类目开关。

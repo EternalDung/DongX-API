@@ -128,7 +128,7 @@ export interface ApiKey {
 // ============================================================
 
 export type LogMode = "chat" | "responses" | "messages" | "completion" | "embedding" | "rag" | "deep-research" | "other";
-export type RiskLevel = "none" | "low" | "medium" | "high" | "critical";
+export type RiskLevel = "none" | "low" | "medium" | "high" | "critical" | "skipped";
 /** 安全闸门对一次请求采取的动作（与后端 SecurityAction::as_str 一一对应） */
 export type SecurityAction = "allow" | "warn" | "redact" | "block";
 
