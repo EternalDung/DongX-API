@@ -338,6 +338,7 @@ pub mod request_logs {
     pub async fn insert(
         pool: &SqlitePool,
         api_key_name: Option<&str>,
+        api_key_id: Option<&str>,
         channel_name: Option<&str>,
         model: &str,
         upstream_model: Option<&str>,
@@ -363,19 +364,20 @@ pub mod request_logs {
         let ts = now();
 
         sqlx::query(
-            "INSERT INTO request_logs (id, seq, api_key_name, channel_name, model,
+            "INSERT INTO request_logs (id, seq, api_key_name, api_key_id, channel_name, model,
                 upstream_model, mode, status_code, prompt_tokens, completion_tokens,
                 total_tokens, duration_ms, error_message, is_stream, is_retry,
                 created_at, request_body, response_body, risk_level, risk_score,
                 risk_summary, security_action, sanitized, blocked_reason)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,
-                ?19,?20,?21,?22,?23,?24)",
+                ?19,?20,?21,?22,?23,?24,?25)",
         )
         .bind(&id)
         // seq 现为 INTEGER PRIMARY KEY AUTOINCREMENT（迁移 007），
         // 绑定 NULL 即触发自增，彻底消除原 SELECT MAX(seq) 全表扫描。
         .bind(Option::<i64>::None)
         .bind(api_key_name)
+        .bind(api_key_id)
         .bind(channel_name)
         .bind(model)
         .bind(upstream_model)
@@ -409,7 +411,7 @@ pub mod request_logs {
         filter: &LogFilter,
     ) -> Result<Vec<RequestLogListItem>, sqlx::Error> {
         let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(
-            "SELECT id, seq, api_key_name, channel_name, model, mode, status_code,
+            "SELECT id, seq, api_key_name, api_key_id, channel_name, model, mode, status_code,
                     total_tokens, duration_ms, is_stream, is_retry, created_at,
                     error_message, risk_level, risk_score, security_action
              FROM request_logs WHERE 1=1 ",
@@ -647,6 +649,7 @@ pub mod stats {
 
     pub async fn api_key_stats(
         pool: &SqlitePool,
+        api_key_id: &str,
         api_key_name: &str,
     ) -> Result<ApiKeyStatsRow, sqlx::Error> {
         sqlx::query_as::<_, ApiKeyStatsRow>(
@@ -658,9 +661,12 @@ pub mod stats {
                 COALESCE(SUM(completion_tokens), 0) AS completion_tokens_sum,
                 MAX(created_at) AS last_called_at
             FROM request_logs
-            WHERE api_key_name = ?1
+            -- 按稳定主键 api_key_id 聚合；历史行 api_key_id 为 NULL，
+            -- 以 api_key_name 兜底，确保改名/重名前的旧日志仍被计入。
+            WHERE (api_key_id = ?1 OR (api_key_id IS NULL AND api_key_name = ?2))
               AND created_at >= strftime('%Y-%m-%d %H:%M:%S', 'now', '-30 days')",
         )
+        .bind(api_key_id)
         .bind(api_key_name)
         .fetch_one(pool)
         .await
@@ -864,6 +870,7 @@ mod tests {
         request_logs::insert(
             pool,
             Some("key-a"),
+            Some("key-a-id"),
             Some("ch-a"),
             model,
             Some(model),

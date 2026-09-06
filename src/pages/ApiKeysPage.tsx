@@ -10,6 +10,7 @@ import {
   Ban,
   AlertTriangle,
   Activity,
+  Clock,
 } from "lucide-react";
 import {
   Card,
@@ -38,6 +39,17 @@ import type { ApiKey } from "@/types";
 function formatQuota(used: number, limit: number): string {
   if (limit <= 0) return `${used.toLocaleString()} / ∞`;
   return `${used.toLocaleString()} / ${limit.toLocaleString()}`;
+}
+
+function formatExpiry(exp: string | null): { text: string; expired: boolean } {
+  if (!exp) return { text: "永久有效", expired: false };
+  const d = new Date(exp);
+  if (isNaN(d.getTime())) return { text: exp, expired: false };
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const text = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(
+    d.getHours(),
+  )}:${pad(d.getMinutes())}`;
+  return { text: `${text} 过期`, expired: d.getTime() <= Date.now() };
 }
 
 const KEY_TONE: Record<number, { tone: StatusTone; label: string }> = {
@@ -73,7 +85,7 @@ export function ApiKeysPage() {
     setStatsData(null);
     setStatsLoading(true);
     try {
-      setStatsData(await keyApi.stats(k.name));
+      setStatsData(await keyApi.stats(k.id, k.name));
     } catch (e) {
       console.error("Failed to load api key stats:", e);
       toast.error("统计加载失败");
@@ -225,6 +237,7 @@ export function ApiKeysPage() {
                     : quotaPct >= 70
                       ? "bg-warning"
                       : "bg-success";
+                const expiry = formatExpiry(k.expires_at);
                 return (
                   <div
                     key={k.id}
@@ -248,6 +261,14 @@ export function ApiKeysPage() {
                         <span className="font-mono text-xs tabular-nums text-muted-foreground">
                           {formatQuota(k.quota_used, k.quota_limit)} tokens
                         </span>
+                      </div>
+                      <div className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
+                        <Clock className="size-3.5" />
+                        {expiry.expired ? (
+                          <span className="font-medium text-destructive">{expiry.text}</span>
+                        ) : (
+                          <span>{expiry.text}</span>
+                        )}
                       </div>
                     </div>
                     <div className="flex shrink-0 items-center gap-1 opacity-70 transition-opacity group-hover:opacity-100">

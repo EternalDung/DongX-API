@@ -141,10 +141,11 @@ pub async fn set_api_key_status(
 /// 成功 = `error_message` 为空。供密钥列表展开区「运行统计」展示。
 #[tauri::command]
 pub async fn get_api_key_stats(
+    id: String,
     name: String,
     state: State<'_, Arc<AppState>>,
 ) -> AppResult<serde_json::Value> {
-    let row = crate::db::repository::stats::api_key_stats(&state.db, &name)
+    let row = crate::db::repository::stats::api_key_stats(&state.db, &id, &name)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
     let success_rate = if row.total > 0 {

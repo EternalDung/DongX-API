@@ -1,0 +1,14 @@
+-- 请求日志补充稳定主键 api_key_id。
+--
+-- 此前 request_logs 仅记录可变的 api_key_name（无 UNIQUE 约束）：
+--   * 网关密钥改名会劈裂历史聚合；
+--   * 不同密钥重名会把数据串到一起。
+-- 新增 api_key_id 作为稳定标识，与 api_key_name 并存，支撑 apikey 维度评估。
+--
+-- 历史行该列恒为 NULL；聚合统计以
+--   (api_key_id = ?1 OR (api_key_id IS NULL AND api_key_name = ?2))
+-- 兼容旧数据，不破坏改名前的历史。
+--
+-- 注意：RAG 内部调用不经网关鉴权，无网关 key，故 api_key_id 恒为 NULL，
+-- 仅 api_key_name 标注 "RAG: {知识库名}" 以区分来源。
+ALTER TABLE request_logs ADD COLUMN api_key_id TEXT;

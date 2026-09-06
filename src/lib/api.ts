@@ -228,9 +228,9 @@ export const keyApi = {
     invoke<void>("set_api_key_status", { id, status }),
 
   /** 单密钥运行概览（近 30 天）：成功率 / 平均延迟 / 最后调用时间。
-   *  Tauri v2 约定：Rust 参数 name 在 JS 端用 camelCase 透传。 */
-  stats: (name: string): Promise<ApiKeyStats> =>
-    invoke<ApiKeyStats>("get_api_key_stats", { name }),
+   *  按稳定主键 id 聚合（兼容历史行无 id 的兜底）。 */
+  stats: (id: string, name: string): Promise<ApiKeyStats> =>
+    invoke<ApiKeyStats>("get_api_key_stats", { id, name }),
 };
 
 // ============================================================

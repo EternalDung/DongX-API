@@ -180,6 +180,7 @@ async fn run_chat_pipeline(
         spawn_log(
             state.clone(),
             Some(gw_key.name.clone()),
+            Some(gw_key.id.clone()),
             None,
             model.clone(),
             None,
@@ -293,13 +294,14 @@ async fn run_chat_pipeline(
                 }
                 Err(outcome) => {
                     let duration_ms = start.elapsed().as_millis() as i64;
-                    spawn_log(
-                        state.clone(),
-                        Some(gw_key.name.clone()),
-                        Some(selected.name.clone()),
-                        model.clone(),
-                        Some(upstream_model.clone()),
-                        outcome.status as i32,
+                spawn_log(
+                    state.clone(),
+                    Some(gw_key.name.clone()),
+                    Some(gw_key.id.clone()),
+                    Some(selected.name.clone()),
+                    model.clone(),
+                    Some(upstream_model.clone()),
+                    outcome.status as i32,
                         0,
                         0,
                         0,
@@ -345,13 +347,14 @@ async fn run_chat_pipeline(
                 Err(e) => {
                     let msg = e.to_string();
                     let duration_ms = start.elapsed().as_millis() as i64;
-                    spawn_log(
-                        state.clone(),
-                        Some(gw_key.name.clone()),
-                        Some(selected.name.clone()),
-                        model.clone(),
-                        Some(upstream_model.clone()),
-                        502,
+                spawn_log(
+                    state.clone(),
+                    Some(gw_key.name.clone()),
+                    Some(gw_key.id.clone()),
+                    Some(selected.name.clone()),
+                    model.clone(),
+                    Some(upstream_model.clone()),
+                    502,
                         0,
                         0,
                         0,
@@ -496,6 +499,7 @@ async fn run_chat_pipeline(
             spawn_log(
                 state.clone(),
                 Some(gw_key.name.clone()),
+                Some(gw_key.id.clone()),
                 Some(selected.name.clone()),
                 model.clone(),
                 Some(upstream_model.clone()),
@@ -650,6 +654,7 @@ pub async fn embeddings(
         spawn_log(
             state.clone(),
             Some(gw_key.name.clone()),
+            Some(gw_key.id.clone()),
             None,
             model.clone(),
             None,
@@ -739,6 +744,7 @@ pub async fn embeddings(
                 spawn_log(
                     state.clone(),
                     Some(gw_key.name.clone()),
+                    Some(gw_key.id.clone()),
                     Some(selected.name.clone()),
                     model.clone(),
                     Some(model.clone()),
@@ -1009,6 +1015,7 @@ fn error_response(status: StatusCode, code: &str, message: &str) -> Response {
 fn spawn_log(
     state: Arc<AppState>,
     api_key_name: Option<String>,
+    api_key_id: Option<String>,
     channel_name: Option<String>,
     model: String,
     upstream_model: Option<String>,
@@ -1030,6 +1037,7 @@ fn spawn_log(
         let log_id = match request_logs::insert(
             &state.db,
             api_key_name.as_deref(),
+            api_key_id.as_deref(),
             channel_name.as_deref(),
             &model,
             upstream_model.as_deref(),
@@ -1572,6 +1580,7 @@ fn build_stream_response(
             spawn_log(
                 state,
                 Some(gw_key_name),
+                gw_key_id.clone(),
                 Some(channel_name),
                 model,
                 Some(upstream_model),
@@ -1777,6 +1786,7 @@ fn build_responses_stream_response(
         spawn_log(
             state,
             Some(gw_key_name),
+            gw_key_id.clone(),
             Some(channel_name),
             model,
             Some(upstream_model),
@@ -1994,6 +2004,7 @@ fn build_messages_stream_response(
         spawn_log(
             state,
             Some(gw_key_name),
+            gw_key_id.clone(),
             Some(channel_name),
             model,
             Some(upstream_model),

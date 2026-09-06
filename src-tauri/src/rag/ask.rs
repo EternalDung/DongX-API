@@ -10,6 +10,7 @@ use crate::adapter::{get_adaptor, ChannelConfig, ProxyRequest};
 use crate::core::dispatcher::DispatchContext;
 use crate::core::failover::{Failover, Step};
 use crate::crypto;
+use crate::db::repository::request_logs;
 use crate::error::AppError;
 use crate::models::ChannelRow;
 use crate::rag::embed::embed_texts;
@@ -105,8 +106,69 @@ fn channel_serves_model(row: &ChannelRow, model: &str) -> bool {
     false
 }
 
+/// RAG 内部 LLM 调用的落库助手：与网关 `spawn_log` 写入同一张 `request_logs` 表，
+/// 但 RAG 不经网关鉴权、无稳定网关 key，故 `api_key_id` 恒为 NULL，
+/// `api_key_name` 统一标注为 `RAG: {知识库名}` 以区分来源。
+///
+/// 不挂安全审计（无 SecurityOutcome 依赖），仅记录用量与结果；用 `tokio::spawn`
+/// 异步落库，不阻塞问答/深研主链路。问答与深研的每条 LLM 子调用都各记一行。
+fn log_rag_attempt(
+    pool: SqlitePool,
+    kb_name: &str,
+    mode: &str,
+    model: &str,
+    channel_name: &str,
+    status: i32,
+    prompt_tokens: i64,
+    completion_tokens: i64,
+    total_tokens: i64,
+    duration_ms: i64,
+    error_message: Option<String>,
+    request_body: Option<String>,
+    response_body: Option<String>,
+) {
+    let api_key_name = format!("RAG: {}", kb_name);
+    let channel = channel_name.to_string();
+    let model = model.to_string();
+    let mode = mode.to_string();
+    tokio::spawn(async move {
+        if let Err(e) = request_logs::insert(
+            &pool,
+            Some(api_key_name.as_str()),
+            None, // api_key_id：RAG 不经网关鉴权，无稳定 key，恒为 NULL
+            Some(channel.as_str()),
+            &model,
+            None,
+            &mode,
+            status,
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+            duration_ms,
+            error_message.as_deref(),
+            false, // is_stream
+            false, // is_retry
+            request_body.as_deref(),
+            response_body.as_deref(),
+            "none",
+            0,
+            None,
+            "allow",
+            false,
+            None,
+        )
+        .await
+        {
+            tracing::warn!("RAG 请求日志写入失败: {}", e);
+        }
+    });
+}
+
 /// 单次直接对指定渠道发起 chat 调用：解密 key、选择上游 key、转发并解析 answer。
+/// 每次调用都会经 `log_rag_attempt` 落库一条请求日志（标识为 `RAG: {知识库名}`）。
 async fn call_chat_once(
+    pool: &SqlitePool,
+    kb_name: &str,
     row: &ChannelRow,
     model: &str,
     chat_body: &Value,
@@ -137,25 +199,94 @@ async fn call_chat_once(
         stream: false,
     };
     let adaptor = get_adaptor(&row.channel_type);
-    let (status, body, _usage) = adaptor.forward(&proxy_req, &channel_config).await?;
-    if !(200..300).contains(&status) {
-        let msg = body
-            .get("error")
-            .and_then(|e| e.get("message"))
-            .and_then(|m| m.as_str())
-            .unwrap_or("上游返回错误")
-            .to_string();
-        return Err(AppError::Proxy(format!("上游返回 {}: {}", status, msg)));
+    let af_start = std::time::Instant::now();
+    let fwd = adaptor.forward(&proxy_req, &channel_config).await;
+    let dur = af_start.elapsed().as_millis() as i64;
+    match fwd {
+        Ok((status, body, _usage)) => {
+            if !(200..300).contains(&status) {
+                let msg = body
+                    .get("error")
+                    .and_then(|e| e.get("message"))
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("上游返回错误")
+                    .to_string();
+                log_rag_attempt(
+                    pool.clone(),
+                    kb_name,
+                    "rag",
+                    model,
+                    &row.name,
+                    status as i32,
+                    0,
+                    0,
+                    0,
+                    dur,
+                    Some(msg.clone()),
+                    Some(chat_body.to_string()),
+                    Some(body.to_string()),
+                );
+                return Err(AppError::Proxy(format!("上游返回 {}: {}", status, msg)));
+            }
+            let pt = body
+                .get("usage")
+                .and_then(|u| u.get("prompt_tokens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let ct = body
+                .get("usage")
+                .and_then(|u| u.get("completion_tokens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let tt = body
+                .get("usage")
+                .and_then(|u| u.get("total_tokens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(pt + ct);
+            log_rag_attempt(
+                pool.clone(),
+                kb_name,
+                "rag",
+                model,
+                &row.name,
+                status as i32,
+                pt as i64,
+                ct as i64,
+                tt as i64,
+                dur,
+                None,
+                Some(chat_body.to_string()),
+                Some(body.to_string()),
+            );
+            let answer = body
+                .get("choices")
+                .and_then(|c| c.get(0))
+                .and_then(|c| c.get("message"))
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_str())
+                .unwrap_or("")
+                .to_string();
+            Ok(answer)
+        }
+        Err(e) => {
+            log_rag_attempt(
+                pool.clone(),
+                kb_name,
+                "rag",
+                model,
+                &row.name,
+                502,
+                0,
+                0,
+                0,
+                dur,
+                Some(e.to_string()),
+                Some(chat_body.to_string()),
+                None,
+            );
+            Err(e.into())
+        }
     }
-    let answer = body
-        .get("choices")
-        .and_then(|c| c.get(0))
-        .and_then(|c| c.get("message"))
-        .and_then(|m| m.get("content"))
-        .and_then(|c| c.as_str())
-        .unwrap_or("")
-        .to_string();
-    Ok(answer)
 }
 
 /// 在指定知识库范围内回答 `question`。
@@ -259,7 +390,7 @@ pub async fn ask(
                 row.name, model
             )));
         }
-        call_chat_once(&row, model, &chat_body).await?
+        call_chat_once(pool, &kb.name, &row, model, &chat_body).await?
     } else {
         let ctx_disp = DispatchContext {
             model: model.to_string(),
@@ -290,10 +421,42 @@ pub async fn ask(
                 body: chat_body.clone(),
                 stream: false,
             };
+            let af_start = std::time::Instant::now();
             let adaptor = get_adaptor(&selected.channel_type);
             match adaptor.forward(&proxy_req, &config).await {
                 Ok((status, body, _usage)) => {
+                    let dur = af_start.elapsed().as_millis() as i64;
                     if (200..300).contains(&status) {
+                        let pt = body
+                            .get("usage")
+                            .and_then(|u| u.get("prompt_tokens"))
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        let ct = body
+                            .get("usage")
+                            .and_then(|u| u.get("completion_tokens"))
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        let tt = body
+                            .get("usage")
+                            .and_then(|u| u.get("total_tokens"))
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(pt + ct);
+                        log_rag_attempt(
+                            pool.clone(),
+                            &kb.name,
+                            "rag",
+                            model,
+                            &selected.name,
+                            status as i32,
+                            pt as i64,
+                            ct as i64,
+                            tt as i64,
+                            dur,
+                            None,
+                            Some(chat_body.to_string()),
+                            Some(body.to_string()),
+                        );
                         out = body
                             .get("choices")
                             .and_then(|c| c.get(0))
@@ -310,15 +473,43 @@ pub async fn ask(
                         .and_then(|m| m.as_str())
                         .unwrap_or("上游返回错误")
                         .to_string();
+                    log_rag_attempt(
+                        pool.clone(),
+                        &kb.name,
+                        "rag",
+                        model,
+                        &selected.name,
+                        status as i32,
+                        0,
+                        0,
+                        0,
+                        dur,
+                        Some(msg.clone()),
+                        Some(chat_body.to_string()),
+                        Some(body.to_string()),
+                    );
                     let retryable = status >= 500 || status == 429 || status == 408 || status == 409;
-                    if !retryable {
-                        return Err(AppError::Proxy(format!("上游返回 {}: {}", status, msg)));
-                    }
-                    if !fo.should_retry() {
+                    if !retryable || !fo.should_retry() {
                         return Err(AppError::Proxy(format!("上游返回 {}: {}", status, msg)));
                     }
                 }
                 Err(e) => {
+                    let dur = af_start.elapsed().as_millis() as i64;
+                    log_rag_attempt(
+                        pool.clone(),
+                        &kb.name,
+                        "rag",
+                        model,
+                        &selected.name,
+                        502,
+                        0,
+                        0,
+                        0,
+                        dur,
+                        Some(e.to_string()),
+                        Some(chat_body.to_string()),
+                        None,
+                    );
                     if !fo.should_retry() {
                         return Err(AppError::Proxy(e.to_string()));
                     }
@@ -351,6 +542,7 @@ pub async fn ask(
 /// 与 `ask` 主流程的转发逻辑保持一致。
 async fn chat_completion(
     pool: &SqlitePool,
+    kb_name: &str,
     model: &str,
     channel_id: Option<&str>,
     system: &str,
@@ -385,7 +577,7 @@ async fn chat_completion(
                 row.name, model
             )));
         }
-        call_chat_once(&row, model, &chat_body).await
+        call_chat_once(pool, kb_name, &row, model, &chat_body).await
     } else {
         let ctx_disp = DispatchContext {
             model: model.to_string(),
@@ -416,10 +608,42 @@ async fn chat_completion(
                 body: chat_body.clone(),
                 stream: false,
             };
+            let af_start = std::time::Instant::now();
             let adaptor = get_adaptor(&selected.channel_type);
             match adaptor.forward(&proxy_req, &config).await {
                 Ok((status, body, _usage)) => {
+                    let dur = af_start.elapsed().as_millis() as i64;
                     if (200..300).contains(&status) {
+                        let pt = body
+                            .get("usage")
+                            .and_then(|u| u.get("prompt_tokens"))
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        let ct = body
+                            .get("usage")
+                            .and_then(|u| u.get("completion_tokens"))
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        let tt = body
+                            .get("usage")
+                            .and_then(|u| u.get("total_tokens"))
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(pt + ct);
+                        log_rag_attempt(
+                            pool.clone(),
+                            kb_name,
+                            "deep-research",
+                            model,
+                            &selected.name,
+                            status as i32,
+                            pt as i64,
+                            ct as i64,
+                            tt as i64,
+                            dur,
+                            None,
+                            Some(chat_body.to_string()),
+                            Some(body.to_string()),
+                        );
                         out = body
                             .get("choices")
                             .and_then(|c| c.get(0))
@@ -436,12 +660,43 @@ async fn chat_completion(
                         .and_then(|m| m.as_str())
                         .unwrap_or("上游返回错误")
                         .to_string();
+                    log_rag_attempt(
+                        pool.clone(),
+                        kb_name,
+                        "deep-research",
+                        model,
+                        &selected.name,
+                        status as i32,
+                        0,
+                        0,
+                        0,
+                        dur,
+                        Some(msg.clone()),
+                        Some(chat_body.to_string()),
+                        Some(body.to_string()),
+                    );
                     let retryable = status >= 500 || status == 429 || status == 408 || status == 409;
                     if !retryable || !fo.should_retry() {
                         return Err(AppError::Proxy(format!("上游返回 {}: {}", status, msg)));
                     }
                 }
                 Err(e) => {
+                    let dur = af_start.elapsed().as_millis() as i64;
+                    log_rag_attempt(
+                        pool.clone(),
+                        kb_name,
+                        "deep-research",
+                        model,
+                        &selected.name,
+                        502,
+                        0,
+                        0,
+                        0,
+                        dur,
+                        Some(e.to_string()),
+                        Some(chat_body.to_string()),
+                        None,
+                    );
                     if !fo.should_retry() {
                         return Err(AppError::Proxy(e.to_string()));
                     }
@@ -470,7 +725,7 @@ fn dedupe_sources(mut s: Vec<Source>) -> Vec<Source> {
     s
 }
 
-/// Deep Research：多轮迭代检索 + 综合（对齐 waliapi 的 `deep_research`）。
+/// Deep Research：多轮迭代检索 + 综合。
 ///
 /// 第 0 轮用原始问题；后续每轮让 LLM 基于已有发现生成追问查询，
 /// 重新嵌入 → 检索 → 累积来源 → 生成该轮发现；达到 `max_rounds` 后做最终综合。
@@ -522,8 +777,9 @@ pub async fn ask_deep_research(
                 query = question,
                 findings = findings,
             );
-            match chat_completion(
+            match             chat_completion(
                 pool,
+                &kb.name,
                 model,
                 channel_id,
                 "你是一个研究助手，根据已有发现生成下一步搜索查询。只返回查询本身。",
@@ -605,6 +861,7 @@ pub async fn ask_deep_research(
         };
         let round_answer = match chat_completion(
             pool,
+            &kb.name,
             model,
             channel_id,
             "你是深度研究助手。基于 RAG 内容进行多轮迭代研究，逐步深入分析。",
@@ -640,6 +897,7 @@ pub async fn ask_deep_research(
     );
     let answer = chat_completion(
         pool,
+        &kb.name,
         model,
         channel_id,
         "你是深度研究助手，综合多轮研究发现给出最终回答。",
