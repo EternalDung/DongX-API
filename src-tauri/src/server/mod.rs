@@ -1,6 +1,6 @@
-pub mod router;
-pub mod handler;
 pub mod auth;
+pub mod handler;
+pub mod router;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

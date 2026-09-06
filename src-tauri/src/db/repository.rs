@@ -38,10 +38,7 @@ pub mod channels {
         .await
     }
 
-    pub async fn get_by_id(
-        pool: &SqlitePool,
-        id: &str,
-    ) -> Result<Option<ChannelRow>, sqlx::Error> {
+    pub async fn get_by_id(pool: &SqlitePool, id: &str) -> Result<Option<ChannelRow>, sqlx::Error> {
         sqlx::query_as::<_, ChannelRow>("SELECT * FROM channels WHERE id = ?")
             .bind(id)
             .fetch_optional(pool)
@@ -56,7 +53,7 @@ pub mod channels {
         channel_type: &str,
         base_url: &str,
         cred_encrypted: &str,
-        models: &str,        // JSON array string
+        models: &str, // JSON array string
         priority: i32,
         weight: i32,
         config: &str,        // JSON object string
@@ -142,11 +139,7 @@ pub mod channels {
     }
 
     /// Record last connectivity test result.
-    pub async fn set_test_result(
-        pool: &SqlitePool,
-        id: &str,
-        ok: bool,
-    ) -> Result<(), sqlx::Error> {
+    pub async fn set_test_result(pool: &SqlitePool, id: &str, ok: bool) -> Result<(), sqlx::Error> {
         sqlx::query("UPDATE channels SET last_test_at=?2, last_test_ok=?3 WHERE id=?1")
             .bind(id)
             .bind(now())
@@ -166,11 +159,7 @@ pub mod channels {
     }
 
     /// 启用 / 禁用渠道（status: 0=禁用 1=启用）。调用方负责校验取值合法。
-    pub async fn set_status(
-        pool: &SqlitePool,
-        id: &str,
-        status: i32,
-    ) -> Result<u64, sqlx::Error> {
+    pub async fn set_status(pool: &SqlitePool, id: &str, status: i32) -> Result<u64, sqlx::Error> {
         let res = sqlx::query("UPDATE channels SET status = ?, updated_at = ? WHERE id = ?")
             .bind(status)
             .bind(now())
@@ -246,11 +235,7 @@ pub mod gateway_keys {
     }
 
     /// Enable / disable a gateway key (status: 0=disabled 1=active).
-    pub async fn set_status(
-        pool: &SqlitePool,
-        id: &str,
-        status: i32,
-    ) -> Result<(), sqlx::Error> {
+    pub async fn set_status(pool: &SqlitePool, id: &str, status: i32) -> Result<(), sqlx::Error> {
         sqlx::query("UPDATE gateway_keys SET status = ?, updated_at = ? WHERE id = ?")
             .bind(status)
             .bind(now())
@@ -335,11 +320,11 @@ pub mod gateway_keys {
 /// Log filter conditions (all optional) — mirrors commands::log::LogQuery.
 #[derive(Debug, Default, Clone)]
 pub struct LogFilter {
-    pub keyword: Option<String>,     // fuzzy match model / channel_name / error_message
+    pub keyword: Option<String>, // fuzzy match model / channel_name / error_message
     pub channel_name: Option<String>,
     pub model: Option<String>,
     pub status_code: Option<i32>,
-    pub start_time: Option<String>,  // RFC3339
+    pub start_time: Option<String>, // RFC3339
     pub end_time: Option<String>,
     pub page: u32,
     pub page_size: u32,
@@ -493,8 +478,7 @@ pub mod request_logs {
             // datetime('now', '-N days') uses a different layout and would sort
             // incorrectly against RFC3339 on sub-day boundaries.
             Some(days) if days > 0 => {
-                let cutoff =
-                    (Utc::now() - chrono::Duration::days(days as i64)).to_rfc3339();
+                let cutoff = (Utc::now() - chrono::Duration::days(days as i64)).to_rfc3339();
                 // Drop findings of logs that are about to be deleted (exact,
                 // independent of any time-format subtlety).
                 sqlx::query(
@@ -515,7 +499,9 @@ pub mod request_logs {
                 sqlx::query("DELETE FROM request_security_findings")
                     .execute(pool)
                     .await?;
-                let res = sqlx::query("DELETE FROM request_logs").execute(pool).await?;
+                let res = sqlx::query("DELETE FROM request_logs")
+                    .execute(pool)
+                    .await?;
                 Ok(res.rows_affected())
             }
         }
@@ -546,11 +532,10 @@ pub mod settings {
 
     /// Get a single value (raw JSON-encoded string).
     pub async fn get(pool: &SqlitePool, key: &str) -> Result<Option<String>, sqlx::Error> {
-        let row: Option<(String,)> =
-            sqlx::query_as("SELECT value FROM settings WHERE key = ?")
-                .bind(key)
-                .fetch_optional(pool)
-                .await?;
+        let row: Option<(String,)> = sqlx::query_as("SELECT value FROM settings WHERE key = ?")
+            .bind(key)
+            .fetch_optional(pool)
+            .await?;
         Ok(row.map(|(v,)| v))
     }
 
@@ -701,6 +686,7 @@ pub mod channel_health {
     pub const COOLDOWN_SECS: i64 = 60;
 
     #[derive(Debug, Clone, sqlx::FromRow)]
+    #[allow(dead_code)]
     pub struct ChannelHealthRow {
         pub channel_id: String,
         pub consecutive_failures: i64,
@@ -712,7 +698,11 @@ pub mod channel_health {
     /// 熔断粒度键：流式请求与非流式请求各自独立熔断（方案 A）。
     /// 同一渠道的 SSE 端点坏了，不影响非流式路径被选中。
     pub fn mode_key(is_stream: bool) -> &'static str {
-        if is_stream { "stream" } else { "nonstream" }
+        if is_stream {
+            "stream"
+        } else {
+            "nonstream"
+        }
     }
 
     pub async fn get(
@@ -752,7 +742,10 @@ pub mod channel_health {
         mode: &str,
         reason: &str,
     ) -> Result<(), sqlx::Error> {
-        let failures = get(pool, channel_id, mode).await?.map(|r| r.consecutive_failures).unwrap_or(0)
+        let failures = get(pool, channel_id, mode)
+            .await?
+            .map(|r| r.consecutive_failures)
+            .unwrap_or(0)
             + 1;
         let (cooldown, last_at, last_reason) = if failures >= FAILURE_THRESHOLD as i64 {
             (

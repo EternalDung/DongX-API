@@ -1,6 +1,6 @@
-use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use aes_gcm::aead::Aead;
-use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use rand::RngCore;
 
 /// Encrypt plaintext using AES-256-GCM with a machine-bound key.
@@ -12,8 +12,7 @@ use rand::RngCore;
 /// but Rust's type system enforces key/nonce correctness at compile time.
 pub fn encrypt(plaintext: &str) -> Result<String, String> {
     let key = derive_key();
-    let cipher = Aes256Gcm::new_from_slice(&key)
-        .map_err(|e| format!("Invalid key: {}", e))?;
+    let cipher = Aes256Gcm::new_from_slice(&key).map_err(|e| format!("Invalid key: {}", e))?;
 
     // Generate a random 12-byte nonce (like Java's SecureRandom IV)
     let mut nonce_bytes = [0u8; 12];
@@ -33,8 +32,7 @@ pub fn encrypt(plaintext: &str) -> Result<String, String> {
 /// Decrypt ciphertext produced by encrypt()
 pub fn decrypt(ciphertext_b64: &str) -> Result<String, String> {
     let key = derive_key();
-    let cipher = Aes256Gcm::new_from_slice(&key)
-        .map_err(|e| format!("Invalid key: {}", e))?;
+    let cipher = Aes256Gcm::new_from_slice(&key).map_err(|e| format!("Invalid key: {}", e))?;
 
     let combined = BASE64
         .decode(ciphertext_b64)
@@ -58,9 +56,13 @@ pub fn decrypt(ciphertext_b64: &str) -> Result<String, String> {
 pub fn generate_api_key() -> String {
     let mut bytes = [0u8; 24];
     rand::thread_rng().fill_bytes(&mut bytes);
-    let encoded = BASE64.encode(&bytes);
+    let encoded = BASE64.encode(bytes);
     // URL-safe, no padding
-    let encoded = encoded.replace('+', "-").replace('/', "_").trim_end_matches('=').to_string();
+    let encoded = encoded
+        .replace('+', "-")
+        .replace('/', "_")
+        .trim_end_matches('=')
+        .to_string();
     format!("sk-dongapi-{}", encoded)
 }
 

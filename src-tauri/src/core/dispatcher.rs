@@ -1,7 +1,7 @@
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use sqlx::SqlitePool;
+use std::collections::HashSet;
 
 use crate::crypto;
 use crate::db::repository::{channel_health, channels};
@@ -12,8 +12,10 @@ use crate::models::ChannelRow;
 #[derive(Debug, Clone)]
 pub struct DispatchContext {
     pub model: String,
+    #[allow(dead_code)]
     pub api_key_id: String,
     pub is_stream: bool,
+    #[allow(dead_code)]
     pub request_body: serde_json::Value,
 }
 
@@ -101,8 +103,8 @@ pub fn pick_one(candidates: &[ChannelRow]) -> AppResult<SelectedChannel> {
 
     // Weighted-random pick a channel by its `weight`.
     let pairs: Vec<(String, i32)> = top.iter().map(|c| (c.id.clone(), c.weight)).collect();
-    let chosen_id = weighted_pick(&pairs)
-        .ok_or_else(|| AppError::Internal("渠道加权选择失败".into()))?;
+    let chosen_id =
+        weighted_pick(&pairs).ok_or_else(|| AppError::Internal("渠道加权选择失败".into()))?;
     let row = top
         .iter()
         .find(|c| c.id == chosen_id)
@@ -189,8 +191,8 @@ fn pick_upstream_key(cred_encrypted: &str) -> AppResult<String> {
                 })
                 .collect();
             if !pairs.is_empty() {
-                return Ok(weighted_pick(&pairs)
-                    .ok_or_else(|| AppError::Crypto("无可用上游密钥".into()))?);
+                return weighted_pick(&pairs)
+                    .ok_or_else(|| AppError::Crypto("无可用上游密钥".into()));
             }
         }
     }

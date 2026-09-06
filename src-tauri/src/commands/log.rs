@@ -117,10 +117,7 @@ pub fn spawn_log_retention_sweeper(pool: SqlitePool) {
 
 /// Delete a single log entry by id.
 #[tauri::command]
-pub async fn delete_log(
-    id: String,
-    state: State<'_, Arc<AppState>>,
-) -> AppResult<u64> {
+pub async fn delete_log(id: String, state: State<'_, Arc<AppState>>) -> AppResult<u64> {
     let n = request_logs::delete(&state.db, &id).await?;
     if n == 0 {
         return Err(AppError::NotFound(format!("日志 {} 不存在", id)));

@@ -57,9 +57,7 @@ impl RateLimiter {
     pub fn cleanup(&self) {
         if let Ok(mut buckets) = self.buckets.lock() {
             let now = Instant::now();
-            buckets.retain(|_, (_, window_start)| {
-                now.duration_since(*window_start) < self.window
-            });
+            buckets.retain(|_, (_, window_start)| now.duration_since(*window_start) < self.window);
         }
     }
 }

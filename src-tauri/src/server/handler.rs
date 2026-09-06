@@ -11,17 +11,19 @@ use serde_json::json;
 use tauri::{AppHandle, Manager};
 
 use crate::adapter::{
-    self, Adaptor, ChannelConfig, ProxyRequest, StreamConverter, StreamUsage, scan_openai_usage,
-    split_sse_records,
+    self, scan_openai_usage, split_sse_records, Adaptor, ChannelConfig, ProxyRequest,
+    StreamConverter, StreamUsage,
 };
 use crate::core::{dispatcher, failover};
 use crate::db::repository::{
     channel_health, channels, gateway_keys, request_logs, security_findings,
 };
+use crate::protocol::{
+    anthropic_to_openai, openai_to_anthropic, openai_to_responses, responses_to_openai,
+};
 use crate::security::{self, redact, SecurityAction, SecurityFinding, SecurityOutcome};
 use crate::server::auth;
 use crate::settings::Settings;
-use crate::protocol::{anthropic_to_openai, openai_to_anthropic, openai_to_responses, responses_to_openai};
 use crate::AppState;
 
 /// Health check endpoint.
@@ -37,9 +39,11 @@ pub async fn health() -> impl IntoResponse {
 /// 3. Dispatch — pick a channel (priority + weight) and one upstream key.
 /// 4. Adapt — `get_adaptor(type).forward()` converts OpenAI -> upstream
 ///    protocol and proxies the request (non-streaming), or `forward_stream()`
-///    + `build_stream_response()` streams SSE back: OpenAI-compatible upstreams
-///    are passed through byte-for-byte, while Claude/Gemini native SSE is
-///    converted chunk-by-chunk into OpenAI `chat.completion.chunk` frames.
+///    + `build_stream_response()` streams SSE back.
+///
+/// OpenAI-compatible upstreams are passed through byte-for-byte, while
+/// Claude/Gemini native SSE is converted chunk-by-chunk into OpenAI
+/// `chat.completion.chunk` frames.
 /// 5. Quota — debit the gateway key's used tokens.
 /// 6. Log — async insert into `request_logs`.
 /// 7. Return — pass the upstream body + status back to the client.
@@ -201,7 +205,10 @@ async fn run_chat_pipeline(
         return error_response(
             StatusCode::FORBIDDEN,
             "security_blocked",
-            gate.outcome.blocked_reason.as_deref().unwrap_or("请求被安全审计阻断"),
+            gate.outcome
+                .blocked_reason
+                .as_deref()
+                .unwrap_or("请求被安全审计阻断"),
         );
     }
 
@@ -248,7 +255,11 @@ async fn run_chat_pipeline(
         let step = match fo.next().await {
             Ok(s) => s,
             Err(e) => {
-                return error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal", &e.to_string());
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal",
+                    &e.to_string(),
+                );
             }
         };
         let selected = match step {
@@ -294,14 +305,14 @@ async fn run_chat_pipeline(
                 }
                 Err(outcome) => {
                     let duration_ms = start.elapsed().as_millis() as i64;
-                spawn_log(
-                    state.clone(),
-                    Some(gw_key.name.clone()),
-                    Some(gw_key.id.clone()),
-                    Some(selected.name.clone()),
-                    model.clone(),
-                    Some(upstream_model.clone()),
-                    outcome.status as i32,
+                    spawn_log(
+                        state.clone(),
+                        Some(gw_key.name.clone()),
+                        Some(gw_key.id.clone()),
+                        Some(selected.name.clone()),
+                        model.clone(),
+                        Some(upstream_model.clone()),
+                        outcome.status as i32,
                         0,
                         0,
                         0,
@@ -348,14 +359,14 @@ async fn run_chat_pipeline(
                 Err(e) => {
                     let msg = e.to_string();
                     let duration_ms = start.elapsed().as_millis() as i64;
-                spawn_log(
-                    state.clone(),
-                    Some(gw_key.name.clone()),
-                    Some(gw_key.id.clone()),
-                    Some(selected.name.clone()),
-                    model.clone(),
-                    Some(upstream_model.clone()),
-                    502,
+                    spawn_log(
+                        state.clone(),
+                        Some(gw_key.name.clone()),
+                        Some(gw_key.id.clone()),
+                        Some(selected.name.clone()),
+                        model.clone(),
+                        Some(upstream_model.clone()),
+                        502,
                         0,
                         0,
                         0,
@@ -370,7 +381,8 @@ async fn run_chat_pipeline(
                         sec_findings.clone(),
                     );
                     // 上游连接/超时失败 → 可重试，计入熔断。
-                    record_upstream_outcome(&state, is_stream, &selected.id, false, true, &msg).await;
+                    record_upstream_outcome(&state, is_stream, &selected.id, false, true, &msg)
+                        .await;
                     fo.observe(failover::Outcome::connection(msg));
                     if fo.should_retry() {
                         continue;
@@ -550,10 +562,7 @@ pub async fn list_models(State(app): State<AppHandle>) -> Response {
 }
 
 /// POST /v1/completions — not yet implemented.
-pub async fn completions(
-    State(app): State<AppHandle>,
-    body: axum::body::Bytes,
-) -> Response {
+pub async fn completions(State(app): State<AppHandle>, body: axum::body::Bytes) -> Response {
     let _ = (app, body);
     error_response(
         StatusCode::NOT_IMPLEMENTED,
@@ -676,7 +685,10 @@ pub async fn embeddings(
         return error_response(
             StatusCode::FORBIDDEN,
             "security_blocked",
-            gate.outcome.blocked_reason.as_deref().unwrap_or("请求被安全审计阻断"),
+            gate.outcome
+                .blocked_reason
+                .as_deref()
+                .unwrap_or("请求被安全审计阻断"),
         );
     }
 
@@ -848,7 +860,11 @@ pub async fn responses(
     let chat_bytes = match serde_json::to_vec(&chat_body) {
         Ok(b) => b,
         Err(e) => {
-            return error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal", &e.to_string())
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal",
+                &e.to_string(),
+            )
         }
     };
 
@@ -856,8 +872,13 @@ pub async fn responses(
     //    reused). `mode = "responses"` so the request log records this entry as
     //    a Responses call — the driver writes `mode`
     //    into `RequestLog`.
-    let chat_resp =
-        run_chat_pipeline(app, headers, axum::body::Bytes::from(chat_bytes), "responses").await;
+    let chat_resp = run_chat_pipeline(
+        app,
+        headers,
+        axum::body::Bytes::from(chat_bytes),
+        "responses",
+    )
+    .await;
 
     // 5. Translate the Chat response back into Responses shape.
     if !is_stream {
@@ -933,7 +954,11 @@ pub async fn messages(
     let chat_bytes = match serde_json::to_vec(&chat_body) {
         Ok(b) => b,
         Err(e) => {
-            return error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal", &e.to_string())
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal",
+                &e.to_string(),
+            )
         }
     };
 
@@ -941,8 +966,13 @@ pub async fn messages(
     //    `mode = "messages"` so the request log records this entry as a
     //    Messages call. The downstream `x-api-key` header (carrying the DongX
     //    gateway key) is recognised by `auth::extract_gateway_key`.
-    let chat_resp =
-        run_chat_pipeline(app, headers, axum::body::Bytes::from(chat_bytes), "messages").await;
+    let chat_resp = run_chat_pipeline(
+        app,
+        headers,
+        axum::body::Bytes::from(chat_bytes),
+        "messages",
+    )
+    .await;
 
     // 4. Translate the Chat response back into Anthropic shape.
     if !is_stream {
@@ -1084,10 +1114,7 @@ fn spawn_log(
 /// 5xx / 429 / 408 / 409 = 可重试的上游故障 → 计入熔断；
 /// 其余（401/403 鉴权、400/422 客户端错误）不是渠道本身的问题 → 不计入。
 fn is_retryable_status(status: Option<u16>) -> bool {
-    matches!(
-        status,
-        Some(408) | Some(409) | Some(429) | Some(500..=599)
-    )
+    matches!(status, Some(408) | Some(409) | Some(429) | Some(500..=599))
 }
 
 /// 把一次上游调用结果写回渠道健康表，驱动熔断器：
@@ -1363,12 +1390,12 @@ fn build_stream_response(
         // full response body when `log_raw_body` is enabled.
         let mut response_body_acc = String::new();
         let mut conv = match converter {
-            StreamConverter::Claude => {
-                Conv::Claude(crate::adapter::claude::AnthropicSseConverter::new(upstream_model.clone()))
-            }
-            StreamConverter::Gemini => {
-                Conv::Gemini(crate::adapter::gemini::GeminiSseConverter::new(upstream_model.clone()))
-            }
+            StreamConverter::Claude => Conv::Claude(
+                crate::adapter::claude::AnthropicSseConverter::new(upstream_model.clone()),
+            ),
+            StreamConverter::Gemini => Conv::Gemini(
+                crate::adapter::gemini::GeminiSseConverter::new(upstream_model.clone()),
+            ),
             StreamConverter::None => Conv::None,
         };
         let mut had_error = false;
@@ -1423,12 +1450,9 @@ fn build_stream_response(
                         }
                         if do_stream_audit {
                             if let Some(ctx) = &scan_ctx {
-                                for sf in security::scanner::scan_text_chunk(
-                                    s,
-                                    &ctx.0,
-                                    &ctx.1,
-                                    &ctx.2,
-                                ) {
+                                for sf in
+                                    security::scanner::scan_text_chunk(s, &ctx.0, &ctx.1, &ctx.2)
+                                {
                                     stream_findings.push(sf);
                                 }
                             }
@@ -1448,10 +1472,7 @@ fn build_stream_response(
                             if do_stream_audit {
                                 if let Some(ctx) = &scan_ctx {
                                     for sf in security::scanner::scan_text_chunk(
-                                        &f,
-                                        &ctx.0,
-                                        &ctx.1,
-                                        &ctx.2,
+                                        &f, &ctx.0, &ctx.1, &ctx.2,
                                     ) {
                                         stream_findings.push(sf);
                                     }
@@ -1473,10 +1494,7 @@ fn build_stream_response(
                             if do_stream_audit {
                                 if let Some(ctx) = &scan_ctx {
                                     for sf in security::scanner::scan_text_chunk(
-                                        &f,
-                                        &ctx.0,
-                                        &ctx.1,
-                                        &ctx.2,
+                                        &f, &ctx.0, &ctx.1, &ctx.2,
                                     ) {
                                         stream_findings.push(sf);
                                     }
@@ -1502,10 +1520,7 @@ fn build_stream_response(
                             if do_stream_audit {
                                 if let Some(ctx) = &scan_ctx {
                                     for sf in security::scanner::scan_text_chunk(
-                                        &f,
-                                        &ctx.0,
-                                        &ctx.1,
-                                        &ctx.2,
+                                        &f, &ctx.0, &ctx.1, &ctx.2,
                                     ) {
                                         stream_findings.push(sf);
                                     }
@@ -1524,10 +1539,7 @@ fn build_stream_response(
                             if do_stream_audit {
                                 if let Some(ctx) = &scan_ctx {
                                     for sf in security::scanner::scan_text_chunk(
-                                        &f,
-                                        &ctx.0,
-                                        &ctx.1,
-                                        &ctx.2,
+                                        &f, &ctx.0, &ctx.1, &ctx.2,
                                     ) {
                                         stream_findings.push(sf);
                                     }
@@ -1677,9 +1689,7 @@ fn build_responses_stream_response(
         if log_raw_body {
             response_body_acc.push_str(&created);
         }
-        let _ = tx
-            .send(Ok::<_, std::io::Error>(Bytes::from(created)))
-            .await;
+        let _ = tx.send(Ok::<_, std::io::Error>(Bytes::from(created))).await;
         // created_events consumed sequence numbers 0 and 1; continue from there.
         rs_state.sequence_number = 1;
 
@@ -1701,8 +1711,8 @@ fn build_responses_stream_response(
             app_settings.security.builtin_rules.clone(),
             app_settings.security.custom_rules.clone(),
         ));
-        let do_stream_audit = app_settings.security.settings.enabled
-            && app_settings.security.settings.scan_response;
+        let do_stream_audit =
+            app_settings.security.settings.enabled && app_settings.security.settings.scan_response;
         let mut stream_findings: Vec<SecurityFinding> = Vec::new();
 
         // 响应体日志脱敏开关（与请求体同一开关 security_redact_secrets）。
@@ -1730,17 +1740,14 @@ fn build_responses_stream_response(
             crate::adapter::scan_openai_usage(&text, &mut acc);
             if do_stream_audit {
                 if let Some(ctx) = &scan_ctx {
-                    for sf in security::scanner::scan_text_chunk(
-                        &text,
-                        &ctx.0,
-                        &ctx.1,
-                        &ctx.2,
-                    ) {
+                    for sf in security::scanner::scan_text_chunk(&text, &ctx.0, &ctx.1, &ctx.2) {
                         stream_findings.push(sf);
                     }
                 }
             }
-            for ev in crate::protocol::responses_stream::convert_chunk(&text, &response_id, &mut rs_state) {
+            for ev in
+                crate::protocol::responses_stream::convert_chunk(&text, &response_id, &mut rs_state)
+            {
                 if log_raw_body {
                     response_body_acc.push_str(&ev);
                 }
@@ -1872,7 +1879,8 @@ fn build_messages_stream_response(
 
     tokio::spawn(async move {
         let mut data_stream = body.into_data_stream();
-        let mut st = crate::protocol::anthropic_stream::AnthropicStreamState::new(model.clone(), message_id);
+        let mut st =
+            crate::protocol::anthropic_stream::AnthropicStreamState::new(model.clone(), message_id);
         let mut acc = crate::adapter::StreamUsage::default();
         let mut had_error = false;
 
@@ -1890,8 +1898,8 @@ fn build_messages_stream_response(
             app_settings.security.builtin_rules.clone(),
             app_settings.security.custom_rules.clone(),
         ));
-        let do_stream_audit = app_settings.security.settings.enabled
-            && app_settings.security.settings.scan_response;
+        let do_stream_audit =
+            app_settings.security.settings.enabled && app_settings.security.settings.scan_response;
         let mut stream_findings: Vec<SecurityFinding> = Vec::new();
 
         // 响应体日志脱敏开关（与请求体同一开关 security_redact_secrets）。
@@ -1919,12 +1927,7 @@ fn build_messages_stream_response(
             crate::adapter::scan_openai_usage(&text, &mut acc);
             if do_stream_audit {
                 if let Some(ctx) = &scan_ctx {
-                    for sf in security::scanner::scan_text_chunk(
-                        &text,
-                        &ctx.0,
-                        &ctx.1,
-                        &ctx.2,
-                    ) {
+                    for sf in security::scanner::scan_text_chunk(&text, &ctx.0, &ctx.1, &ctx.2) {
                         stream_findings.push(sf);
                     }
                 }
@@ -1951,12 +1954,9 @@ fn build_messages_stream_response(
                         }
                         if do_stream_audit {
                             if let Some(ctx) = &scan_ctx {
-                                for sf in security::scanner::scan_text_chunk(
-                                    &out,
-                                    &ctx.0,
-                                    &ctx.1,
-                                    &ctx.2,
-                                ) {
+                                for sf in
+                                    security::scanner::scan_text_chunk(&out, &ctx.0, &ctx.1, &ctx.2)
+                                {
                                     stream_findings.push(sf);
                                 }
                             }
@@ -1974,9 +1974,7 @@ fn build_messages_stream_response(
             if log_raw_body {
                 response_body_acc.push_str(&closing);
             }
-            let _ = tx
-                .send(Ok::<_, std::io::Error>(Bytes::from(closing)))
-                .await;
+            let _ = tx.send(Ok::<_, std::io::Error>(Bytes::from(closing))).await;
         }
 
         // End-of-stream: debit the gateway key quota, then write the request log

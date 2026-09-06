@@ -80,6 +80,7 @@ pub async fn get_setting_raw(pool: &SqlitePool, key: &str) -> Option<String> {
 ///
 /// 注意：这不触发 `settings_cache` 重建，仅用于服务注册表这类「管理面低频、
 /// 运行期不依赖缓存」的持久化状态。
+#[allow(dead_code)]
 pub async fn set_setting_raw(pool: &SqlitePool, key: &str, value: &str) -> Result<(), String> {
     sqlx::query("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)")
         .bind(key)

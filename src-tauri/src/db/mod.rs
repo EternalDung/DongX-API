@@ -4,9 +4,7 @@ use std::time::Duration;
 
 pub mod repository;
 
-use sqlx::sqlite::{
-    SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous,
-};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::SqlitePool;
 
 /// Initialize the SQLite connection pool and run migrations.
@@ -26,15 +24,12 @@ pub async fn init_pool(db_path: &Path) -> Result<SqlitePool, sqlx::Error> {
     }
 
     // --- Connection-level options (per connection, like JDBC url params) ---
-    let conn_opts = SqliteConnectOptions::from_str(&format!(
-        "sqlite://{}",
-        db_path.display()
-    ))?
-    .create_if_missing(true)          // equivalent to ?mode=rwc
-    .journal_mode(SqliteJournalMode::Wal) // WAL: concurrent reads while writing
-    .synchronous(SqliteSynchronous::Normal) // good perf/safety balance for WAL
-    .foreign_keys(true)               // enforce FK constraints per connection
-    .busy_timeout(Duration::from_secs(5));  // wait instead of failing on lock contention
+    let conn_opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", db_path.display()))?
+        .create_if_missing(true) // equivalent to ?mode=rwc
+        .journal_mode(SqliteJournalMode::Wal) // WAL: concurrent reads while writing
+        .synchronous(SqliteSynchronous::Normal) // good perf/safety balance for WAL
+        .foreign_keys(true) // enforce FK constraints per connection
+        .busy_timeout(Duration::from_secs(5)); // wait instead of failing on lock contention
 
     // --- Pool-level options (like HikariCP maximumPoolSize etc.) ---
     // SQLite is single-writer: a small pool is correct. Extra connections

@@ -10,15 +10,11 @@ use crate::crypto;
 use crate::db::repository::request_logs;
 use crate::error::{AppError, AppResult};
 use crate::models::ChannelRow;
-use crate::wiki::store::{WikiAskResult, WikiCitation, WikiPage};
 use crate::wiki::store;
+use crate::wiki::store::{WikiAskResult, WikiCitation, WikiPage};
 
 /// Wiki 问答主入口。
-pub async fn ask(
-    pool: &SqlitePool,
-    project_id: &str,
-    question: &str,
-) -> AppResult<WikiAskResult> {
+pub async fn ask(pool: &SqlitePool, project_id: &str, question: &str) -> AppResult<WikiAskResult> {
     let proj = store::get_project_base(pool, project_id).await?;
     if proj.chat_channel_id.is_empty() || proj.chat_model.is_empty() {
         return Err(AppError::Validation(
@@ -121,7 +117,7 @@ fn retrieve(pages: &[WikiPage], question: &str, top: usize) -> Vec<WikiPage> {
         .collect();
 
     scored.retain(|(s, _)| *s > 0);
-    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored.sort_by_key(|a| std::cmp::Reverse(a.0));
     scored
         .into_iter()
         .take(top)
@@ -142,8 +138,7 @@ async fn call_chat_once(
     let models: Vec<String> = serde_json::from_str(&row.models).unwrap_or_default();
     let model_mapping: Value =
         serde_json::from_str(&row.model_mapping).unwrap_or_else(|_| serde_json::json!({}));
-    let config: Value =
-        serde_json::from_str(&row.config).unwrap_or_else(|_| serde_json::json!({}));
+    let config: Value = serde_json::from_str(&row.config).unwrap_or_else(|_| serde_json::json!({}));
     let timeout_secs = config
         .get("timeout_secs")
         .and_then(|v| v.as_u64())
@@ -259,10 +254,7 @@ fn decrypt_pick_upstream_key(cred_encrypted: &str) -> AppResult<String> {
                     if key.is_empty() {
                         return None;
                     }
-                    let weight = k
-                        .get("weight")
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(1) as i32;
+                    let weight = k.get("weight").and_then(|v| v.as_i64()).unwrap_or(1) as i32;
                     Some((key, weight))
                 })
                 .collect();

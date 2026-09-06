@@ -104,7 +104,10 @@ fn blocks_to_text(blocks: &[Value]) -> Value {
 
 /// Convert an OpenAI Chat completion into the Anthropic Messages shape.
 pub(crate) fn openai_to_anthropic(cc: &Value) -> Value {
-    let id = cc.get("id").and_then(|v| v.as_str()).unwrap_or("msg_unknown");
+    let id = cc
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("msg_unknown");
     // OpenAI ids look like "chatcmpl-xxx"; Anthropic message ids are "msg_...".
     let anthropic_id = if let Some(core) = id.strip_prefix("chatcmpl-") {
         format!("msg_{}", core)
@@ -137,7 +140,9 @@ pub(crate) fn openai_to_anthropic(cc: &Value) -> Value {
     let (in_t, out_t) = match usage {
         Some(u) => (
             u.get("prompt_tokens").and_then(|v| v.as_i64()).unwrap_or(0),
-            u.get("completion_tokens").and_then(|v| v.as_i64()).unwrap_or(0),
+            u.get("completion_tokens")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0),
         ),
         None => (0, 0),
     };

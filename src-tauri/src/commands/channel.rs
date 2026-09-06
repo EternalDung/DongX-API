@@ -96,9 +96,7 @@ fn encrypt_keys(keys: &[KeyEntry]) -> AppResult<String> {
 
 /// List all channels
 #[tauri::command]
-pub async fn list_channels(
-    state: State<'_, Arc<AppState>>,
-) -> AppResult<Vec<serde_json::Value>> {
+pub async fn list_channels(state: State<'_, Arc<AppState>>) -> AppResult<Vec<serde_json::Value>> {
     let rows = channels::list(&state.db).await?;
     Ok(rows.into_iter().map(row_to_value).collect())
 }
@@ -110,9 +108,7 @@ pub async fn create_channel(
     input: ChannelInput,
 ) -> AppResult<serde_json::Value> {
     if input.name.trim().is_empty() || input.base_url.trim().is_empty() {
-        return Err(AppError::Validation(
-            "渠道名称和 Base URL 不能为空".into(),
-        ));
+        return Err(AppError::Validation("渠道名称和 Base URL 不能为空".into()));
     }
 
     let cred_encrypted = encrypt_keys(&input.keys)?;
@@ -123,8 +119,7 @@ pub async fn create_channel(
     config["timeout_secs"] = serde_json::json!(input.timeout_secs);
     let config = serde_json::to_string(&config).unwrap_or_else(|_| "{}".into());
 
-    let model_mapping =
-        serde_json::to_string(&input.model_mapping).unwrap_or_else(|_| "{}".into());
+    let model_mapping = serde_json::to_string(&input.model_mapping).unwrap_or_else(|_| "{}".into());
     let endpoints = serde_json::to_string(&input.endpoints).unwrap_or_else(|_| "[]".into());
 
     let row = channels::insert(
@@ -154,9 +149,7 @@ pub async fn update_channel(
     input: ChannelInput,
 ) -> AppResult<()> {
     if input.name.trim().is_empty() || input.base_url.trim().is_empty() {
-        return Err(AppError::Validation(
-            "渠道名称和 Base URL 不能为空".into(),
-        ));
+        return Err(AppError::Validation("渠道名称和 Base URL 不能为空".into()));
     }
 
     // Preserve existing encrypted keys when the form leaves them blank.
@@ -176,8 +169,7 @@ pub async fn update_channel(
     config["timeout_secs"] = serde_json::json!(input.timeout_secs);
     let config = serde_json::to_string(&config).unwrap_or_else(|_| "{}".into());
 
-    let model_mapping =
-        serde_json::to_string(&input.model_mapping).unwrap_or_else(|_| "{}".into());
+    let model_mapping = serde_json::to_string(&input.model_mapping).unwrap_or_else(|_| "{}".into());
     let endpoints = serde_json::to_string(&input.endpoints).unwrap_or_else(|_| "[]".into());
 
     channels::update(
@@ -203,10 +195,7 @@ pub async fn update_channel(
 
 /// Delete a channel
 #[tauri::command]
-pub async fn delete_channel(
-    state: State<'_, Arc<AppState>>,
-    id: String,
-) -> AppResult<()> {
+pub async fn delete_channel(state: State<'_, Arc<AppState>>, id: String) -> AppResult<()> {
     let affected = channels::delete(&state.db, &id).await?;
     if affected == 0 {
         return Err(AppError::NotFound(format!("渠道不存在: {id}")));
@@ -239,10 +228,7 @@ pub async fn set_channel_status(
 /// Returns `true` if the adaptor reports success; the result is also
 /// persisted via `set_test_result` for the UI to display later.
 #[tauri::command]
-pub async fn test_channel(
-    state: State<'_, Arc<AppState>>,
-    id: String,
-) -> AppResult<bool> {
+pub async fn test_channel(state: State<'_, Arc<AppState>>, id: String) -> AppResult<bool> {
     let row = channels::get_by_id(&state.db, &id)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("渠道不存在: {id}")))?;
@@ -350,8 +336,7 @@ pub async fn get_channel_stats(
     state: State<'_, Arc<AppState>>,
     channel_name: String,
 ) -> AppResult<serde_json::Value> {
-    let stats =
-        crate::db::repository::stats::channel_stats(&state.db, &channel_name).await?;
+    let stats = crate::db::repository::stats::channel_stats(&state.db, &channel_name).await?;
     let success_rate = if stats.total > 0 {
         (stats.successes as f64 * 100.0 / stats.total as f64).round() as i64
     } else {

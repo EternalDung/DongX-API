@@ -3,8 +3,8 @@
 //! 聚合字段（`source_count` / `page_count` / `link_count` / `token_estimate` /
 //! `last_ingest_at`）在读取时通过 LEFT JOIN 子查询实时算出，不落冗余列。
 
-use sqlx::SqlitePool;
 use serde::Serialize;
+use sqlx::SqlitePool;
 
 use crate::error::{AppError, AppResult};
 
@@ -225,7 +225,10 @@ pub async fn update_project(pool: &SqlitePool, b: &WikiProjectBase) -> AppResult
 }
 
 pub async fn delete_project(pool: &SqlitePool, id: &str) -> AppResult<()> {
-    let mut tx = pool.begin().await.map_err(|e| AppError::Database(e.to_string()))?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| AppError::Database(e.to_string()))?;
     sqlx::query("DELETE FROM wiki_pages WHERE project_id = ?")
         .bind(id)
         .execute(&mut *tx)
@@ -241,7 +244,9 @@ pub async fn delete_project(pool: &SqlitePool, id: &str) -> AppResult<()> {
         .execute(&mut *tx)
         .await
         .map_err(|e| AppError::Database(e.to_string()))?;
-    tx.commit().await.map_err(|e| AppError::Database(e.to_string()))?;
+    tx.commit()
+        .await
+        .map_err(|e| AppError::Database(e.to_string()))?;
     Ok(())
 }
 

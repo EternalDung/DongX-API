@@ -13,10 +13,10 @@
 #![allow(dead_code)]
 
 pub mod gate;
+pub mod rate_limit;
 pub mod redact;
 pub mod rules;
 pub mod scanner;
-pub mod rate_limit;
 
 use serde::Serialize;
 
@@ -191,11 +191,13 @@ pub fn compute_risk_metrics(
     for f in findings {
         let lvl = parse_risk_level(&f.severity);
         counts[lvl.rank() as usize - 1] += 1;
-        if top.map_or(true, |t| parse_risk_level(&t.severity) < lvl) {
+        if top.is_none_or(|t| parse_risk_level(&t.severity) < lvl) {
             top = Some(f);
         }
     }
-    let max = top.map(|t| parse_risk_level(&t.severity)).unwrap_or(RiskLevel::Info);
+    let max = top
+        .map(|t| parse_risk_level(&t.severity))
+        .unwrap_or(RiskLevel::Info);
     let risk_level = max.as_str().to_string();
 
     // 风险评分：各发现秩之和，封顶 999，便于排序与展示。
@@ -208,7 +210,8 @@ pub fn compute_risk_metrics(
     let risk_summary = Some(format!(
         "检出 {} 项风险（高:{} 中:{} 低:{}）",
         findings.len(),
-        counts[RiskLevel::High.rank() as usize - 1] + counts[RiskLevel::Critical.rank() as usize - 1],
+        counts[RiskLevel::High.rank() as usize - 1]
+            + counts[RiskLevel::Critical.rank() as usize - 1],
         counts[RiskLevel::Medium.rank() as usize - 1],
         counts[RiskLevel::Low.rank() as usize - 1] + counts[RiskLevel::Info.rank() as usize - 1],
     ));
@@ -218,7 +221,10 @@ pub fn compute_risk_metrics(
 }
 
 /// 根据发现与模式决策最终动作 + 输出汇总。
-pub fn decide_action(findings: &[SecurityFinding], settings: &SecuritySettings) -> (SecurityAction, SecurityOutcome) {
+pub fn decide_action(
+    findings: &[SecurityFinding],
+    settings: &SecuritySettings,
+) -> (SecurityAction, SecurityOutcome) {
     if findings.is_empty() {
         return (SecurityAction::Allow, SecurityOutcome::allow());
     }

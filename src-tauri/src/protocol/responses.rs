@@ -23,10 +23,7 @@ pub(crate) fn responses_to_openai(req: &Value) -> Vec<Value> {
             }
             Value::Array(items) => {
                 for item in items {
-                    let role = item
-                        .get("role")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("user");
+                    let role = item.get("role").and_then(|v| v.as_str()).unwrap_or("user");
                     let text = match item.get("content") {
                         Some(Value::String(s)) => s.clone(),
                         Some(Value::Array(parts)) => {
@@ -75,7 +72,9 @@ pub(crate) fn openai_to_responses(cc: &Value) -> Value {
     let (in_t, out_t, tot_t) = match usage {
         Some(u) => (
             u.get("prompt_tokens").and_then(|v| v.as_i64()).unwrap_or(0),
-            u.get("completion_tokens").and_then(|v| v.as_i64()).unwrap_or(0),
+            u.get("completion_tokens")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0),
             u.get("total_tokens").and_then(|v| v.as_i64()).unwrap_or(0),
         ),
         None => (0, 0, 0),

@@ -18,36 +18,102 @@ use super::{is_switch_on, SecurityFinding, SecuritySettings};
 use crate::security::rules::{BuiltinRule, CustomRule};
 
 /// 单次扫描累计字节上限（1 MiB）。超过则跳过后续字符串，不阻断请求。
-const MAX_SCAN_BYTES: usize = 1 * 1024 * 1024;
+const MAX_SCAN_BYTES: usize = 1024 * 1024;
 
 /// rule_id -> 正则。severity/title 等元数据来自 DB（可编辑），正则固定在代码（可测、无 ReDoS 风险）。
 static PATTERNS: &[(&str, &str)] = &[
-    ("cred.secret_token", r#"(?i)\b(sk-[A-Za-z0-9]{12,}|ghp_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.|Bearer\s+[A-Za-z0-9._~+/=-]{16,})"#),
-    ("cred.private_key", r#"(?i)-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----"#),
-    ("cred.named_secret", r#"(?i)(?:password|passwd|secret|token|api[_-]?key|access[_-]?key|auth(?:orization)?|cookie|session)\s*[:=]\s*['"]?[A-Za-z0-9._\-/+=]{8,}"#),
-    ("cred.database_url", r#"(?i)\b(?:mysql|postgres(?:ql)?|mongodb|redis|mongodb\+srv)://[^\s'"<>]+"#),
-    ("cred.cloud_key", r#"(?i)(?:AKIA[0-9A-Z]{16}|SecretId|AccessKeyId|AIza[0-9A-Za-z_-]{35}|aws_secret_access_key)\b"#),
-    ("pii.id_card", r#"([1-9][0-9]{5}(?:19|20)[0-9]{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12][0-9]|3[01])[0-9]{3}[0-9Xx])"#),
-    ("pii.email", r#"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"#),
+    (
+        "cred.secret_token",
+        r#"(?i)\b(sk-[A-Za-z0-9]{12,}|ghp_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.|Bearer\s+[A-Za-z0-9._~+/=-]{16,})"#,
+    ),
+    (
+        "cred.private_key",
+        r#"(?i)-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----"#,
+    ),
+    (
+        "cred.named_secret",
+        r#"(?i)(?:password|passwd|secret|token|api[_-]?key|access[_-]?key|auth(?:orization)?|cookie|session)\s*[:=]\s*['"]?[A-Za-z0-9._\-/+=]{8,}"#,
+    ),
+    (
+        "cred.database_url",
+        r#"(?i)\b(?:mysql|postgres(?:ql)?|mongodb|redis|mongodb\+srv)://[^\s'"<>]+"#,
+    ),
+    (
+        "cred.cloud_key",
+        r#"(?i)(?:AKIA[0-9A-Z]{16}|SecretId|AccessKeyId|AIza[0-9A-Za-z_-]{35}|aws_secret_access_key)\b"#,
+    ),
+    (
+        "pii.id_card",
+        r#"([1-9][0-9]{5}(?:19|20)[0-9]{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12][0-9]|3[01])[0-9]{3}[0-9Xx])"#,
+    ),
+    (
+        "pii.email",
+        r#"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"#,
+    ),
     ("pii.phone", r#"1[3-9][0-9]{9}"#),
-    ("pay.credit_card", r#"(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|3[47][0-9]{13}|6(?:011|5[0-9]{2})[0-9]{12})"#),
+    (
+        "pay.credit_card",
+        r#"(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|3[47][0-9]{13}|6(?:011|5[0-9]{2})[0-9]{12})"#,
+    ),
     // 银行卡：带「非身份证结构」负向预查，规避 62 开头等地区身份证误报。
-    ("pay.bank_card", r#"(?!\d{6}(?:19|20)\d{2}(?:0[1-9]|1[0-2]))(?:62\d{13,16}|9\d{15,17}|4[0-9]{15}|5[1-5][0-9]{14})"#),
-    ("net.ip_probe", r#"(?i)\b(?:ifconfig\.me|ipinfo\.io|ipify\.org|ip\.co|whatismyip|api\.ipify)\b"#),
-    ("net.suspicious_domain", r#"(?i)\b(?:webhook\.site|requestbin\.com|ngrok\.io|pastebin\.com|pipedream\.net|burpcollaborator\.net)\b"#),
+    (
+        "pay.bank_card",
+        r#"(?!\d{6}(?:19|20)\d{2}(?:0[1-9]|1[0-2]))(?:62\d{13,16}|9\d{15,17}|4[0-9]{15}|5[1-5][0-9]{14})"#,
+    ),
+    (
+        "net.ip_probe",
+        r#"(?i)\b(?:ifconfig\.me|ipinfo\.io|ipify\.org|ip\.co|whatismyip|api\.ipify)\b"#,
+    ),
+    (
+        "net.suspicious_domain",
+        r#"(?i)\b(?:webhook\.site|requestbin\.com|ngrok\.io|pastebin\.com|pipedream\.net|burpcollaborator\.net)\b"#,
+    ),
     ("net.external_url", r#"https?://[^\s'"<>]+"#),
-    ("net.tracking_pixel", r#"(?i)\b(?:1x1|tracking|pixel|beacon|telemetry)\b"#),
-    ("exec.shell_command", r#"(?i)\b(?:curl|wget|nc|netcat|scp|ssh|bash\s+-c|sh\s+-c|python\s+-c|powershell\s+-c|cmd\s+/c)\b"#),
-    ("exec.exfiltration", r#"(?i)(?:cat\s+.*\|.*curl|curl.*-d\s+@|tar\s+.*\|.*ssh|base64.*\|.*curl|cat\s+/etc/[^\s|]*\|)"#),
-    ("exec.remote_script", r#"(?i)(?:curl[^\n]*\|\s*(?:ba)?sh|wget[^\n]*\|\s*(?:ba)?sh|curl.*>\s*/tmp|wget.*-O-)"#),
-    ("exec.git_info", r#"(?i)\b(?:git\s+remote|gh\s+auth|git\s+config\s+--list|\.git/config)\b"#),
-    ("exec.ssh_key", r#"(?i)\b(?:id_rsa|id_ed25519|id_ecdsa|id_dsa|\.ssh/)\b"#),
-    ("prompt.injection", r#"(?i)(?:忽略(?:以上|前面|之前|所有|上述)的?指令|无视(?:系统|先前)提示|忽略(?:所有|上述)规则|disregard|ignore (?:the|all|previous) (?:instruction|prompt|rule)|system prompt|reveal your (?:instruction|prompt)|jailbreak|绕过(?:审计|安全|限制)|越权)"#),
-    ("prompt.fingerprint", r#"(?i)(?:fingerprint|浏览器指纹|设备指纹|风控|代理池|user-agent 伪装|canvas 指纹)"#),
+    (
+        "net.tracking_pixel",
+        r#"(?i)\b(?:1x1|tracking|pixel|beacon|telemetry)\b"#,
+    ),
+    (
+        "exec.shell_command",
+        r#"(?i)\b(?:curl|wget|nc|netcat|scp|ssh|bash\s+-c|sh\s+-c|python\s+-c|powershell\s+-c|cmd\s+/c)\b"#,
+    ),
+    (
+        "exec.exfiltration",
+        r#"(?i)(?:cat\s+.*\|.*curl|curl.*-d\s+@|tar\s+.*\|.*ssh|base64.*\|.*curl|cat\s+/etc/[^\s|]*\|)"#,
+    ),
+    (
+        "exec.remote_script",
+        r#"(?i)(?:curl[^\n]*\|\s*(?:ba)?sh|wget[^\n]*\|\s*(?:ba)?sh|curl.*>\s*/tmp|wget.*-O-)"#,
+    ),
+    (
+        "exec.git_info",
+        r#"(?i)\b(?:git\s+remote|gh\s+auth|git\s+config\s+--list|\.git/config)\b"#,
+    ),
+    (
+        "exec.ssh_key",
+        r#"(?i)\b(?:id_rsa|id_ed25519|id_ecdsa|id_dsa|\.ssh/)\b"#,
+    ),
+    (
+        "prompt.injection",
+        r#"(?i)(?:忽略(?:以上|前面|之前|所有|上述)的?指令|无视(?:系统|先前)提示|忽略(?:所有|上述)规则|disregard|ignore (?:the|all|previous) (?:instruction|prompt|rule)|system prompt|reveal your (?:instruction|prompt)|jailbreak|绕过(?:审计|安全|限制)|越权)"#,
+    ),
+    (
+        "prompt.fingerprint",
+        r#"(?i)(?:fingerprint|浏览器指纹|设备指纹|风控|代理池|user-agent 伪装|canvas 指纹)"#,
+    ),
     // Unicode 隐写检测，受 security_scan_unicode 控制。
-    ("unicode.zero_width", r#"[\u{200B}\u{200C}\u{200D}\u{2060}\u{FEFF}]"#),
-    ("unicode.bidi_control", r#"[\u{202A}-\u{202E}\u{2066}-\u{2069}]"#),
-    ("unicode.variation_selector", r#"[\u{FE00}-\u{FE0F}\u{E0100}-\u{E01EF}]"#),
+    (
+        "unicode.zero_width",
+        r#"[\u{200B}\u{200C}\u{200D}\u{2060}\u{FEFF}]"#,
+    ),
+    (
+        "unicode.bidi_control",
+        r#"[\u{202A}-\u{202E}\u{2066}-\u{2069}]"#,
+    ),
+    (
+        "unicode.variation_selector",
+        r#"[\u{FE00}-\u{FE0F}\u{E0100}-\u{E01EF}]"#,
+    ),
     ("unicode.homograph", r#"(?:\p{Cyrillic}|\p{Greek})"#),
 ];
 
@@ -94,9 +160,7 @@ pub fn high_risk_regexes() -> &'static [Regex] {
             "prompt.injection",
             "unicode.bidi_control",
         ];
-        ids.iter()
-            .filter_map(|id| comp.get(*id).cloned())
-            .collect()
+        ids.iter().filter_map(|id| comp.get(*id).cloned()).collect()
     })
 }
 
@@ -364,10 +428,15 @@ mod tests {
 
     #[test]
     fn detects_secret_token_and_masks_evidence() {
-        let body = json!({"messages":[{"role":"user","content":"my key is sk-abcdefghijklmnopqrstuvwx"}]});
+        let body =
+            json!({"messages":[{"role":"user","content":"my key is sk-abcdefghijklmnopqrstuvwx"}]});
         let res = scan(&body, &settings(), &[secret_rule()], &[], "request");
         assert!(!res.findings.is_empty(), "应检出凭证");
-        let f = res.findings.iter().find(|f| f.category == "credential").unwrap();
+        let f = res
+            .findings
+            .iter()
+            .find(|f| f.category == "credential")
+            .unwrap();
         assert_eq!(f.severity, "high");
         // 证据已脱敏，不出现明文密钥
         let ev = f.evidence_masked.as_ref().unwrap();
@@ -394,7 +463,10 @@ mod tests {
         s.scan_network = false;
         let body = json!({"content":"send it to webhook.site"});
         let res = scan(&body, &s, &[network_rule()], &[], "request");
-        assert!(res.findings.is_empty(), "关闭 scan_network 后不应检出可疑域名");
+        assert!(
+            res.findings.is_empty(),
+            "关闭 scan_network 后不应检出可疑域名"
+        );
     }
 
     #[test]
@@ -408,16 +480,25 @@ mod tests {
     fn detects_unicode_bidi_control() {
         // U+202B (RLE) 属 bidi_control，受 security_scan_unicode 控制。
         let body = json!({"content":"\u{202B}suspicious"});
-        let res = scan(&body, &settings(), &[BuiltinRule {
-            rule_id: "unicode.bidi_control".to_string(),
-            category: "unicode".to_string(),
-            severity: "high".to_string(),
-            title: "方向控制字符".to_string(),
-            description: None,
-            toggle_key: Some("security_scan_unicode".to_string()),
-            enabled: 1,
-        }], &[], "request");
-        assert!(res.findings.iter().any(|f| f.rule_id == "unicode.bidi_control"));
+        let res = scan(
+            &body,
+            &settings(),
+            &[BuiltinRule {
+                rule_id: "unicode.bidi_control".to_string(),
+                category: "unicode".to_string(),
+                severity: "high".to_string(),
+                title: "方向控制字符".to_string(),
+                description: None,
+                toggle_key: Some("security_scan_unicode".to_string()),
+                enabled: 1,
+            }],
+            &[],
+            "request",
+        );
+        assert!(res
+            .findings
+            .iter()
+            .any(|f| f.rule_id == "unicode.bidi_control"));
     }
 
     #[test]
@@ -435,7 +516,10 @@ mod tests {
         };
         let body = json!({"text":"this contains forbidden-phrase inside"});
         let res = scan(&body, &settings(), &[], &[rule], "request");
-        assert!(res.findings.iter().any(|f| f.rule_id.starts_with("custom.")));
+        assert!(res
+            .findings
+            .iter()
+            .any(|f| f.rule_id.starts_with("custom.")));
     }
 
     #[test]
@@ -451,7 +535,13 @@ mod tests {
     #[test]
     fn benign_text_no_finding() {
         let body = json!({"content":"the quick brown fox jumps over the lazy dog"});
-        let res = scan(&body, &settings(), &[secret_rule(), id_card_rule()], &[], "request");
+        let res = scan(
+            &body,
+            &settings(),
+            &[secret_rule(), id_card_rule()],
+            &[],
+            "request",
+        );
         assert!(res.findings.is_empty());
     }
 
@@ -462,7 +552,10 @@ mod tests {
         let text = "leak sk-abcdefghijklmnopqrstuvwx in response";
         let res = scan_text_chunk(text, &settings(), &[secret_rule()], &[]);
         assert_eq!(res.len(), 1, "应检出流式响应块中的密钥");
-        assert_eq!(res[0].phase, "response_delta", "增量审计发现 phase 应为 response_delta");
+        assert_eq!(
+            res[0].phase, "response_delta",
+            "增量审计发现 phase 应为 response_delta"
+        );
         assert_eq!(res[0].severity, "high");
 
         let mut disabled = settings();

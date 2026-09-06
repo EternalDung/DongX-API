@@ -213,11 +213,9 @@ fn normalize_fts_query(q: &str) -> Option<String> {
         } else if is_cjk(c) {
             out.push(c);
             prev_space = false;
-        } else if c.is_whitespace() {
-            if !prev_space && !out.is_empty() {
-                out.push(' ');
-                prev_space = true;
-            }
+        } else if c.is_whitespace() && !prev_space && !out.is_empty() {
+            out.push(' ');
+            prev_space = true;
         }
         // 其它标点 / 符号丢弃
     }
@@ -319,15 +317,13 @@ mod tests {
             .await
             .unwrap();
             // 同步写入 FTS5 索引（与 store::insert_document 的维护逻辑一致）
-            sqlx::query(
-                "INSERT INTO kb_chunks_fts (chunk_id, kb_id, content) VALUES (?, ?, ?)",
-            )
-            .bind(&cid)
-            .bind("kb1")
-            .bind(*content)
-            .execute(&pool)
-            .await
-            .unwrap();
+            sqlx::query("INSERT INTO kb_chunks_fts (chunk_id, kb_id, content) VALUES (?, ?, ?)")
+                .bind(&cid)
+                .bind("kb1")
+                .bind(*content)
+                .execute(&pool)
+                .await
+                .unwrap();
         }
         pool
     }
@@ -338,7 +334,10 @@ mod tests {
         assert!(normalize_fts_query("知识").is_none());
         assert!(normalize_fts_query("ab").is_none());
         // 正常保留并小写 ASCII
-        assert_eq!(normalize_fts_query("Rust 所有权"), Some("rust 所有权".to_string()));
+        assert_eq!(
+            normalize_fts_query("Rust 所有权"),
+            Some("rust 所有权".to_string())
+        );
     }
 
     #[tokio::test]
@@ -392,7 +391,12 @@ mod tests {
         sqlx::query("INSERT INTO kb_chunks (id,kb_id,doc_id,content,embedding,created_at) VALUES (?,?,?,?,NULL,'2026-01-01T00:00:00Z')")
             .bind("cX").bind("kb1").bind("d1").bind("本知识库内容索引示例").execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO kb_chunks_fts (chunk_id,kb_id,content) VALUES (?,?,?)")
-            .bind("cX").bind("kb1").bind("本知识库内容索引示例").execute(&pool).await.unwrap();
+            .bind("cX")
+            .bind("kb1")
+            .bind("本知识库内容索引示例")
+            .execute(&pool)
+            .await
+            .unwrap();
         let hits = retrieve(
             &pool,
             &["kb1".to_string()],

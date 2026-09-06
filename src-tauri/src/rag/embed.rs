@@ -100,7 +100,10 @@ pub async fn embed_texts(
                 .get("embedding")
                 .and_then(|e| e.as_array())
                 .ok_or_else(|| AppError::Proxy("嵌入返回缺少 embedding 字段".into()))?;
-            let vec: Vec<f32> = emb.iter().filter_map(|v| v.as_f64().map(|f| f as f32)).collect();
+            let vec: Vec<f32> = emb
+                .iter()
+                .filter_map(|v| v.as_f64().map(|f| f as f32))
+                .collect();
             out.push(vec);
         }
 

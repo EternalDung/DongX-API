@@ -12,11 +12,11 @@ use async_trait::async_trait;
 use axum::Router;
 use serde::Serialize;
 use sqlx::SqlitePool;
-use tauri::AppHandle;
 use tauri::async_runtime;
+use tauri::AppHandle;
 
-use crate::AppState;
 use crate::settings::{get_setting_raw, set_setting_raw};
+use crate::AppState;
 
 /// 所有业务服务统一实现的接口。
 ///
@@ -173,6 +173,7 @@ impl ServiceRegistry {
     }
 
     /// 启用 / 禁用服务（持久化到 settings，重启后仍生效）。
+    #[allow(dead_code)]
     pub async fn set_enabled(
         &self,
         id: &str,
@@ -190,7 +191,12 @@ impl ServiceRegistry {
                 disabled.insert(id.to_string());
             }
         }
-        set_setting_raw(pool, &format!("service.{}.enabled", id), &enabled.to_string()).await?;
+        set_setting_raw(
+            pool,
+            &format!("service.{}.enabled", id),
+            &enabled.to_string(),
+        )
+        .await?;
         Ok(())
     }
 
@@ -198,6 +204,7 @@ impl ServiceRegistry {
     ///
     /// 该操作不可撤销（需手动清除 `service.<id>.removed` 设置键恢复），因此
     /// 命令层应要求前端二次确认。
+    #[allow(dead_code)]
     pub async fn remove(&self, id: &str, pool: &SqlitePool) -> Result<(), String> {
         if !self.services.iter().any(|s| s.id() == id) {
             return Err(format!("未知服务: {}", id));

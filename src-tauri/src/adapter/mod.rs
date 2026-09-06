@@ -59,8 +59,10 @@ pub struct TokenUsage {
 /// Rust 1.75's native async-fn-in-trait does not allow trait objects (dyn).
 #[async_trait]
 pub trait Adaptor: Send + Sync {
+    #[allow(dead_code)]
     fn channel_type(&self) -> &'static str;
     fn default_models(&self) -> Vec<&'static str>;
+    #[allow(dead_code)]
     fn default_base_url(&self) -> &str;
 
     /// List models from the upstream provider and return their ids.
@@ -192,11 +194,7 @@ pub(crate) async fn fetch_openai_models(
 ) -> Result<Vec<String>, anyhow::Error> {
     let client = build_client(config)?;
     let url = ensure_scheme(&join_url(&config.base_url, "/models"));
-    let resp = client
-        .get(&url)
-        .bearer_auth(&config.api_key)
-        .send()
-        .await?;
+    let resp = client.get(&url).bearer_auth(&config.api_key).send().await?;
     if !resp.status().is_success() {
         anyhow::bail!("list models failed: upstream status {}", resp.status());
     }
@@ -293,6 +291,7 @@ pub(crate) fn normalize_developer_role(body: &mut serde_json::Value) {
 /// Records are delimited by a blank line on the wire.
 #[derive(Debug, Clone, Default)]
 pub struct SseRecord {
+    #[allow(dead_code)]
     pub event: Option<String>,
     pub data: String,
 }

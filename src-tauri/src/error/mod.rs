@@ -1,5 +1,5 @@
-use axum::response::{IntoResponse, Response};
 use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 use thiserror::Error;
 
@@ -25,6 +25,7 @@ pub enum AppError {
     Validation(String),
 
     #[error("Unauthorized: {0}")]
+    #[allow(dead_code)]
     Unauthorized(String),
 
     #[error("Proxy error: {0}")]
@@ -40,6 +41,7 @@ pub enum AppError {
 }
 
 /// Serialize a string-wrapped error as a plain string (not an object)
+#[allow(clippy::ptr_arg)]
 fn serialize_to_string<S>(value: &String, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,

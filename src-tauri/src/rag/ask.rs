@@ -71,10 +71,7 @@ fn decrypt_pick_upstream_key(cred_encrypted: &str) -> Result<String, AppError> {
                     if key.is_empty() {
                         return None;
                     }
-                    let weight = k
-                        .get("weight")
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(1) as i32;
+                    let weight = k.get("weight").and_then(|v| v.as_i64()).unwrap_or(1) as i32;
                     Some((key, weight))
                 })
                 .collect();
@@ -177,8 +174,7 @@ async fn call_chat_once(
     let models: Vec<String> = serde_json::from_str(&row.models).unwrap_or_default();
     let model_mapping: Value =
         serde_json::from_str(&row.model_mapping).unwrap_or_else(|_| serde_json::json!({}));
-    let config: Value =
-        serde_json::from_str(&row.config).unwrap_or_else(|_| serde_json::json!({}));
+    let config: Value = serde_json::from_str(&row.config).unwrap_or_else(|_| serde_json::json!({}));
     let timeout_secs = config
         .get("timeout_secs")
         .and_then(|v| v.as_u64())
@@ -336,16 +332,8 @@ pub async fn ask(
         Vec::new()
     };
 
-    let hits: Vec<RetrievedChunk> = retrieve(
-        pool,
-        kb_ids,
-        question,
-        &q_vec,
-        top_k,
-        mode,
-        keyword_weight,
-    )
-    .await?;
+    let hits: Vec<RetrievedChunk> =
+        retrieve(pool, kb_ids, question, &q_vec, top_k, mode, keyword_weight).await?;
 
     let mut ctx = String::new();
     for h in &hits {
@@ -355,7 +343,11 @@ pub async fn ask(
         "你是本地知识库问答助手。请仅基于下面 <knowledge_base> 中的内容回答用户问题；\
          若内容中没有相关信息，请明确说明「知识库中未找到相关信息」，不要编造。\n\n\
          <knowledge_base>\n{}\n</knowledge_base>",
-        if ctx.is_empty() { "（无相关片段）" } else { &ctx }
+        if ctx.is_empty() {
+            "（无相关片段）"
+        } else {
+            &ctx
+        }
     );
 
     let chat_body = serde_json::json!({
@@ -368,16 +360,15 @@ pub async fn ask(
     });
 
     let answer = if let Some(cid) = channel_id {
-        let row: ChannelRow = match sqlx::query_as::<_, ChannelRow>(
-            "SELECT * FROM channels WHERE id = ?",
-        )
-        .bind(cid)
-        .fetch_optional(pool)
-        .await?
-        {
-            Some(r) => r,
-            None => return Err(AppError::NotFound(format!("渠道不存在: {}", cid))),
-        };
+        let row: ChannelRow =
+            match sqlx::query_as::<_, ChannelRow>("SELECT * FROM channels WHERE id = ?")
+                .bind(cid)
+                .fetch_optional(pool)
+                .await?
+            {
+                Some(r) => r,
+                None => return Err(AppError::NotFound(format!("渠道不存在: {}", cid))),
+            };
         if row.status != 1 {
             return Err(AppError::Validation(format!(
                 "渠道「{}」已禁用，请先启用后再作为问答渠道",
@@ -488,7 +479,8 @@ pub async fn ask(
                         Some(chat_body.to_string()),
                         Some(body.to_string()),
                     );
-                    let retryable = status >= 500 || status == 429 || status == 408 || status == 409;
+                    let retryable =
+                        status >= 500 || status == 429 || status == 408 || status == 409;
                     if !retryable || !fo.should_retry() {
                         return Err(AppError::Proxy(format!("上游返回 {}: {}", status, msg)));
                     }
@@ -558,13 +550,12 @@ async fn chat_completion(
     });
 
     if let Some(cid) = channel_id {
-        let row: ChannelRow = sqlx::query_as::<_, ChannelRow>(
-            "SELECT * FROM channels WHERE id = ?",
-        )
-        .bind(cid)
-        .fetch_optional(pool)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("渠道不存在: {}", cid)))?;
+        let row: ChannelRow =
+            sqlx::query_as::<_, ChannelRow>("SELECT * FROM channels WHERE id = ?")
+                .bind(cid)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::NotFound(format!("渠道不存在: {}", cid)))?;
         if row.status != 1 {
             return Err(AppError::Validation(format!(
                 "渠道「{}」已禁用，请先启用后再作为问答渠道",
@@ -675,7 +666,8 @@ async fn chat_completion(
                         Some(chat_body.to_string()),
                         Some(body.to_string()),
                     );
-                    let retryable = status >= 500 || status == 429 || status == 408 || status == 409;
+                    let retryable =
+                        status >= 500 || status == 429 || status == 408 || status == 409;
                     if !retryable || !fo.should_retry() {
                         return Err(AppError::Proxy(format!("上游返回 {}: {}", status, msg)));
                     }
@@ -715,7 +707,7 @@ fn dedupe_sources(mut s: Vec<Source>) -> Vec<Source> {
     let mut seen: Vec<(String, String, String)> = Vec::new();
     s.retain(|x| {
         let key = (x.kb_id.clone(), x.doc_title.clone(), x.content.clone());
-        if seen.iter().any(|k| *k == key) {
+        if seen.contains(&key) {
             false
         } else {
             seen.push(key);
@@ -777,7 +769,7 @@ pub async fn ask_deep_research(
                 query = question,
                 findings = findings,
             );
-            match             chat_completion(
+            match chat_completion(
                 pool,
                 &kb.name,
                 model,

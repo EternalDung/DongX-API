@@ -20,10 +20,10 @@ use std::sync::Arc;
 use sqlx::SqlitePool;
 use tauri::State;
 
-use crate::AppState;
 use crate::wiki::ask;
 use crate::wiki::ingest;
-use crate::wiki::store::{self, WikiProject, WikiProjectBase, WikiSource, WikiPage, WikiAskResult};
+use crate::wiki::store::{self, WikiAskResult, WikiPage, WikiProject, WikiProjectBase, WikiSource};
+use crate::AppState;
 
 // ---------------------------------------------------------------------------
 // 输入结构（对齐前端 WikiProjectInput / WikiProjectUpdate / WikiSourceInput）
@@ -66,7 +66,9 @@ pub struct WikiSourceInput {
 pub async fn list_wiki_projects(
     state: State<'_, Arc<AppState>>,
 ) -> Result<Vec<WikiProject>, String> {
-    store::list_projects(&state.db).await.map_err(|e| e.to_string())
+    store::list_projects(&state.db)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -181,16 +183,19 @@ pub async fn add_wiki_source(
     project_id: String,
     input: WikiSourceInput,
 ) -> Result<WikiSource, String> {
-    store::create_source(&state.db, &project_id, &input.kind, &input.locator, input.branch)
-        .await
-        .map_err(|e| e.to_string())
+    store::create_source(
+        &state.db,
+        &project_id,
+        &input.kind,
+        &input.locator,
+        input.branch,
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn delete_wiki_source(
-    state: State<'_, Arc<AppState>>,
-    id: String,
-) -> Result<(), String> {
+pub async fn delete_wiki_source(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
     store::delete_source(&state.db, &id)
         .await
         .map_err(|e| e.to_string())

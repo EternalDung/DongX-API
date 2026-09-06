@@ -17,11 +17,7 @@ pub fn apply_autostart(app: &AppHandle, enable: bool) {
     let mgr = app.autolaunch();
     let res = if enable { mgr.enable() } else { mgr.disable() };
     if let Err(e) = res {
-        tracing::warn!(
-            "设置开机自启动失败 (enable={}): {}",
-            enable,
-            e
-        );
+        tracing::warn!("设置开机自启动失败 (enable={}): {}", enable, e);
     }
 }
 

@@ -25,6 +25,7 @@ const CHARS_PER_TOKEN: usize = 4;
 #[derive(Debug, Clone)]
 pub struct SplitConfig {
     pub max_tokens: usize,
+    #[allow(dead_code)]
     pub overlap_tokens: usize,
     /// 派生：token 预算换算出的字符预算（= max_tokens × [`CHARS_PER_TOKEN`]）。
     pub max_chars: usize,
@@ -53,7 +54,11 @@ impl SplitConfig {
     /// 由知识库配置构造：把存储的 token 数换算成字符预算。
     /// 任一为 0 / 负数时回落引擎默认（512 / 64 token）。
     pub fn from_kb(chunk_size: i64, chunk_overlap: i64) -> Self {
-        let max_tokens = if chunk_size > 0 { chunk_size as usize } else { 512 };
+        let max_tokens = if chunk_size > 0 {
+            chunk_size as usize
+        } else {
+            512
+        };
         let overlap_tokens = if chunk_overlap > 0 {
             chunk_overlap as usize
         } else {
@@ -90,7 +95,12 @@ pub fn estimate_tokens(text: &str) -> usize {
 ///
 /// `config` 来自知识库的分块配置（大小 / 重叠），由调用方用
 /// [`SplitConfig::from_kb`] 构造；传 `&SplitConfig::default()` 即引擎默认。
-pub fn split(content: &str, kind: FileKind, source_path: Option<&str>, config: &SplitConfig) -> Vec<Chunk> {
+pub fn split(
+    content: &str,
+    kind: FileKind,
+    source_path: Option<&str>,
+    config: &SplitConfig,
+) -> Vec<Chunk> {
     let base_meta = ChunkMeta {
         source_path: source_path.map(|s| s.to_string()),
         ..Default::default()
@@ -334,7 +344,9 @@ mod tests {
 
     #[test]
     fn split_plain_respects_size_and_overlap() {
-        let text: String = (0..200).map(|i| format!("line {} content here\n", i)).collect();
+        let text: String = (0..200)
+            .map(|i| format!("line {} content here\n", i))
+            .collect();
         let chunks = split(&text, FileKind::Plain, None, &SplitConfig::default());
         assert!(!chunks.is_empty());
         for c in &chunks {
@@ -347,15 +359,26 @@ mod tests {
     fn split_markdown_keeps_heading() {
         let md = "# Title\nintro text\n\n## Section A\nbody A\n\n## Section B\nbody B\n";
         let chunks = split(md, FileKind::Markdown, None, &SplitConfig::default());
-        assert!(chunks.iter().any(|c| c.meta.heading.as_deref() == Some("Title")));
-        assert!(chunks.iter().any(|c| c.meta.heading.as_deref() == Some("Section A")));
-        assert!(chunks.iter().all(|c| c.meta.language.as_deref() == Some("md")));
+        assert!(chunks
+            .iter()
+            .any(|c| c.meta.heading.as_deref() == Some("Title")));
+        assert!(chunks
+            .iter()
+            .any(|c| c.meta.heading.as_deref() == Some("Section A")));
+        assert!(chunks
+            .iter()
+            .all(|c| c.meta.language.as_deref() == Some("md")));
     }
 
     #[test]
     fn split_code_symbol_aware_for_rust() {
         let code = "pub struct User {\n    pub name: String,\n}\n\nimpl User {\n    pub fn new(name: String) -> Self {\n        Self { name }\n    }\n}\n\nfn main() {\n    let u = User::new(\"x\".into());\n}\n";
-        let chunks = split(code, FileKind::Code("rs".to_string()), Some("src/user.rs"), &SplitConfig::default());
+        let chunks = split(
+            code,
+            FileKind::Code("rs".to_string()),
+            Some("src/user.rs"),
+            &SplitConfig::default(),
+        );
         assert!(chunks
             .iter()
             .any(|c| c.meta.symbol_name.as_deref() == Some("User")
@@ -364,15 +387,24 @@ mod tests {
             .iter()
             .any(|c| c.meta.symbol_name.as_deref() == Some("new")
                 && c.meta.symbol_kind.as_deref() == Some("method")));
-        assert!(chunks.iter().all(|c| c.meta.source_path.as_deref() == Some("src/user.rs")));
-        assert!(chunks.iter().all(|c| c.meta.language.as_deref() == Some("rs")));
+        assert!(chunks
+            .iter()
+            .all(|c| c.meta.source_path.as_deref() == Some("src/user.rs")));
+        assert!(chunks
+            .iter()
+            .all(|c| c.meta.language.as_deref() == Some("rs")));
     }
 
     #[test]
     fn split_code_unsupported_falls_back_to_text() {
         // "kt" 当前未接入 tree-sitter 语法，应回退普通切分（不报错、无符号元数据）
         let code = "fun main() { println(\"hi\") }";
-        let chunks = split(code, FileKind::Code("kt".to_string()), Some("Main.kt"), &SplitConfig::default());
+        let chunks = split(
+            code,
+            FileKind::Code("kt".to_string()),
+            Some("Main.kt"),
+            &SplitConfig::default(),
+        );
         assert!(!chunks.is_empty());
         assert!(chunks.iter().all(|c| c.meta.symbol_name.is_none()));
     }
@@ -389,7 +421,9 @@ mod tests {
             &SplitConfig::default(),
         );
         assert!(!chunks.is_empty());
-        assert!(chunks.iter().all(|c| c.meta.language.as_deref() == Some("html")));
+        assert!(chunks
+            .iter()
+            .all(|c| c.meta.language.as_deref() == Some("html")));
         assert!(chunks.iter().all(|c| c.meta.symbol_name.is_none()));
     }
 

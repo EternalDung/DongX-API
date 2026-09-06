@@ -16,7 +16,9 @@ pub struct KnowledgeBaseRow {
     pub embedding_model: String,
     pub embedding_channel_id: String,
     pub status: i64,
+    #[allow(dead_code)]
     pub created_at: String,
+    #[allow(dead_code)]
     pub updated_at: String,
     /// 摄入时排除的目录（逗号分隔，NULL=不排除）。
     pub exclude_dirs: Option<String>,

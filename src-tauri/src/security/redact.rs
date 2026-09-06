@@ -68,7 +68,10 @@ mod tests {
             "list": ["plain", "ghp_abcdefghijklmnopqrstuvwxyz"]
         });
         let out = redact(&v);
-        assert!(out["user"]["token"].as_str().unwrap().contains("[REDACTED]"));
+        assert!(out["user"]["token"]
+            .as_str()
+            .unwrap()
+            .contains("[REDACTED]"));
         assert_eq!(out["list"][0].as_str().unwrap(), "plain");
         assert!(out["list"][1].as_str().unwrap().contains("[REDACTED]"));
     }

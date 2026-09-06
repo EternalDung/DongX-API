@@ -141,8 +141,7 @@ async fn handle_http(
 /// 事件流；否则按原 Streamable HTTP 行为直接返回 JSON。
 fn build_response(resp: JsonRpcResponse, wants_sse: bool) -> Response {
     if wants_sse {
-        let payload =
-            serde_json::to_string(&resp).unwrap_or_else(|_| "{}".to_string());
+        let payload = serde_json::to_string(&resp).unwrap_or_else(|_| "{}".to_string());
         let body = format!("event: message\ndata: {}\n\n", payload);
         return Response::builder()
             .status(StatusCode::OK)
@@ -267,8 +266,13 @@ mod tests {
         let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
             .await
             .unwrap();
-        let json: Value = serde_json::from_slice(&bytes)
-            .unwrap_or_else(|e| panic!("响应不是合法 JSON: {} / bytes: {:?}", e, String::from_utf8_lossy(&bytes)));
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+            panic!(
+                "响应不是合法 JSON: {} / bytes: {:?}",
+                e,
+                String::from_utf8_lossy(&bytes)
+            )
+        });
         (status, json)
     }
 
@@ -423,7 +427,9 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let result = &body["result"];
         assert!(result["isError"].is_null() || result["isError"] == false);
-        let text = result["content"][0]["text"].as_str().expect("text 应为字符串");
+        let text = result["content"][0]["text"]
+            .as_str()
+            .expect("text 应为字符串");
         assert!(text.contains("kb-public"), "应列出已暴露 KB");
         assert!(!text.contains("kb-private"), "不应列出未暴露 KB");
     }

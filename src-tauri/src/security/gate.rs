@@ -10,9 +10,14 @@ use sqlx::SqlitePool;
 
 use serde_json::Value;
 
-use super::{decide_action, redact, scanner, SecurityAction, SecurityOutcome, SecuritySettings, SecurityFinding};
+use super::{
+    decide_action, redact, scanner, SecurityAction, SecurityFinding, SecurityOutcome,
+    SecuritySettings,
+};
 use crate::db::repository::settings::get as settings_get;
-use crate::security::rules::{BuiltinRule, BuiltinRuleRepository, CustomRule, CustomRuleRepository};
+use crate::security::rules::{
+    BuiltinRule, BuiltinRuleRepository, CustomRule, CustomRuleRepository,
+};
 
 /// 闸门输出。
 pub struct GateOutput {
@@ -70,9 +75,7 @@ pub struct SecurityContext {
 
 impl SecurityContext {
     /// 从数据库加载完整安全扫描上下文。
-    pub async fn load(
-        pool: &SqlitePool,
-    ) -> Result<SecurityContext, sqlx::Error> {
+    pub async fn load(pool: &SqlitePool) -> Result<SecurityContext, sqlx::Error> {
         let enabled = bool_setting(pool, "security_enabled", true).await;
         let mode = match settings_get(pool, "security_mode").await {
             Ok(Some(s)) => {
@@ -198,7 +201,13 @@ pub fn scan_response_ctx(ctx: &SecurityContext, body: Value) -> GateOutput {
     sec.scan_response = true;
 
     // root="response"：scan 自动把 location 前缀与 phase 设为响应侧，落库正确区分。
-    let result = scanner::scan(&body, &sec, &ctx.builtin_rules, &ctx.custom_rules, "response");
+    let result = scanner::scan(
+        &body,
+        &sec,
+        &ctx.builtin_rules,
+        &ctx.custom_rules,
+        "response",
+    );
 
     let (action, outcome) = decide_action(&result.findings, &sec);
 
@@ -259,8 +268,15 @@ mod tests {
         let ctx = SecurityContext::disabled();
         let body = json!({"content":"sk-abcdefghijklmnopqrstuvwx"});
         let out = run_gate_ctx(&ctx, body);
-        assert_eq!(out.outcome.risk_level, "skipped", "关闭审计不应误标为安全(none)");
-        assert_eq!(out.action, SecurityAction::Allow, "关闭审计仍 fail-open 放行");
+        assert_eq!(
+            out.outcome.risk_level, "skipped",
+            "关闭审计不应误标为安全(none)"
+        );
+        assert_eq!(
+            out.action,
+            SecurityAction::Allow,
+            "关闭审计仍 fail-open 放行"
+        );
         assert!(out.findings.is_empty(), "关闭审计不扫描");
     }
 
@@ -282,8 +298,7 @@ mod tests {
         let secret = "sk-abcdefghijklmnopqrstuvwx";
         let body = json!({"content": format!("key {}", secret)});
         let out = run_gate(&pool, body).await.expect("gate");
-        let fwd = serde_json::to_string(&out.forward_body)
-            .expect("序列化转发体失败（测试）");
+        let fwd = serde_json::to_string(&out.forward_body).expect("序列化转发体失败（测试）");
         assert!(fwd.contains("[REDACTED]"), "转发体应被脱敏: {}", fwd);
         assert!(!fwd.contains(secret), "转发体不应含明文密钥");
         assert_eq!(out.outcome.security_action, "allow");
@@ -329,7 +344,9 @@ mod tests {
             .await
             .expect("gate");
         assert!(
-            off.findings.iter().all(|f| f.rule_id != "unicode.zero_width"),
+            off.findings
+                .iter()
+                .all(|f| f.rule_id != "unicode.zero_width"),
             "关闭 security_scan_unicode 后零宽字符不应检出（证明新键已接线）"
         );
 
@@ -338,7 +355,9 @@ mod tests {
             .await
             .expect("gate");
         assert!(
-            on.findings.iter().any(|f| f.rule_id == "unicode.zero_width"),
+            on.findings
+                .iter()
+                .any(|f| f.rule_id == "unicode.zero_width"),
             "开启 security_scan_unicode 后应检出零宽字符"
         );
     }
@@ -361,7 +380,9 @@ mod tests {
         let body = json!({"choices":[{"message":{"content":"leak sk-abcdefghijklmnopqrstuvwx"}}]});
         let out = scan_response(&pool, body).await.expect("gate");
         assert!(
-            out.findings.iter().any(|f| f.rule_id == "cred.secret_token"),
+            out.findings
+                .iter()
+                .any(|f| f.rule_id == "cred.secret_token"),
             "响应体中的密钥应被检出"
         );
         assert!(
@@ -381,7 +402,9 @@ mod tests {
             .await
             .expect("gate");
         assert!(
-            off.findings.iter().all(|f| f.rule_id != "unicode.zero_width"),
+            off.findings
+                .iter()
+                .all(|f| f.rule_id != "unicode.zero_width"),
             "响应扫描关闭 scan_unicode 后不应检出零宽字符"
         );
 
@@ -390,7 +413,9 @@ mod tests {
             .await
             .expect("gate");
         assert!(
-            on.findings.iter().any(|f| f.rule_id == "unicode.zero_width"),
+            on.findings
+                .iter()
+                .any(|f| f.rule_id == "unicode.zero_width"),
             "响应扫描开启 scan_unicode 后应检出零宽字符"
         );
     }

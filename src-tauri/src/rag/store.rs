@@ -71,7 +71,10 @@ pub async fn insert_document(
     let doc_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
     let chunk_count = chunks.len() as i32;
-    let char_count: i32 = chunks.iter().map(|c| c.content.chars().count() as i32).sum();
+    let char_count: i32 = chunks
+        .iter()
+        .map(|c| c.content.chars().count() as i32)
+        .sum();
 
     sqlx::query(
         "INSERT INTO kb_documents (id, kb_id, title, source_type, source_ref,
@@ -127,14 +130,12 @@ pub async fn insert_document(
         .execute(pool)
         .await?;
         // 同步维护 FTS5 全文索引（独立表，应用层显式写入）
-        sqlx::query(
-            "INSERT INTO kb_chunks_fts (chunk_id, kb_id, content) VALUES (?, ?, ?)",
-        )
-        .bind(&chunk_id)
-        .bind(kb_id)
-        .bind(&ci.content)
-        .execute(pool)
-        .await?;
+        sqlx::query("INSERT INTO kb_chunks_fts (chunk_id, kb_id, content) VALUES (?, ?, ?)")
+            .bind(&chunk_id)
+            .bind(kb_id)
+            .bind(&ci.content)
+            .execute(pool)
+            .await?;
     }
     Ok(doc_id)
 }

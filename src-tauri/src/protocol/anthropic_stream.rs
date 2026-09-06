@@ -43,6 +43,7 @@ pub struct AnthropicStreamState {
     /// `input_tokens` reported in `message_start` (unknown at start → 0; the
     /// authoritative totals arrive in `message_delta` at stream end).
     pub input_tokens: i64,
+    #[allow(dead_code)]
     pub output_tokens: i64,
 }
 

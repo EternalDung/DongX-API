@@ -103,11 +103,11 @@ fn walk_node(
 ) {
     let kind = node.kind();
     let symbol_info = match ext {
-        "ts" | "tsx" | "js" | "jsx" => check_ts_js_node(&kind, &node, source),
-        "py" => check_python_node(&kind, &node, source, parent_kind),
-        "rs" => check_rust_node(&kind, &node, source, parent_kind),
-        "go" => check_go_node(&kind, &node, source),
-        "java" => check_java_node(&kind, &node, source),
+        "ts" | "tsx" | "js" | "jsx" => check_ts_js_node(kind, &node, source),
+        "py" => check_python_node(kind, &node, source, parent_kind),
+        "rs" => check_rust_node(kind, &node, source, parent_kind),
+        "go" => check_go_node(kind, &node, source),
+        "java" => check_java_node(kind, &node, source),
         _ => None,
     };
 

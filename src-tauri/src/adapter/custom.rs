@@ -78,18 +78,29 @@ impl Adaptor for CustomAdaptor {
             Ok(r) => {
                 let status = r.status();
                 if status.is_success() {
-                    Ok(TestResult { success: true, message: "OK".into(), latency_ms: latency })
+                    Ok(TestResult {
+                        success: true,
+                        message: "OK".into(),
+                        latency_ms: latency,
+                    })
                 } else {
                     let text = r.text().await.unwrap_or_default();
                     Ok(TestResult {
                         success: false,
-                        message: format!("HTTP {}: {}", status.as_u16(),
-                            crate::adapter::openai::truncate(&text, 200)),
+                        message: format!(
+                            "HTTP {}: {}",
+                            status.as_u16(),
+                            crate::adapter::openai::truncate(&text, 200)
+                        ),
                         latency_ms: latency,
                     })
                 }
             }
-            Err(e) => Ok(TestResult { success: false, message: e.to_string(), latency_ms: latency }),
+            Err(e) => Ok(TestResult {
+                success: false,
+                message: e.to_string(),
+                latency_ms: latency,
+            }),
         }
     }
 

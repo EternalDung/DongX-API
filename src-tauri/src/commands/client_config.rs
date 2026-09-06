@@ -2,7 +2,7 @@ use crate::db::repository::settings as settings_repo;
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 // ── 数据结构 ──
@@ -148,7 +148,8 @@ const APPS: &[AppDef] = &[
         name: "codex",
         label: "Codex CLI",
         icon: "code",
-        description: "OpenAI Codex 命令行工具，写入 ~/.codex/config.toml 的 model_providers.dongx 段",
+        description:
+            "OpenAI Codex 命令行工具，写入 ~/.codex/config.toml 的 model_providers.dongx 段",
         config_format: "TOML (~/.codex/config.toml)",
         download_url: "https://github.com/openai/codex",
         config_dir_fn: codex_dir,
@@ -196,7 +197,7 @@ const APPS: &[AppDef] = &[
 
 // ── 原子写入（temp + rename，绝对不覆盖用户其它配置） ──
 
-fn atomic_write(path: &PathBuf, data: &[u8]) -> Result<(), String> {
+fn atomic_write(path: &Path, data: &[u8]) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {e}"))?;
     }
@@ -215,12 +216,12 @@ fn atomic_write(path: &PathBuf, data: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-fn read_json_file<T: serde::de::DeserializeOwned>(path: &PathBuf) -> Result<T, String> {
+fn read_json_file<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
     let content = fs::read_to_string(path).map_err(|e| format!("读取文件失败: {e}"))?;
     serde_json::from_str(&content).map_err(|e| format!("解析 JSON 失败: {e}"))
 }
 
-fn write_json_file<T: Serialize>(path: &PathBuf, data: &T) -> Result<(), String> {
+fn write_json_file<T: Serialize>(path: &Path, data: &T) -> Result<(), String> {
     let json = to_pretty_json(data).map_err(|e| format!("序列化 JSON 失败: {e}"))?;
     atomic_write(path, json.as_bytes())
 }
@@ -309,7 +310,7 @@ fn write_json_string(out: &mut String, s: &str) {
 
 // ── 备份与恢复（恢复原始配置） ──
 
-fn backup_path(config_path: &PathBuf) -> PathBuf {
+fn backup_path(config_path: &Path) -> PathBuf {
     let mut name = config_path
         .file_name()
         .unwrap_or_default()
@@ -319,7 +320,7 @@ fn backup_path(config_path: &PathBuf) -> PathBuf {
     config_path.with_file_name(name)
 }
 
-fn backup_config(config_path: &PathBuf) -> Result<(), String> {
+fn backup_config(config_path: &Path) -> Result<(), String> {
     if config_path.exists() {
         let content = fs::read(config_path).map_err(|e| format!("读取配置失败: {e}"))?;
         atomic_write(&backup_path(config_path), &content)?;
@@ -327,7 +328,7 @@ fn backup_config(config_path: &PathBuf) -> Result<(), String> {
     Ok(())
 }
 
-fn restore_config(config_path: &PathBuf) -> Result<(), String> {
+fn restore_config(config_path: &Path) -> Result<(), String> {
     let backup = backup_path(config_path);
     if backup.exists() {
         let content = fs::read(&backup).map_err(|e| format!("读取备份失败: {e}"))?;
@@ -356,7 +357,7 @@ async fn get_dongx_url(state: &AppState) -> String {
 // ── 各客户端配置写入逻辑（合并三段：base_url + api_key + model） ──
 
 fn write_claude_code(
-    config_dir: &PathBuf,
+    config_dir: &Path,
     dongx_url: &str,
     dongx_key: &str,
     model: &str,
@@ -384,7 +385,7 @@ fn write_claude_code(
 }
 
 fn write_codex(
-    config_dir: &PathBuf,
+    config_dir: &Path,
     dongx_url: &str,
     dongx_key: &str,
     model: &str,
@@ -440,7 +441,7 @@ fn write_codex(
 }
 
 fn write_opencode(
-    config_dir: &PathBuf,
+    config_dir: &Path,
     dongx_url: &str,
     dongx_key: &str,
     model: &str,
@@ -478,7 +479,7 @@ fn write_opencode(
 }
 
 fn write_openclaw(
-    config_dir: &PathBuf,
+    config_dir: &Path,
     dongx_url: &str,
     dongx_key: &str,
     model: &str,
@@ -504,7 +505,7 @@ fn write_openclaw(
 }
 
 fn write_hermes(
-    config_dir: &PathBuf,
+    config_dir: &Path,
     dongx_url: &str,
     dongx_key: &str,
     model: &str,
@@ -554,7 +555,7 @@ fn write_hermes(
 
 // ── 检测是否已由 DongX 配置（applied 状态，独立于 available） ──
 
-fn detect_applied(config_path: &PathBuf, app_name: &str) -> bool {
+fn detect_applied(config_path: &Path, app_name: &str) -> bool {
     if !config_path.exists() {
         return false;
     }

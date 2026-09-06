@@ -40,11 +40,12 @@ impl Service for McpService {
     async fn status(&self, state: &AppState) -> ServiceStatus {
         // 对外可见的 KB 数量：只有 mcp_exposed=1 且未删除的 KB 会出现在
         // `list_knowledge_bases` 里，与 tools::require_exposed_kb 的判定保持一致。
-        let exposed: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM knowledge_bases WHERE mcp_exposed = 1 AND status = 1")
-                .fetch_one(&state.db)
-                .await
-                .unwrap_or(0);
+        let exposed: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM knowledge_bases WHERE mcp_exposed = 1 AND status = 1",
+        )
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or(0);
 
         let tools = crate::mcp::tools::tool_specs()
             .iter()

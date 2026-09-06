@@ -179,18 +179,29 @@ impl Adaptor for ClaudeAdaptor {
             Ok(r) => {
                 let status = r.status();
                 if status.is_success() {
-                    Ok(TestResult { success: true, message: "OK".into(), latency_ms: latency })
+                    Ok(TestResult {
+                        success: true,
+                        message: "OK".into(),
+                        latency_ms: latency,
+                    })
                 } else {
                     let text = r.text().await.unwrap_or_default();
                     Ok(TestResult {
                         success: false,
-                        message: format!("HTTP {}: {}", status.as_u16(),
-                            crate::adapter::openai::truncate(&text, 200)),
+                        message: format!(
+                            "HTTP {}: {}",
+                            status.as_u16(),
+                            crate::adapter::openai::truncate(&text, 200)
+                        ),
                         latency_ms: latency,
                     })
                 }
             }
-            Err(e) => Ok(TestResult { success: false, message: e.to_string(), latency_ms: latency }),
+            Err(e) => Ok(TestResult {
+                success: false,
+                message: e.to_string(),
+                latency_ms: latency,
+            }),
         }
     }
 
@@ -285,10 +296,7 @@ impl AnthropicSseConverter {
             "message_start" => {
                 // Capture input tokens early; output tokens come at message_delta.
                 if let Some(u) = json.pointer("/message/usage") {
-                    acc.prompt_tokens = u
-                        .get("input_tokens")
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(0);
+                    acc.prompt_tokens = u.get("input_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
                 }
             }
             "content_block_delta" => {
@@ -320,10 +328,8 @@ impl AnthropicSseConverter {
             }
             "message_delta" => {
                 if let Some(u) = json.get("usage") {
-                    acc.completion_tokens = u
-                        .get("output_tokens")
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(0);
+                    acc.completion_tokens =
+                        u.get("output_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
                 }
                 let stop = json
                     .pointer("/delta/stop_reason")
@@ -332,11 +338,9 @@ impl AnthropicSseConverter {
                 frames.push(self.finish_frame(map_anthropic_stop(stop)));
                 self.finished = true;
             }
-            "message_stop" => {
-                if !self.finished {
-                    frames.push(self.finish_frame("stop"));
-                    self.finished = true;
-                }
+            "message_stop" if !self.finished => {
+                frames.push(self.finish_frame("stop"));
+                self.finished = true;
             }
             _ => {} // ping, errors, etc. ignored
         }

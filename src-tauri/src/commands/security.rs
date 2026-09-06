@@ -15,8 +15,8 @@ pub struct CustomRuleInput {
     pub rule_type: String, // 'blacklist' | 'whitelist'
     pub category: String,  // 'domain' | 'tool' | 'path' | 'keyword'
     pub pattern: String,
-    pub severity: String,  // 'low' | 'medium' | 'high' | 'critical'
-    pub action: String,    // 'warn' | 'block'
+    pub severity: String, // 'low' | 'medium' | 'high' | 'critical'
+    pub action: String,   // 'warn' | 'block'
     pub enabled: bool,
     pub description: Option<String>,
 }
@@ -101,10 +101,7 @@ pub async fn update_custom_rule(
 
 /// 删除自定义规则。
 #[tauri::command]
-pub async fn delete_custom_rule(
-    id: String,
-    state: State<'_, Arc<AppState>>,
-) -> AppResult<()> {
+pub async fn delete_custom_rule(id: String, state: State<'_, Arc<AppState>>) -> AppResult<()> {
     let n = CustomRuleRepository::delete(&state.db, &id).await?;
     if n == 0 {
         return Err(AppError::NotFound(format!("自定义规则 {} 不存在", id)));
@@ -121,13 +118,17 @@ fn validate(input: &CustomRuleInput) -> AppResult<()> {
         ));
     }
     if !["domain", "tool", "path", "keyword"].contains(&input.category.as_str()) {
-        return Err(AppError::Validation("匹配类别必须为 domain/tool/path/keyword".into()));
+        return Err(AppError::Validation(
+            "匹配类别必须为 domain/tool/path/keyword".into(),
+        ));
     }
     if input.pattern.trim().is_empty() {
         return Err(AppError::Validation("匹配模式不能为空".into()));
     }
     if !["low", "medium", "high", "critical"].contains(&input.severity.as_str()) {
-        return Err(AppError::Validation("风险等级必须为 low/medium/high/critical".into()));
+        return Err(AppError::Validation(
+            "风险等级必须为 low/medium/high/critical".into(),
+        ));
     }
     if !["warn", "block"].contains(&input.action.as_str()) {
         return Err(AppError::Validation("命中动作必须为 warn/block".into()));
@@ -177,8 +178,12 @@ pub async fn update_builtin_rule(
             "风险等级必须为 info/low/medium/high/critical".into(),
         ));
     }
-    let n1 = BuiltinRuleRepository::update_enabled(&state.db, &rule_id, if input.enabled { 1 } else { 0 })
-        .await?;
+    let n1 = BuiltinRuleRepository::update_enabled(
+        &state.db,
+        &rule_id,
+        if input.enabled { 1 } else { 0 },
+    )
+    .await?;
     let n2 = BuiltinRuleRepository::update_severity(&state.db, &rule_id, &input.severity).await?;
     if n1 == 0 && n2 == 0 {
         return Err(AppError::NotFound(format!("内置规则 {} 不存在", rule_id)));

@@ -14,7 +14,10 @@ use crate::error::AppError;
 use crate::wiki::store;
 
 /// 触发某个来源的摄入。返回更新后的来源行（无论成功或失败都会刷新状态）。
-pub async fn ingest_source(pool: &SqlitePool, source_id: &str) -> Result<store::WikiSource, AppError> {
+pub async fn ingest_source(
+    pool: &SqlitePool,
+    source_id: &str,
+) -> Result<store::WikiSource, AppError> {
     let src = store::get_source(pool, source_id).await?;
     store::update_source_progress(pool, source_id, "ingesting", 0, 0, None, None).await?;
 
@@ -40,13 +43,13 @@ pub async fn ingest_source(pool: &SqlitePool, source_id: &str) -> Result<store::
     }
 }
 
-async fn do_ingest(
-    pool: &SqlitePool,
-    src: &store::WikiSource,
-) -> Result<(usize, i64), AppError> {
+async fn do_ingest(pool: &SqlitePool, src: &store::WikiSource) -> Result<(usize, i64), AppError> {
     let path = Path::new(&src.locator);
     if !path.exists() {
-        return Err(AppError::Validation(format!("来源路径不存在: {}", src.locator)));
+        return Err(AppError::Validation(format!(
+            "来源路径不存在: {}",
+            src.locator
+        )));
     }
 
     let mut files: Vec<String> = Vec::new();
@@ -70,8 +73,7 @@ async fn do_ingest(
             Err(_) => continue, // 跳过非 UTF-8 / 二进制
         };
         for p in split_pages(&content) {
-            let links_json =
-                serde_json::to_string(&p.links).unwrap_or_else(|_| "[]".into());
+            let links_json = serde_json::to_string(&p.links).unwrap_or_else(|_| "[]".into());
             let tokens = (p.content.chars().count() as f64 / 4.0).ceil() as i64;
             store::upsert_page(
                 pool,
@@ -151,7 +153,10 @@ fn split_pages(content: &str) -> Vec<RawPage> {
         let title = caps[1].trim().to_string();
         let start = whole.end();
         let end = if i + 1 < matches.len() {
-            matches[i + 1].get(0).expect("captures_iter 必含整段匹配").start()
+            matches[i + 1]
+                .get(0)
+                .expect("captures_iter 必含整段匹配")
+                .start()
         } else {
             content.len()
         };
@@ -198,10 +203,7 @@ fn infer_kind(title: &str) -> String {
         "索引".into()
     } else if t.contains("概念") || t.contains("concept") {
         "概念".into()
-    } else if t.contains("日志")
-        || t.contains("log")
-        || t.contains("变更")
-        || t.contains("记录")
+    } else if t.contains("日志") || t.contains("log") || t.contains("变更") || t.contains("记录")
     {
         "日志".into()
     } else if t.contains("实体")

@@ -21,6 +21,7 @@ pub async fn list_services(
 
 /// 启用 / 禁用某个服务（持久化，重启后仍生效）。
 #[tauri::command]
+#[allow(dead_code)]
 pub async fn set_service_enabled(
     state: State<'_, Arc<AppState>>,
     id: String,
@@ -33,9 +34,7 @@ pub async fn set_service_enabled(
 
 /// 移除（软删除）某个服务：从列表隐藏、不再挂载路由（持久化）。
 #[tauri::command]
-pub async fn delete_service(
-    state: State<'_, Arc<AppState>>,
-    id: String,
-) -> Result<(), String> {
+#[allow(dead_code)]
+pub async fn delete_service(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
     ServiceRegistry::global().remove(&id, &state.db).await
 }

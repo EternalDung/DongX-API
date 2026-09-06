@@ -16,8 +16,8 @@
 //!   `crate::adapter` (`AnthropicSseConverter` / `GeminiSseConverter`), which is
 //!   the adapter concern, not the protocol concern.
 pub mod anthropic;
-pub mod responses;
 pub(crate) mod anthropic_stream;
+pub mod responses;
 pub(crate) mod responses_stream;
 
 pub(crate) use anthropic::{anthropic_to_openai, openai_to_anthropic};

@@ -41,11 +41,62 @@ const BUILTIN_EXCLUDE_DIRS: &[&str] = &[
 
 /// 内置默认支持扩展名（小写，不含点）。`included_files` 为空时回退到此白名单。
 const BUILTIN_EXTS: &[&str] = &[
-    "md", "markdown", "txt", "text", "rst", "org", "adoc", "json", "jsonl", "yaml", "yml",
-    "toml", "csv", "tsv", "log", "xml", "html", "htm", "css", "scss", "sass", "less",
-    "js", "jsx", "mjs", "cjs", "ts", "tsx", "py", "rb", "go", "rs", "java", "kt", "kts",
-    "c", "cpp", "h", "hpp", "cc", "cs", "swift", "php", "scala", "dart", "sh", "bash",
-    "zsh", "sql", "r", "lua", "vim", "dockerfile", "makefile", "env.example", "gradle",
+    "md",
+    "markdown",
+    "txt",
+    "text",
+    "rst",
+    "org",
+    "adoc",
+    "json",
+    "jsonl",
+    "yaml",
+    "yml",
+    "toml",
+    "csv",
+    "tsv",
+    "log",
+    "xml",
+    "html",
+    "htm",
+    "css",
+    "scss",
+    "sass",
+    "less",
+    "js",
+    "jsx",
+    "mjs",
+    "cjs",
+    "ts",
+    "tsx",
+    "py",
+    "rb",
+    "go",
+    "rs",
+    "java",
+    "kt",
+    "kts",
+    "c",
+    "cpp",
+    "h",
+    "hpp",
+    "cc",
+    "cs",
+    "swift",
+    "php",
+    "scala",
+    "dart",
+    "sh",
+    "bash",
+    "zsh",
+    "sql",
+    "r",
+    "lua",
+    "vim",
+    "dockerfile",
+    "makefile",
+    "env.example",
+    "gradle",
 ];
 
 /// 摄入过滤规则（已合并知识库全局默认值与来源级覆盖）。
@@ -62,13 +113,18 @@ impl ImportFilters {
     fn is_excluded_dir(&self, name: &str) -> bool {
         let n = name.to_lowercase();
         BUILTIN_EXCLUDE_DIRS.contains(&n.as_str())
-            || self.excluded_dirs.iter().any(|d| d.trim().to_lowercase() == n)
+            || self
+                .excluded_dirs
+                .iter()
+                .any(|d| d.trim().to_lowercase() == n)
     }
 
     /// 文件名命中的排除文件？
     fn is_excluded_file(&self, name: &str) -> bool {
         let n = name.to_lowercase();
-        self.exclude_files.iter().any(|f| f.trim().to_lowercase() == n)
+        self.exclude_files
+            .iter()
+            .any(|f| f.trim().to_lowercase() == n)
     }
 
     /// 文件是否通过「仅包含」过滤？
@@ -81,12 +137,10 @@ impl ImportFilters {
                 None => false,
             };
         }
-        self.included_files
-            .iter()
-            .any(|p| {
-                let p = p.trim().to_lowercase();
-                !p.is_empty() && n.contains(&p)
-            })
+        self.included_files.iter().any(|p| {
+            let p = p.trim().to_lowercase();
+            !p.is_empty() && n.contains(&p)
+        })
     }
 }
 
@@ -195,7 +249,8 @@ async fn import_git(
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr).to_string();
         let _ = tokio::fs::remove_dir_all(&target).await;
-        let last = stderr.lines().filter(|l| !l.is_empty()).last().unwrap_or("");
+        let non_empty: Vec<&str> = stderr.lines().filter(|l| !l.is_empty()).collect();
+        let last = non_empty.last().copied().unwrap_or("");
         return Err(format!("git clone 失败: {}", last));
     }
 
@@ -242,11 +297,7 @@ async fn import_local_dir(
 // URL 导入：fetch → 去标签 → 摄入单个文档
 // ---------------------------------------------------------------------------
 
-async fn import_url(
-    pool: &SqlitePool,
-    kb_id: &str,
-    r: &ResolvedImport,
-) -> Result<usize, String> {
+async fn import_url(pool: &SqlitePool, kb_id: &str, r: &ResolvedImport) -> Result<usize, String> {
     let url = r
         .url
         .as_ref()
@@ -308,9 +359,9 @@ async fn collect_files(
 ) -> Result<(), String> {
     let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let mut entries = tokio::fs::read_dir(&dir).await.map_err(|e| {
-            format!("读取目录失败 {}: {}", dir.display(), e)
-        })?;
+        let mut entries = tokio::fs::read_dir(&dir)
+            .await
+            .map_err(|e| format!("读取目录失败 {}: {}", dir.display(), e))?;
         loop {
             let entry = match entries.next_entry().await {
                 Ok(Some(e)) => e,
@@ -387,7 +438,9 @@ async fn scan_and_ingest(
     if skipped > 0 {
         tracing::info!(
             "批量导入完成（source={}）：处理 {} 个，跳过 {} 个重复",
-            source_id, count, skipped
+            source_id,
+            count,
+            skipped
         );
     }
     Ok(count)
@@ -423,7 +476,8 @@ async fn ingest_file(
     {
         tracing::info!(
             "内容哈希命中已就绪文档，跳过摄入（kb={}, source_ref={}）",
-            kb_id, source_ref
+            kb_id,
+            source_ref
         );
         return Ok(IngestOutcome { duplicate: true });
     }

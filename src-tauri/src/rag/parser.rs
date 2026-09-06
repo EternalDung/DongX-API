@@ -30,9 +30,7 @@ pub fn detect_kind_by_name(filename: &str) -> FileKind {
         }
         "rs" | "py" | "ts" | "tsx" | "js" | "jsx" | "go" | "java" | "c" | "cpp" | "h" | "hpp"
         | "cc" | "cs" | "php" | "swift" | "kt" | "kts" | "rb" | "scala" | "dart" | "sh"
-        | "bash" | "zsh" | "sql" | "r" | "lua" | "vim" | "proto" | "gradle" => {
-            FileKind::Code(ext)
-        }
+        | "bash" | "zsh" | "sql" | "r" | "lua" | "vim" | "proto" | "gradle" => FileKind::Code(ext),
         _ => FileKind::Plain,
     }
 }
@@ -40,10 +38,7 @@ pub fn detect_kind_by_name(filename: &str) -> FileKind {
 /// 按内容判定（用于无文件名的粘贴文本）。
 /// 含 Markdown 标题（以 `# ` 开头的行）则按 Markdown 处理，否则纯文本。
 pub fn detect_kind_by_content(content: &str) -> FileKind {
-    if content
-        .lines()
-        .any(|l| l.trim_start().starts_with("# "))
-    {
+    if content.lines().any(|l| l.trim_start().starts_with("# ")) {
         FileKind::Markdown
     } else {
         FileKind::Plain

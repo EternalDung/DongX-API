@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use sqlx::Row;
 use sqlx::SqlitePool;
 
-use crate::mcp::protocol::{JsonRpcError, ERR_MCP_KB_NOT_FOUND, ERR_MCP_KB_NOT_EXPOSED};
+use crate::mcp::protocol::{JsonRpcError, ERR_MCP_KB_NOT_EXPOSED, ERR_MCP_KB_NOT_FOUND};
 use crate::rag::models::KnowledgeBaseRow;
 use crate::rag::retrieve::{retrieve, RetrievalMode, RetrievedChunk};
 
@@ -145,11 +145,7 @@ impl ToolCallResult {
 }
 
 /// 工具分发：按 `name` 路由到 5 个具体实现；未知 name 返回 -32001。
-pub async fn dispatch(
-    pool: Arc<SqlitePool>,
-    name: &str,
-    arguments: Value,
-) -> ToolCallResult {
+pub async fn dispatch(pool: Arc<SqlitePool>, name: &str, arguments: Value) -> ToolCallResult {
     match name {
         "search_knowledge_base" => search_knowledge_base(&pool, arguments).await,
         "list_knowledge_bases" => list_knowledge_bases(&pool).await,
@@ -213,7 +209,7 @@ async fn search_knowledge_base(pool: &SqlitePool, args: Value) -> ToolCallResult
 
     let hits = match retrieve(
         pool,
-        &[kb.id.clone()],
+        std::slice::from_ref(&kb.id),
         &args.query,
         &vec,
         top_k,
@@ -252,14 +248,12 @@ fn format_hits(kb_name: &str, hits: &[RetrievedChunk]) -> String {
 
 fn truncate(s: &str, max: usize) -> String {
     let mut out = String::with_capacity(max + 4);
-    let mut count = 0;
-    for ch in s.chars() {
-        if count >= max {
-            out.push('…');
-            break;
-        }
+    let mut chars = s.chars();
+    for ch in chars.by_ref().take(max) {
         out.push(ch);
-        count += 1;
+    }
+    if chars.next().is_some() {
+        out.push('…');
     }
     out
 }
@@ -464,13 +458,12 @@ async fn get_knowledge_base_stats(pool: &SqlitePool, args: Value) -> ToolCallRes
         Err(e) => return tool_err(e),
     };
 
-    let doc_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM kb_documents WHERE kb_id = ? AND status = 1",
-    )
-    .bind(&kb.id)
-    .fetch_one(pool)
-    .await
-    .unwrap_or(0);
+    let doc_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM kb_documents WHERE kb_id = ? AND status = 1")
+            .bind(&kb.id)
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0);
 
     let chunk_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM kb_chunks WHERE kb_id = ?")
         .bind(&kb.id)
@@ -478,21 +471,19 @@ async fn get_knowledge_base_stats(pool: &SqlitePool, args: Value) -> ToolCallRes
         .await
         .unwrap_or(0);
 
-    let total_chars: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(char_count), 0) FROM kb_documents WHERE kb_id = ?",
-    )
-    .bind(&kb.id)
-    .fetch_one(pool)
-    .await
-    .unwrap_or(0);
+    let total_chars: i64 =
+        sqlx::query_scalar("SELECT COALESCE(SUM(char_count), 0) FROM kb_documents WHERE kb_id = ?")
+            .bind(&kb.id)
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0);
 
-    let total_tokens: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(token_count), 0) FROM kb_chunks WHERE kb_id = ?",
-    )
-    .bind(&kb.id)
-    .fetch_one(pool)
-    .await
-    .unwrap_or(0);
+    let total_tokens: i64 =
+        sqlx::query_scalar("SELECT COALESCE(SUM(token_count), 0) FROM kb_chunks WHERE kb_id = ?")
+            .bind(&kb.id)
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0);
 
     ToolCallResult::text(format!(
         "知识库「{name}」统计：\n\n- ID: `{id}`\n- 描述: {desc}\n- 嵌入模型: {model}（渠道 {channel}）\n- 状态: {status}\n- 已就绪文档: {docs}\n- 分片总数: {chunks}\n- 总字符数: {chars}\n- 总 token 数: {tokens}\n",
@@ -514,7 +505,10 @@ async fn get_knowledge_base_stats(pool: &SqlitePool, args: Value) -> ToolCallRes
 // -----------------------------------------------------------------------------
 
 /// 校验 KB 存在 + 已开启 MCP 暴露；返回完整行供上层做向量化等后续操作。
-async fn require_exposed_kb(pool: &SqlitePool, kb_id: &str) -> Result<KnowledgeBaseRow, JsonRpcError> {
+async fn require_exposed_kb(
+    pool: &SqlitePool,
+    kb_id: &str,
+) -> Result<KnowledgeBaseRow, JsonRpcError> {
     if kb_id.is_empty() {
         return Err(JsonRpcError {
             code: ERR_MCP_KB_NOT_FOUND,
@@ -527,9 +521,7 @@ async fn require_exposed_kb(pool: &SqlitePool, kb_id: &str) -> Result<KnowledgeB
             .bind(kb_id)
             .fetch_optional(pool)
             .await
-            .map_err(|e| {
-                JsonRpcError::internal_error(format!("查询知识库失败: {}", e))
-            })?;
+            .map_err(|e| JsonRpcError::internal_error(format!("查询知识库失败: {}", e)))?;
     let row = row.ok_or_else(|| JsonRpcError {
         code: ERR_MCP_KB_NOT_FOUND,
         message: format!("知识库不存在: {}", kb_id),
@@ -691,8 +683,10 @@ mod tests {
         };
 
         assert!(text.contains("kb-public"), "应包含已暴露 KB");
-        assert!(!text.contains("kb-private"), "不应包含未暴露 KB（核心安全关卡）");
+        assert!(
+            !text.contains("kb-private"),
+            "不应包含未暴露 KB（核心安全关卡）"
+        );
         assert!(!text.contains("kb-disabled"), "不应包含已禁用的 KB");
     }
 }
-

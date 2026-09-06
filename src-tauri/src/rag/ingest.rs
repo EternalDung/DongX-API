@@ -38,9 +38,7 @@ pub async fn ingest_text(
 
     // 去重：内容哈希相同且已就绪的文档视为同一份，直接复用。
     let hash = content_hash(text);
-    if let Some((document_id, chunk_count)) =
-        find_document_by_hash(pool, kb_id, &hash).await?
-    {
+    if let Some((document_id, chunk_count)) = find_document_by_hash(pool, kb_id, &hash).await? {
         return Ok(IngestResult {
             document_id,
             chunk_count: chunk_count.max(0) as usize,
@@ -62,11 +60,15 @@ pub async fn ingest_text(
         return Err(AppError::Validation("分块后无可用内容".into()));
     }
     let contents: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
-    let (vecs, token_count) = embed_texts(pool, &kb.embedding_channel_id, &kb.embedding_model, contents).await?;
+    let (vecs, token_count) = embed_texts(
+        pool,
+        &kb.embedding_channel_id,
+        &kb.embedding_model,
+        contents,
+    )
+    .await?;
     if vecs.len() != chunks.len() {
-        return Err(AppError::Proxy(
-            "嵌入返回的向量数量与分块数量不一致".into(),
-        ));
+        return Err(AppError::Proxy("嵌入返回的向量数量与分块数量不一致".into()));
     }
     let inputs: Vec<ChunkInput> = chunks
         .into_iter()

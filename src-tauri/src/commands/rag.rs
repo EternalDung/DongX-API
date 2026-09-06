@@ -9,10 +9,10 @@
 //! 嵌入渠道在创建时按「启用 + OpenAI 系 + 勾选 Embeddings 端点」自动解析，
 //! 因此 `KnowledgeBaseInput` 只需 `name / description / embedding_model`。
 
-use crate::AppState;
 use crate::rag::ask::AskResult;
 use crate::rag::ingest::IngestResult;
 use crate::rag::retrieve::RetrievalMode;
+use crate::AppState;
 use serde::Serialize;
 use sqlx::Row;
 use std::sync::Arc;
@@ -60,6 +60,7 @@ pub struct KnowledgeBaseInput {
     /// 绑定的嵌入渠道。省略（或为空）时由 [`resolve_embedding_channel`]
     /// 自动挑选，保持「只传模型」的老调用方式继续可用。
     #[serde(default)]
+    #[allow(dead_code)]
     pub embedding_channel_id: Option<String>,
 }
 
@@ -160,8 +161,7 @@ pub struct KnowledgeBaseUpdate {
 /// OpenAI 兼容渠道（按优先级、创建时间排序）。取优先级最高、创建最早的那个。
 async fn resolve_embedding_channel(pool: &sqlx::SqlitePool) -> Result<String, String> {
     // 兼容渠道 type 白名单（常量，无用户输入，可安全拼接到 SQL）。
-    const COMPATIBLE: &str =
-        "'openai','deepseek','qwen','zhipu','doubao','moonshot','custom'";
+    const COMPATIBLE: &str = "'openai','deepseek','qwen','zhipu','doubao','moonshot','custom'";
     let sql = format!(
         "SELECT id FROM channels \
          WHERE status = 1 AND type IN ({COMPATIBLE}) \
@@ -546,8 +546,8 @@ pub async fn list_documents(
     )
     .bind(&kb_id)
     .fetch_all(&state.db)
-        .await
-        .map_err(|e| e.to_string())?;
+    .await
+    .map_err(|e| e.to_string())?;
     Ok(rows)
 }
 
@@ -622,10 +622,7 @@ pub async fn list_document_chunks(
 
 /// 删除文档，并级联删除其下全部向量分块（本项目未开 FK，需手动级联）。
 #[tauri::command]
-pub async fn delete_document(
-    state: State<'_, Arc<AppState>>,
-    id: String,
-) -> Result<(), String> {
+pub async fn delete_document(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
     let pool = &state.db;
     // 同步清理 FTS5 索引后再删文档行
     crate::rag::store::purge_document_chunks(pool, &id)
@@ -757,9 +754,7 @@ pub async fn import_source(
     let kb_id2 = kb_id.clone();
     let source_id = id.clone();
     tauri::async_runtime::spawn(async move {
-        if let Err(e) =
-            crate::rag::importer::run_import(pool2, kb_id2, source_id, resolved).await
-        {
+        if let Err(e) = crate::rag::importer::run_import(pool2, kb_id2, source_id, resolved).await {
             tracing::error!("来源导入后台任务异常: {}", e);
         }
     });
@@ -799,21 +794,17 @@ pub async fn list_sources(
 /// 删除来源即移除「该次导入」的所有文档：按 `source_ref` 前缀
 /// `<source_id>::` 定位本次导入产生的文档并清理，避免孤儿分块。
 #[tauri::command]
-pub async fn delete_source(
-    state: State<'_, Arc<AppState>>,
-    id: String,
-) -> Result<(), String> {
+pub async fn delete_source(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
     let pool = &state.db;
 
     // 先按 source_ref 前缀清理本次导入的文档与分块
     let prefix = format!("{}::", id);
-    let ids: Vec<String> = sqlx::query_scalar(
-        "SELECT id FROM kb_documents WHERE source_ref LIKE ? ESCAPE '\\'",
-    )
-    .bind(format!("{}%", prefix))
-    .fetch_all(pool)
-    .await
-    .map_err(|e| e.to_string())?;
+    let ids: Vec<String> =
+        sqlx::query_scalar("SELECT id FROM kb_documents WHERE source_ref LIKE ? ESCAPE '\\'")
+            .bind(format!("{}%", prefix))
+            .fetch_all(pool)
+            .await
+            .map_err(|e| e.to_string())?;
     for doc_id in ids {
         crate::rag::store::purge_document_chunks(pool, &doc_id)
             .await
@@ -885,9 +876,10 @@ pub async fn retrieve_kb(
     };
 
     let k = top_k.unwrap_or(5).max(1) as usize;
-    let hits = crate::rag::retrieve::retrieve(pool, &[kb_id.clone()], &q, &q_vec, k, mode, kw)
-        .await
-        .map_err(|e| e.to_string())?;
+    let hits =
+        crate::rag::retrieve::retrieve(pool, std::slice::from_ref(&kb_id), &q, &q_vec, k, mode, kw)
+            .await
+            .map_err(|e| e.to_string())?;
 
     Ok(hits
         .into_iter()
@@ -990,20 +982,19 @@ pub async fn reindex_kb(
         .map_err(|e| e.to_string())?;
 
     // 读全部分块（无论是否已向量化，都按当前模型重嵌）
-    let rows: Vec<(String, String)> = sqlx::query(
-        "SELECT id, content FROM kb_chunks WHERE kb_id = ? ORDER BY seq ASC",
-    )
-    .bind(&kb_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| e.to_string())?
-    .into_iter()
-    .map(|r: sqlx::sqlite::SqliteRow| {
-        let id: String = r.try_get("id").unwrap_or_default();
-        let content: String = r.try_get("content").unwrap_or_default();
-        (id, content)
-    })
-    .collect();
+    let rows: Vec<(String, String)> =
+        sqlx::query("SELECT id, content FROM kb_chunks WHERE kb_id = ? ORDER BY seq ASC")
+            .bind(&kb_id)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|r: sqlx::sqlite::SqliteRow| {
+                let id: String = r.try_get("id").unwrap_or_default();
+                let content: String = r.try_get("content").unwrap_or_default();
+                (id, content)
+            })
+            .collect();
 
     if rows.is_empty() {
         return compute_index_status(pool, &kb_id).await;
@@ -1025,17 +1016,14 @@ pub async fn reindex_kb(
             return Err("重建索引时嵌入返回的向量数量与分块数量不一致".to_string());
         }
         for ((id, _), emb) in chunk.iter().zip(vecs) {
-            let emb_json =
-                serde_json::to_string(&emb).map_err(|e| e.to_string())?;
-            sqlx::query(
-                "UPDATE kb_chunks SET embedding = ?, embedding_model = ? WHERE id = ?",
-            )
-            .bind(emb_json)
-            .bind(&kb.embedding_model)
-            .bind(id)
-            .execute(pool)
-            .await
-            .map_err(|e| e.to_string())?;
+            let emb_json = serde_json::to_string(&emb).map_err(|e| e.to_string())?;
+            sqlx::query("UPDATE kb_chunks SET embedding = ?, embedding_model = ? WHERE id = ?")
+                .bind(emb_json)
+                .bind(&kb.embedding_model)
+                .bind(id)
+                .execute(pool)
+                .await
+                .map_err(|e| e.to_string())?;
         }
     }
 

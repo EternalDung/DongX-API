@@ -22,14 +22,14 @@ pub struct ChannelRow {
     #[serde(rename = "type")]
     pub channel_type: String, // openai | deepseek | claude | gemini | zhipu | ollama | custom
     pub base_url: String,
-    pub cred_encrypted: String,      // AES-GCM ciphertext of upstream API key
-    pub models: String,              // JSON array string
-    pub status: i32,                 // 0=disabled 1=enabled 2=error
+    pub cred_encrypted: String, // AES-GCM ciphertext of upstream API key
+    pub models: String,         // JSON array string
+    pub status: i32,            // 0=disabled 1=enabled 2=error
     pub priority: i32,
     pub weight: i32,
-    pub config: String,              // JSON object string
-    pub model_mapping: String,       // JSON object string
-    pub endpoints: String,           // JSON array string
+    pub config: String,        // JSON object string
+    pub model_mapping: String, // JSON object string
+    pub endpoints: String,     // JSON array string
     pub created_at: String,
     pub updated_at: String,
     pub last_test_at: Option<String>,
@@ -43,12 +43,12 @@ pub struct ChannelRow {
 pub struct GatewayKeyRow {
     pub id: String,
     pub name: String,
-    pub key: String,            // plaintext gateway key (local single-user, stored as-is)
-    pub key_hash: String,       // DEPRECATED: unused since plaintext storage; always ""
-    pub status: i32,            // 0=disabled 1=active 2=expired
-    pub allowed_models: String,   // JSON array string
+    pub key: String,      // plaintext gateway key (local single-user, stored as-is)
+    pub key_hash: String, // DEPRECATED: unused since plaintext storage; always ""
+    pub status: i32,      // 0=disabled 1=active 2=expired
+    pub allowed_models: String, // JSON array string
     pub allowed_channels: String, // JSON array string
-    pub quota_limit: i64,       // 0 = unlimited
+    pub quota_limit: i64, // 0 = unlimited
     pub quota_used: i64,
     pub expires_at: Option<String>,
     pub created_at: String,
@@ -67,7 +67,7 @@ pub struct RequestLogRow {
     pub channel_name: Option<String>,
     pub model: String,
     pub upstream_model: Option<String>,
-    pub mode: String,                    // chat | completion | embedding | other
+    pub mode: String, // chat | completion | embedding | other
     pub status_code: i32,
     pub prompt_tokens: i64,
     pub completion_tokens: i64,
