@@ -58,7 +58,7 @@ mod tests {
         let out = redact(&v);
         assert_eq!(out["name"].as_str().unwrap(), "alice");
         assert_eq!(out["age"].as_i64().unwrap(), 30);
-        assert_eq!(out["ok"].as_bool().unwrap(), true);
+        assert!(out["ok"].as_bool().unwrap());
     }
 
     #[test]

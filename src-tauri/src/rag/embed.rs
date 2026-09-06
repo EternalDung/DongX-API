@@ -126,6 +126,6 @@ mod tests {
     fn batch_size_is_conservative() {
         // 上游单批上限常见为 10~20，切批大小必须不超过最严格的上限，
         // 否则大文档摄入会被上游 400（batch size is invalid）拒绝。
-        assert!(EMBED_BATCH_SIZE <= 10);
+        const { assert!(EMBED_BATCH_SIZE <= 10); }
     }
 }
