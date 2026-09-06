@@ -7,7 +7,7 @@ import {
   KeyRound,
   RefreshCw,
   CheckCircle2,
-  Ban,
+  Power,
   AlertTriangle,
   Activity,
   Clock,
@@ -55,7 +55,7 @@ function formatExpiry(exp: string | null): { text: string; expired: boolean } {
 const KEY_TONE: Record<number, { tone: StatusTone; label: string }> = {
   1: { tone: "success", label: "启用" },
   2: { tone: "warning", label: "过期" },
-  0: { tone: "secondary", label: "禁用" },
+  0: { tone: "warning", label: "禁用" },
 };
 
 export function ApiKeysPage() {
@@ -290,35 +290,25 @@ export function ApiKeysPage() {
                         <Copy />
                         复制
                       </Button>
-                      {k.status === 1 ? (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => handleSetStatus(k, 0)}
-                          title="禁用该密钥"
-                        >
-                          <Ban />
-                          禁用
-                        </Button>
-                      ) : (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => handleSetStatus(k, 1)}
-                          title="启用该密钥"
-                        >
-                          <CheckCircle2 />
-                          启用
-                        </Button>
-                      )}
                       <Button
                         variant="ghost"
                         size="sm"
+                        onClick={() => handleSetStatus(k, k.status === 1 ? 0 : 1)}
+                        title={k.status === 1 ? "禁用该密钥" : "启用该密钥"}
+                      >
+                        <Power
+                          className={k.status === 1 ? "text-success" : "text-warning"}
+                        />
+                        {k.status === 1 ? "禁用" : "启用"}
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        title="删除密钥"
                         className="text-destructive hover:bg-destructive/10 hover:text-destructive"
                         onClick={() => setDeleteTarget(k)}
                       >
                         <Trash2 />
-                        删除
                       </Button>
                     </div>
                   </div>
