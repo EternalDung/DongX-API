@@ -68,7 +68,7 @@ async fn do_ingest(pool: &SqlitePool, src: &store::WikiSource) -> Result<(usize,
 
     let mut page_count = 0usize;
     for f in &files {
-        let content = match fs::read_to_string(f) {
+        let content = match tokio::fs::read_to_string(f).await {
             Ok(c) => c,
             Err(_) => continue, // 跳过非 UTF-8 / 二进制
         };

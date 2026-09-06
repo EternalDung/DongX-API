@@ -1,7 +1,6 @@
 use crate::db::repository::settings as settings_repo;
 use crate::AppState;
 use serde::{Deserialize, Serialize};
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -197,9 +196,11 @@ const APPS: &[AppDef] = &[
 
 // ── 原子写入（temp + rename，绝对不覆盖用户其它配置） ──
 
-fn atomic_write(path: &Path, data: &[u8]) -> Result<(), String> {
+async fn atomic_write(path: &Path, data: &[u8]) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {e}"))?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| format!("创建目录失败: {e}"))?;
     }
     let tmp = path.with_extension(format!(
         "tmp.{}",
@@ -208,22 +209,28 @@ fn atomic_write(path: &Path, data: &[u8]) -> Result<(), String> {
             .unwrap_or_default()
             .as_nanos()
     ));
-    fs::write(&tmp, data).map_err(|e| format!("写入临时文件失败: {e}"))?;
-    fs::rename(&tmp, path).map_err(|e| {
-        let _ = fs::remove_file(&tmp);
+    tokio::fs::write(&tmp, data)
+        .await
+        .map_err(|e| format!("写入临时文件失败: {e}"))?;
+    tokio::fs::rename(&tmp, path)
+        .await
+        .map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
         format!("替换文件失败: {e}")
     })?;
     Ok(())
 }
 
-fn read_json_file<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
-    let content = fs::read_to_string(path).map_err(|e| format!("读取文件失败: {e}"))?;
+async fn read_json_file<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
+    let content = tokio::fs::read_to_string(path)
+        .await
+        .map_err(|e| format!("读取文件失败: {e}"))?;
     serde_json::from_str(&content).map_err(|e| format!("解析 JSON 失败: {e}"))
 }
 
-fn write_json_file<T: Serialize>(path: &Path, data: &T) -> Result<(), String> {
+async fn write_json_file<T: Serialize>(path: &Path, data: &T) -> Result<(), String> {
     let json = to_pretty_json(data).map_err(|e| format!("序列化 JSON 失败: {e}"))?;
-    atomic_write(path, json.as_bytes())
+    atomic_write(path, json.as_bytes()).await
 }
 
 /// 自定义 JSON pretty printer，保留 non-ASCII 字符（中文等）原文不转义
@@ -320,20 +327,20 @@ fn backup_path(config_path: &Path) -> PathBuf {
     config_path.with_file_name(name)
 }
 
-fn backup_config(config_path: &Path) -> Result<(), String> {
+async fn backup_config(config_path: &Path) -> Result<(), String> {
     if config_path.exists() {
-        let content = fs::read(config_path).map_err(|e| format!("读取配置失败: {e}"))?;
-        atomic_write(&backup_path(config_path), &content)?;
+        let content = tokio::fs::read(config_path).await.map_err(|e| format!("读取配置失败: {e}"))?;
+        atomic_write(&backup_path(config_path), &content).await?;
     }
     Ok(())
 }
 
-fn restore_config(config_path: &Path) -> Result<(), String> {
+async fn restore_config(config_path: &Path) -> Result<(), String> {
     let backup = backup_path(config_path);
     if backup.exists() {
-        let content = fs::read(&backup).map_err(|e| format!("读取备份失败: {e}"))?;
-        atomic_write(config_path, &content)?;
-        let _ = fs::remove_file(&backup);
+        let content = tokio::fs::read(&backup).await.map_err(|e| format!("读取备份失败: {e}"))?;
+        atomic_write(config_path, &content).await?;
+        let _ = tokio::fs::remove_file(&backup).await;
         Ok(())
     } else {
         Err("没有找到备份文件，可能此前没有可恢复的原始配置".to_string())
@@ -356,7 +363,7 @@ async fn get_dongx_url(state: &AppState) -> String {
 
 // ── 各客户端配置写入逻辑（合并三段：base_url + api_key + model） ──
 
-fn write_claude_code(
+async fn write_claude_code(
     config_dir: &Path,
     dongx_url: &str,
     dongx_key: &str,
@@ -364,7 +371,7 @@ fn write_claude_code(
 ) -> Result<(), String> {
     let settings_path = config_dir.join("settings.json");
     let mut settings: serde_json::Value = if settings_path.exists() {
-        read_json_file(&settings_path).unwrap_or_else(|_| serde_json::json!({}))
+        read_json_file(&settings_path).await.unwrap_or_else(|_| serde_json::json!({}))
     } else {
         serde_json::json!({})
     };
@@ -381,10 +388,10 @@ fn write_claude_code(
         obj.insert("_dongx".to_string(), serde_json::json!(true));
     }
 
-    write_json_file(&settings_path, &settings)
+    write_json_file(&settings_path, &settings).await
 }
 
-fn write_codex(
+async fn write_codex(
     config_dir: &Path,
     dongx_url: &str,
     dongx_key: &str,
@@ -396,7 +403,7 @@ fn write_codex(
     // 不写 auth.json 的 OPENAI_API_KEY，避免 Codex 拿它去 OpenAI 验证。
     let config_path = config_dir.join("config.toml");
     let existing_text = if config_path.exists() {
-        std::fs::read_to_string(&config_path)
+        tokio::fs::read_to_string(&config_path).await
             .map_err(|e| format!("Failed to read config.toml: {e}"))?
     } else {
         String::new()
@@ -436,11 +443,11 @@ fn write_codex(
         }
     }
 
-    atomic_write(&config_path, doc.to_string().as_bytes())?;
+    atomic_write(&config_path, doc.to_string().as_bytes()).await?;
     Ok(())
 }
 
-fn write_opencode(
+async fn write_opencode(
     config_dir: &Path,
     dongx_url: &str,
     dongx_key: &str,
@@ -448,7 +455,7 @@ fn write_opencode(
 ) -> Result<(), String> {
     let config_path = config_dir.join("opencode.json");
     let mut config: serde_json::Value = if config_path.exists() {
-        read_json_file(&config_path).unwrap_or_else(|_| serde_json::json!({}))
+        read_json_file(&config_path).await.unwrap_or_else(|_| serde_json::json!({}))
     } else {
         serde_json::json!({"$schema": "https://opencode.ai/config.json"})
     };
@@ -475,10 +482,10 @@ fn write_opencode(
         }
     }
 
-    write_json_file(&config_path, &config)
+    write_json_file(&config_path, &config).await
 }
 
-fn write_openclaw(
+async fn write_openclaw(
     config_dir: &Path,
     dongx_url: &str,
     dongx_key: &str,
@@ -486,7 +493,7 @@ fn write_openclaw(
 ) -> Result<(), String> {
     let config_path = config_dir.join("config.json");
     let mut config: serde_json::Value = if config_path.exists() {
-        read_json_file(&config_path).unwrap_or_else(|_| serde_json::json!({}))
+        read_json_file(&config_path).await.unwrap_or_else(|_| serde_json::json!({}))
     } else {
         serde_json::json!({})
     };
@@ -501,10 +508,10 @@ fn write_openclaw(
         obj.insert("_dongx".to_string(), serde_json::json!(true));
     }
 
-    write_json_file(&config_path, &config)
+    write_json_file(&config_path, &config).await
 }
 
-fn write_hermes(
+async fn write_hermes(
     config_dir: &Path,
     dongx_url: &str,
     dongx_key: &str,
@@ -512,7 +519,7 @@ fn write_hermes(
 ) -> Result<(), String> {
     let config_path = config_dir.join("config.json");
     let mut config: serde_json::Value = if config_path.exists() {
-        read_json_file(&config_path).unwrap_or_else(|_| serde_json::json!({}))
+        read_json_file(&config_path).await.unwrap_or_else(|_| serde_json::json!({}))
     } else {
         serde_json::json!({})
     };
@@ -550,16 +557,16 @@ fn write_hermes(
         }
     }
 
-    write_json_file(&config_path, &config)
+    write_json_file(&config_path, &config).await
 }
 
 // ── 检测是否已由 DongX 配置（applied 状态，独立于 available） ──
 
-fn detect_applied(config_path: &Path, app_name: &str) -> bool {
+async fn detect_applied(config_path: &Path, app_name: &str) -> bool {
     if !config_path.exists() {
         return false;
     }
-    let content = match fs::read_to_string(config_path) {
+    let content = match tokio::fs::read_to_string(config_path).await {
         Ok(c) => c,
         Err(_) => return false,
     };
@@ -601,30 +608,28 @@ fn detect_applied(config_path: &Path, app_name: &str) -> bool {
 
 #[tauri::command]
 pub async fn get_client_configs() -> Result<Vec<ClientInfo>, String> {
-    let apps: Vec<ClientInfo> = APPS
-        .iter()
-        .map(|app| {
-            let config_dir = (app.config_dir_fn)();
-            let config_path = config_dir.join(app.config_file);
-            // installed = 探测到 CLI；available = 已装 CLI 或已有配置文件（可写入）
-            let installed = detect_cli(app);
-            let available = installed || config_path.exists();
-            let applied = detect_applied(&config_path, app.name);
+    let mut apps: Vec<ClientInfo> = Vec::with_capacity(APPS.len());
+    for app in APPS.iter() {
+        let config_dir = (app.config_dir_fn)();
+        let config_path = config_dir.join(app.config_file);
+        // installed = 探测到 CLI；available = 已装 CLI 或已有配置文件（可写入）
+        let installed = detect_cli(app);
+        let available = installed || config_path.exists();
+        let applied = detect_applied(&config_path, app.name).await;
 
-            ClientInfo {
-                name: app.name.to_string(),
-                label: app.label.to_string(),
-                icon: app.icon.to_string(),
-                description: app.description.to_string(),
-                config_path: config_path.to_string_lossy().to_string(),
-                config_format: app.config_format.to_string(),
-                available,
-                installed,
-                applied,
-                download_url: app.download_url.to_string(),
-            }
-        })
-        .collect();
+        apps.push(ClientInfo {
+            name: app.name.to_string(),
+            label: app.label.to_string(),
+            icon: app.icon.to_string(),
+            description: app.description.to_string(),
+            config_path: config_path.to_string_lossy().to_string(),
+            config_format: app.config_format.to_string(),
+            available,
+            installed,
+            applied,
+            download_url: app.download_url.to_string(),
+        });
+    }
 
     Ok(apps)
 }
@@ -648,14 +653,14 @@ pub async fn apply_client_config(
     let config_path = config_dir.join(app_def.config_file);
 
     // 写入前先备份原始配置（供「恢复原始配置」使用）
-    let _ = backup_config(&config_path);
+    let _ = backup_config(&config_path).await;
 
     let result = match app_name.as_str() {
-        "claude-code" => write_claude_code(&config_dir, &dongx_url, &api_key, &model),
-        "codex" => write_codex(&config_dir, &dongx_url, &api_key, &model),
-        "opencode" => write_opencode(&config_dir, &dongx_url, &api_key, &model),
-        "openclaw" => write_openclaw(&config_dir, &dongx_url, &api_key, &model),
-        "hermes" => write_hermes(&config_dir, &dongx_url, &api_key, &model),
+        "claude-code" => write_claude_code(&config_dir, &dongx_url, &api_key, &model).await,
+        "codex" => write_codex(&config_dir, &dongx_url, &api_key, &model).await,
+        "opencode" => write_opencode(&config_dir, &dongx_url, &api_key, &model).await,
+        "openclaw" => write_openclaw(&config_dir, &dongx_url, &api_key, &model).await,
+        "hermes" => write_hermes(&config_dir, &dongx_url, &api_key, &model).await,
         _ => return Err(format!("不支持的客户端: {app_name}")),
     };
 
@@ -666,7 +671,7 @@ pub async fn apply_client_config(
         }),
         Err(e) => {
             // 写入失败回滚到备份
-            let _ = restore_config(&config_path);
+            let _ = restore_config(&config_path).await;
             Ok(ApplyResult {
                 success: false,
                 message: e,
@@ -685,7 +690,7 @@ pub async fn restore_client_config(app_name: String) -> Result<ApplyResult, Stri
     let config_dir = (app_def.config_dir_fn)();
     let config_path = config_dir.join(app_def.config_file);
 
-    match restore_config(&config_path) {
+    match restore_config(&config_path).await {
         Ok(()) => Ok(ApplyResult {
             success: true,
             message: format!("已恢复 {} 的原始配置", app_def.label),
@@ -715,7 +720,7 @@ pub async fn get_client_config_content(app_name: String) -> Result<ConfigContent
         });
     }
 
-    match fs::read_to_string(&config_path) {
+    match tokio::fs::read_to_string(&config_path).await {
         Ok(content) => Ok(ConfigContent {
             exists: true,
             content,
