@@ -200,6 +200,10 @@ export const channelApi = {
    *  Tauri v2 约定：Rust 参数 channel_name 在 JS 端用 camelCase channelName。 */
   stats: (channelName: string): Promise<ChannelStats> =>
     invoke<ChannelStats>("get_channel_stats", { channelName }),
+
+  /** 启用 / 禁用渠道（status: 0=禁用 1=启用）。 */
+  setStatus: (id: string, status: number): Promise<void> =>
+    invoke<void>("set_channel_status", { id, status }),
 };
 
 // ============================================================

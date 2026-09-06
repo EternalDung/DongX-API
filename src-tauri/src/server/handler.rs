@@ -284,7 +284,7 @@ async fn run_chat_pipeline(
             match acquire_stream_response(&*adaptor, &proxy_req, &config).await {
                 Ok(resp) => {
                     // 2xx 流已建立 → 成功，跳出循环交给 serve_stream。
-                    record_upstream_outcome(&state, &selected.id, true, false, "").await;
+                    record_upstream_outcome(&state, is_stream, &selected.id, true, false, "").await;
                     success = Some(Success::Stream {
                         selected,
                         upstream_model,
@@ -318,6 +318,7 @@ async fn run_chat_pipeline(
                     // 按上游状态分类：5xx/429/408/409 计入熔断，其余 4xx 不计。
                     record_upstream_outcome(
                         &state,
+                        is_stream,
                         &selected.id,
                         false,
                         outcome.retryable,
@@ -334,7 +335,7 @@ async fn run_chat_pipeline(
         } else {
             match adaptor.forward(&proxy_req, &config).await {
                 Ok((status, resp_body, usage)) => {
-                    record_upstream_outcome(&state, &selected.id, true, false, "").await;
+                    record_upstream_outcome(&state, is_stream, &selected.id, true, false, "").await;
                     success = Some(Success::NonStream {
                         selected,
                         status,
@@ -369,7 +370,7 @@ async fn run_chat_pipeline(
                         sec_findings.clone(),
                     );
                     // 上游连接/超时失败 → 可重试，计入熔断。
-                    record_upstream_outcome(&state, &selected.id, false, true, &msg).await;
+                    record_upstream_outcome(&state, is_stream, &selected.id, false, true, &msg).await;
                     fo.observe(failover::Outcome::connection(msg));
                     if fo.should_retry() {
                         continue;
@@ -728,7 +729,7 @@ pub async fn embeddings(
 
         match adaptor.forward_embeddings(&proxy_req, &config).await {
             Ok((status, resp_body)) => {
-                record_upstream_outcome(&state, &selected.id, true, false, "").await;
+                record_upstream_outcome(&state, false, &selected.id, true, false, "").await;
 
                 // 嵌入用量以 prompt_tokens 计（OpenAI 返回 usage.prompt_tokens）。
                 let usage = resp_body
@@ -768,7 +769,7 @@ pub async fn embeddings(
             }
             Err(e) => {
                 let msg = e.to_string();
-                record_upstream_outcome(&state, &selected.id, false, true, &msg).await;
+                record_upstream_outcome(&state, false, &selected.id, false, true, &msg).await;
                 fo.observe(failover::Outcome::connection(msg.clone()));
                 last_err = Some(msg);
                 if fo.should_retry() {
@@ -1097,15 +1098,18 @@ fn is_retryable_status(status: Option<u16>) -> bool {
 /// 必须忽略错误：健康统计不能影响响应路径（与配额扣减同理）。
 async fn record_upstream_outcome(
     state: &Arc<AppState>,
+    is_stream: bool,
     channel_id: &str,
     success: bool,
     retryable: bool,
     reason: &str,
 ) {
+    // 按 mode（流式/非流式）维度独立更新熔断器（方案 A）。
+    let mode = channel_health::mode_key(is_stream);
     if success {
-        let _ = channel_health::record_success(&state.db, channel_id).await;
+        let _ = channel_health::record_success(&state.db, channel_id, mode).await;
     } else if retryable {
-        let _ = channel_health::record_failure(&state.db, channel_id, reason).await;
+        let _ = channel_health::record_failure(&state.db, channel_id, mode, reason).await;
     }
 }
 

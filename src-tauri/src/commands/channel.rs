@@ -214,6 +214,26 @@ pub async fn delete_channel(
     Ok(())
 }
 
+/// 启用 / 禁用渠道。status 仅允许 0（禁用）或 1（启用）；
+/// 2=error 是自动熔断的语义，不通过手动接口暴露。
+#[tauri::command]
+pub async fn set_channel_status(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    status: i64,
+) -> AppResult<()> {
+    if status != 0 && status != 1 {
+        return Err(AppError::Validation(
+            "status 仅允许 0（禁用）或 1（启用）".into(),
+        ));
+    }
+    let affected = channels::set_status(&state.db, &id, status as i32).await?;
+    if affected == 0 {
+        return Err(AppError::NotFound(format!("渠道不存在: {id}")));
+    }
+    Ok(())
+}
+
 /// Test channel connectivity by issuing a minimal upstream request.
 ///
 /// Returns `true` if the adaptor reports success; the result is also

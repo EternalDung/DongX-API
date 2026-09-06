@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, Fragment } from "react";
-import { Plus, Pencil, Trash2, Zap, RefreshCw, Network, AlertTriangle, ChevronDown, ChevronRight, X } from "lucide-react";
+import { Plus, Pencil, Trash2, Zap, RefreshCw, Network, AlertTriangle, ChevronDown, ChevronRight, X, Power } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -78,7 +78,7 @@ function defaultEndpointsFor(protocol: ChannelProtocol): ChannelEndpoint[] {
 const CHANNEL_TONE: Record<number, { tone: StatusTone; label: string }> = {
   1: { tone: "success", label: "启用" },
   2: { tone: "destructive", label: "异常" },
-  0: { tone: "secondary", label: "禁用" },
+  0: { tone: "warning", label: "禁用" },
 };
 
 interface KeyRow {
@@ -250,6 +250,19 @@ export function ChannelsPage() {
       timeout_secs: (ch.config as Record<string, number>)?.timeout_secs ?? 30,
     });
     setDialogOpen(true);
+  };
+
+  // 启用 / 禁用渠道：手动下线后该渠道在路由与熔断重试中均不再被选中。
+  const handleToggleStatus = async (ch: Channel) => {
+    const next = ch.status === 1 ? 0 : 1;
+    try {
+      await channelApi.setStatus(ch.id, next);
+      toast.success(next === 1 ? "渠道已启用" : "渠道已禁用");
+      await load();
+    } catch (e) {
+      console.error("Failed to toggle channel status:", e);
+      toast.error("渠道状态切换失败");
+    }
   };
 
   // The preset currently reflected by the form (used for highlight + defaults).
@@ -598,6 +611,16 @@ export function ChannelsPage() {
                         <Button variant="ghost" size="sm" onClick={() => openEdit(ch)}>
                           <Pencil />
                           编辑
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleToggleStatus(ch)}
+                        >
+                          <Power
+                            className={ch.status === 1 ? "text-success" : "text-warning"}
+                          />
+                          {ch.status === 1 ? "禁用" : "启用"}
                         </Button>
                         <Button
                           variant="ghost"

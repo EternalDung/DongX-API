@@ -94,6 +94,7 @@ pub fn run() {
             commands::channel::create_channel,
             commands::channel::update_channel,
             commands::channel::delete_channel,
+            commands::channel::set_channel_status,
             commands::channel::test_channel,
             commands::channel::list_provider_presets,
             commands::channel::list_provider_models,

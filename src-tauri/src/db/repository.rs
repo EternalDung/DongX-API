@@ -164,6 +164,21 @@ pub mod channels {
         .fetch_all(pool)
         .await
     }
+
+    /// 启用 / 禁用渠道（status: 0=禁用 1=启用）。调用方负责校验取值合法。
+    pub async fn set_status(
+        pool: &SqlitePool,
+        id: &str,
+        status: i32,
+    ) -> Result<u64, sqlx::Error> {
+        let res = sqlx::query("UPDATE channels SET status = ?, updated_at = ? WHERE id = ?")
+            .bind(status)
+            .bind(now())
+            .bind(id)
+            .execute(pool)
+            .await?;
+        Ok(res.rows_affected())
+    }
 }
 
 // ============================================================
@@ -694,23 +709,31 @@ pub mod channel_health {
         pub last_failure_reason: Option<String>,
     }
 
+    /// 熔断粒度键：流式请求与非流式请求各自独立熔断（方案 A）。
+    /// 同一渠道的 SSE 端点坏了，不影响非流式路径被选中。
+    pub fn mode_key(is_stream: bool) -> &'static str {
+        if is_stream { "stream" } else { "nonstream" }
+    }
+
     pub async fn get(
         pool: &SqlitePool,
         channel_id: &str,
+        mode: &str,
     ) -> Result<Option<ChannelHealthRow>, sqlx::Error> {
         sqlx::query_as::<_, ChannelHealthRow>(
             "SELECT channel_id, consecutive_failures, cooldown_until, \
              last_failure_at, last_failure_reason \
-             FROM channel_health WHERE channel_id = ?",
+             FROM channel_health WHERE channel_id = ?1 AND mode = ?2",
         )
         .bind(channel_id)
+        .bind(mode)
         .fetch_optional(pool)
         .await
     }
 
-    /// 熔断器是否处于打开状态（cooldown_until 仍指向未来）。
-    pub async fn is_open(pool: &SqlitePool, channel_id: &str) -> bool {
-        match get(pool, channel_id).await {
+    /// 熔断器是否处于打开状态（cooldown_until 仍指向未来），按 mode 维度判断。
+    pub async fn is_open(pool: &SqlitePool, channel_id: &str, mode: &str) -> bool {
+        match get(pool, channel_id, mode).await {
             Ok(Some(row)) => match &row.cooldown_until {
                 Some(s) => DateTime::parse_from_rfc3339(s)
                     .map(|t| t.timestamp() > Utc::now().timestamp())
@@ -726,9 +749,10 @@ pub mod channel_health {
     pub async fn record_failure(
         pool: &SqlitePool,
         channel_id: &str,
+        mode: &str,
         reason: &str,
     ) -> Result<(), sqlx::Error> {
-        let failures = get(pool, channel_id).await?.map(|r| r.consecutive_failures).unwrap_or(0)
+        let failures = get(pool, channel_id, mode).await?.map(|r| r.consecutive_failures).unwrap_or(0)
             + 1;
         let (cooldown, last_at, last_reason) = if failures >= FAILURE_THRESHOLD as i64 {
             (
@@ -741,15 +765,16 @@ pub mod channel_health {
         };
         sqlx::query(
             "INSERT INTO channel_health \
-             (channel_id, consecutive_failures, cooldown_until, last_failure_at, last_failure_reason) \
-             VALUES (?1,?2,?3,?4,?5) \
-             ON CONFLICT(channel_id) DO UPDATE SET \
-                consecutive_failures = ?2, \
-                cooldown_until = ?3, \
-                last_failure_at = ?4, \
-                last_failure_reason = ?5",
+             (channel_id, mode, consecutive_failures, cooldown_until, last_failure_at, last_failure_reason) \
+             VALUES (?1,?2,?3,?4,?5,?6) \
+             ON CONFLICT(channel_id, mode) DO UPDATE SET \
+                consecutive_failures = ?3, \
+                cooldown_until = ?4, \
+                last_failure_at = ?5, \
+                last_failure_reason = ?6",
         )
         .bind(channel_id)
+        .bind(mode)
         .bind(failures)
         .bind(cooldown)
         .bind(last_at)
@@ -759,19 +784,24 @@ pub mod channel_health {
         Ok(())
     }
 
-    /// 记录一次成功：重置熔断器。
-    pub async fn record_success(pool: &SqlitePool, channel_id: &str) -> Result<(), sqlx::Error> {
+    /// 记录一次成功：重置熔断器（按 mode 维度）。
+    pub async fn record_success(
+        pool: &SqlitePool,
+        channel_id: &str,
+        mode: &str,
+    ) -> Result<(), sqlx::Error> {
         sqlx::query(
             "INSERT INTO channel_health \
-             (channel_id, consecutive_failures, cooldown_until, last_failure_at, last_failure_reason) \
-             VALUES (?1, 0, NULL, NULL, NULL) \
-             ON CONFLICT(channel_id) DO UPDATE SET \
+             (channel_id, mode, consecutive_failures, cooldown_until, last_failure_at, last_failure_reason) \
+             VALUES (?1, ?2, 0, NULL, NULL, NULL) \
+             ON CONFLICT(channel_id, mode) DO UPDATE SET \
                 consecutive_failures = 0, \
                 cooldown_until = NULL, \
                 last_failure_at = NULL, \
                 last_failure_reason = NULL",
         )
         .bind(channel_id)
+        .bind(mode)
         .execute(pool)
         .await?;
         Ok(())

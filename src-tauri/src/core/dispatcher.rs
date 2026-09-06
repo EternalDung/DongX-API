@@ -73,7 +73,10 @@ pub async fn candidate_channels(
         if exclude.contains(&c.id) {
             continue;
         }
-        if channel_health::is_open(pool, &c.id).await {
+        // 按 mode（流式/非流式）维度独立判断熔断：某渠道的 SSE 端点坏了，
+        // 不影响非流式请求继续选中它。
+        let mode = channel_health::mode_key(ctx.is_stream);
+        if channel_health::is_open(pool, &c.id, mode).await {
             continue; // 熔断冷却中
         }
         candidates.push((*c).clone());
