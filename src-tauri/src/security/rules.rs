@@ -204,17 +204,6 @@ impl CustomRuleRepository {
         Ok(n)
     }
 
-    /// 启用 / 禁用（enabled: 0=禁用 1=启用）。返回受影响行数。
-    pub async fn set_status(pool: &SqlitePool, id: &str, enabled: i64) -> Result<u64, sqlx::Error> {
-        let n = sqlx::query("UPDATE security_custom_rules SET enabled=?2 WHERE id=?1")
-            .bind(id)
-            .bind(enabled)
-            .execute(pool)
-            .await?
-            .rows_affected();
-        Ok(n)
-    }
-
     /// 删除自定义规则。返回受影响行数。
     pub async fn delete(pool: &SqlitePool, id: &str) -> Result<u64, sqlx::Error> {
         let n = sqlx::query("DELETE FROM security_custom_rules WHERE id=?1")

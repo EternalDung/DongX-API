@@ -9,8 +9,7 @@
 // - redact.rs  高风险类别脱敏转发体
 // - gate.rs    编排：加载设置→扫描→决策动作→(可选)脱敏→输出
 //
-// rate_limit 已实现并在请求链路中启用（见 server/handler.rs 的网关密钥限速）；模块级 allow 保留以防其他暂未使用的辅助项告警。
-#![allow(dead_code)]
+// rate_limit 已实现并在请求链路中启用（见 server/handler.rs 的网关密钥限速）。
 
 pub mod gate;
 pub mod rate_limit;

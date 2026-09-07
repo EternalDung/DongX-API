@@ -125,6 +125,8 @@ impl SecurityContext {
 ///
 /// 内部加载一次安全上下文后委派给 [`run_gate_ctx`]，后者无 DB 读，供数据面
 /// 热路径在已持有缓存上下文（AppState.settings_cache.security）时直接调用。
+// 仅测试路径使用：生产链路走 run_gate_ctx（已持有缓存上下文，无 DB 读）。
+#[cfg(test)]
 pub async fn run_gate(pool: &SqlitePool, body: Value) -> Result<GateOutput, sqlx::Error> {
     let ctx = match SecurityContext::load(pool).await {
         Ok(c) => c,
@@ -176,6 +178,8 @@ pub fn run_gate_ctx(ctx: &SecurityContext, body: Value) -> GateOutput {
 /// - 仅当 `security_enabled` 且 `security_scan_response` 同时开启才扫描；否则返回空（无发现）。
 /// - 响应已发送给客户端，无需脱敏转发体，也不据此阻断；只产出发现与风险汇总供落库审计。
 /// - 发现统一标记 `phase = "response"`，落库 request_security_findings.phase 以区分请求阶段。
+// 仅测试路径使用：生产链路走 scan_response_ctx（已持有缓存上下文，无 DB 读）。
+#[cfg(test)]
 pub async fn scan_response(pool: &SqlitePool, body: Value) -> Result<GateOutput, sqlx::Error> {
     let ctx = SecurityContext::load(pool).await?;
     Ok(scan_response_ctx(&ctx, body))
