@@ -5,6 +5,7 @@ import "prismjs/components/prism-json";
 import {
   Search,
   RefreshCw,
+  RotateCcw,
   ScrollText,
   Trash2,
   AlertTriangle,
@@ -307,8 +308,8 @@ export function LogsPage() {
         <div className="relative">
           <Search className="absolute top-1/2 left-2.5 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <Input
-            className="w-64 pl-8"
-            placeholder="关键词：模型 / 渠道 / 错误信息"
+            className="w-52 pl-8"
+            placeholder="模型 / 渠道 / 错误信息"
             value={keyword}
             onChange={(e) => setKeyword(e.target.value)}
           />
@@ -316,14 +317,24 @@ export function LogsPage() {
         <div className="relative">
           <Link2 className="absolute top-1/2 left-2.5 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <Input
-            className="w-60 pl-8 font-mono text-xs"
-            placeholder="Trace ID 精确匹配（链路追踪）"
+            className="w-60 pl-8 pr-8 font-mono text-xs"
+            placeholder="Trace ID 精确匹配"
             value={traceFilter}
             onChange={(e) => setTraceFilter(e.target.value)}
           />
+          {traceFilter && (
+            <button
+              type="button"
+              title="清除 Trace ID"
+              onClick={() => setTraceFilter("")}
+              className="absolute top-1/2 right-2 h-4 w-4 -translate-y-1/2 text-muted-foreground transition-colors hover:text-foreground"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          )}
         </div>
         <Select value={channelFilter} onValueChange={setChannelFilter}>
-          <SelectTrigger className="w-40"><SelectValue /></SelectTrigger>
+          <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="all">全部渠道</SelectItem>
             {channels.map((c) => (
@@ -334,7 +345,7 @@ export function LogsPage() {
           </SelectContent>
         </Select>
         <Select value={modelFilter} onValueChange={setModelFilter}>
-          <SelectTrigger className="w-44"><SelectValue /></SelectTrigger>
+          <SelectTrigger className="w-36"><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="all">全部模型</SelectItem>
             {modelOptions.map((m) => (
@@ -345,7 +356,7 @@ export function LogsPage() {
           </SelectContent>
         </Select>
         <Select value={statusFilter} onValueChange={setStatusFilter}>
-          <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
+          <SelectTrigger className="w-28"><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="all">全部状态</SelectItem>
             <SelectItem value="2">2xx 成功</SelectItem>
@@ -353,6 +364,15 @@ export function LogsPage() {
             <SelectItem value="5">5xx 服务端</SelectItem>
           </SelectContent>
         </Select>
+        <Button
+          variant="ghost"
+          size="icon"
+          title="重置筛选"
+          onClick={resetFilters}
+          className="shrink-0"
+        >
+          <RotateCcw className="h-4 w-4" />
+        </Button>
       </div>
 
       {/* 日志表格 */}
@@ -386,15 +406,13 @@ export function LogsPage() {
               <Table>
                 <TableHeader>
                   <TableRow className="hover:bg-transparent">
-                    <TableHead className="w-8" />
-                    <TableHead className="w-12 text-center">序号</TableHead>
+                    <TableHead className="w-14">序号</TableHead>
                     <TableHead>时间</TableHead>
                     <TableHead>密钥</TableHead>
                     <TableHead>上游</TableHead>
                     <TableHead>模型</TableHead>
                     <TableHead>状态</TableHead>
                     <TableHead>安全</TableHead>
-                    <TableHead>链路</TableHead>
                     <TableHead className="text-right">Tokens</TableHead>
                     <TableHead className="text-right">耗时</TableHead>
                     <TableHead className="w-10 text-center">操作</TableHead>
@@ -409,15 +427,17 @@ export function LogsPage() {
                           className="cursor-pointer"
                           onClick={() => setExpandedId(expanded ? null : l.id)}
                         >
-                          <TableCell className="w-8">
-                            {expanded ? (
-                              <ChevronDown className="h-4 w-4 text-muted-foreground" />
-                            ) : (
-                              <ChevronRight className="h-4 w-4 text-muted-foreground" />
-                            )}
-                          </TableCell>
-                          <TableCell className="w-12 text-center font-mono text-xs text-muted-foreground tabular-nums">
-                            {l.seq ?? "-"}
+                          <TableCell className="w-14">
+                            <div className="flex items-center gap-1.5">
+                              {expanded ? (
+                                <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
+                              ) : (
+                                <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
+                              )}
+                              <span className="font-mono text-xs text-muted-foreground tabular-nums">
+                                {l.seq ?? "-"}
+                              </span>
+                            </div>
                           </TableCell>
                           <TableCell className="whitespace-nowrap text-muted-foreground">
                             {formatTime(l.created_at)}
@@ -435,24 +455,6 @@ export function LogsPage() {
                           <TableCell>
                             {l.risk_level ? (
                               <RiskBadge level={l.risk_level} score={l.risk_score} />
-                            ) : (
-                              <span className="text-xs text-muted-foreground">-</span>
-                            )}
-                          </TableCell>
-                          <TableCell>
-                            {l.trace_id ? (
-                              <button
-                                type="button"
-                                title={`按此 Trace ID 过滤：${l.trace_id}`}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setTraceFilter(l.trace_id!);
-                                }}
-                                className="inline-flex max-w-28 items-center gap-1 rounded-full border px-2 py-0.5 font-mono text-[10px] text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground"
-                              >
-                                <Link2 className="h-3 w-3 shrink-0" />
-                                <span className="truncate">{l.trace_id.slice(0, 8)}</span>
-                              </button>
                             ) : (
                               <span className="text-xs text-muted-foreground">-</span>
                             )}
@@ -485,7 +487,7 @@ export function LogsPage() {
                         </TableRow>
                         {expanded && (
                           <TableRow className="hover:bg-transparent">
-                            <TableCell colSpan={12} className="bg-muted/30 p-4">
+                            <TableCell colSpan={10} className="bg-muted/30 p-4">
                               <LogDetail id={l.id} onTraceClick={setTraceFilter} />
                             </TableCell>
                           </TableRow>
@@ -638,24 +640,26 @@ function LogDetail({ id, onTraceClick }: { id: string; onTraceClick?: (traceId: 
       {(detail.trace_id || detail.provider_request_id) && (
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
           {detail.trace_id && (
-            <StatCard label="Trace ID（网关链路）" mono>
-              <span className="flex items-center gap-1.5">
-                <span className="truncate" title={detail.trace_id}>
-                  {detail.trace_id}
+            <div className="col-span-2 sm:col-span-3">
+              <StatCard label="Trace ID（网关链路）" mono>
+                <span className="flex items-center gap-1.5">
+                  <span className="truncate" title={detail.trace_id}>
+                    {detail.trace_id}
+                  </span>
+                  <CopyButton value={detail.trace_id} label="Trace ID" variant="pill" />
+                  {onTraceClick && (
+                    <button
+                      type="button"
+                      title="按此 Trace ID 过滤列表"
+                      onClick={() => onTraceClick(detail.trace_id!)}
+                      className="rounded-full px-2 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                    >
+                      <Link2 className="h-3 w-3" />
+                    </button>
+                  )}
                 </span>
-                <CopyButton value={detail.trace_id} label="Trace ID" variant="pill" />
-                {onTraceClick && (
-                  <button
-                    type="button"
-                    title="按此 Trace ID 过滤列表"
-                    onClick={() => onTraceClick(detail.trace_id!)}
-                    className="rounded-full px-2 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                  >
-                    <Link2 className="h-3 w-3" />
-                  </button>
-                )}
-              </span>
-            </StatCard>
+              </StatCard>
+            </div>
           )}
           {detail.provider_request_id && (
             <StatCard label="上游请求 ID" mono>
