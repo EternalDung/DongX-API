@@ -902,3 +902,288 @@ pub async fn ask_deep_research(
         sources: dedupe_sources(all_sources),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::{HashMap, HashSet};
+
+    // ============================================================
+    // weighted_pick —— 加权随机挑选
+    // ============================================================
+
+    fn pair(id: &str, w: i32) -> (String, i32) {
+        (id.to_string(), w)
+    }
+
+    #[test]
+    fn weighted_pick_empty_returns_none() {
+        assert_eq!(weighted_pick(&[]), None);
+    }
+
+    #[test]
+    fn weighted_pick_single_always_that_id() {
+        for _ in 0..20 {
+            assert_eq!(weighted_pick(&[pair("only", 1)]).as_deref(), Some("only"));
+        }
+    }
+
+    #[test]
+    fn weighted_pick_clamps_non_positive_weight_to_one() {
+        // 0 与负数都被 clamp 到 1，故三项应大致均分。
+        let pairs = vec![pair("a", 0), pair("b", -5), pair("c", 1)];
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for _ in 0..3000 {
+            *counts.entry(weighted_pick(&pairs).unwrap()).or_insert(0) += 1;
+        }
+        // 理论各 1000，sigma 约 26，正负 250 约 9 sigma，不会 flaky
+        for id in ["a", "b", "c"] {
+            let n = *counts.get(id).unwrap_or(&0);
+            assert!((750..=1250).contains(&n), "{id} 命中 {n} 次，应在 750~1250");
+        }
+    }
+
+    #[test]
+    fn weighted_pick_respects_weight_ratio() {
+        let pairs = vec![pair("light", 1), pair("heavy", 3)];
+        let mut light = 0usize;
+        for _ in 0..4000 {
+            if weighted_pick(&pairs).unwrap() == "light" {
+                light += 1;
+            }
+        }
+        // 期望 1000，sigma 约 27，正负 300 约 11 sigma
+        assert!(
+            (700..=1300).contains(&light),
+            "light 命中 {light} 次，应在 700~1300"
+        );
+    }
+
+    #[test]
+    fn weighted_pick_never_returns_none_or_unknown_id() {
+        let pairs = vec![pair("a", 2), pair("b", 5), pair("c", 1)];
+        let valid: HashSet<&str> = ["a", "b", "c"].into_iter().collect();
+        for _ in 0..500 {
+            let got = weighted_pick(&pairs).expect("非空输入不应返回 None");
+            assert!(valid.contains(got.as_str()), "返回了未知 id: {got}");
+        }
+    }
+
+    // ============================================================
+    // channel_serves_model —— 渠道是否服务于给定模型
+    // ============================================================
+
+    fn row_with(models: &str, mapping: &str) -> ChannelRow {
+        ChannelRow {
+            id: "ch-1".into(),
+            name: "test-channel".into(),
+            protocol: "openai".into(),
+            channel_type: "openai".into(),
+            base_url: "https://api.example.com/v1".into(),
+            cred_encrypted: String::new(),
+            models: models.into(),
+            status: 1,
+            priority: 0,
+            weight: 1,
+            config: "{}".into(),
+            model_mapping: mapping.into(),
+            endpoints: "[]".into(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            last_test_at: None,
+            last_test_ok: None,
+        }
+    }
+
+    #[test]
+    fn channel_serves_model_matches_models_array() {
+        let row = row_with(r#"["gpt-4o","gpt-4o-mini"]"#, "{}");
+        assert!(channel_serves_model(&row, "gpt-4o"));
+        assert!(channel_serves_model(&row, "gpt-4o-mini"));
+        assert!(!channel_serves_model(&row, "claude-3"));
+    }
+
+    #[test]
+    fn channel_serves_model_matches_only_mapping_key_not_value() {
+        let row = row_with("[]", r#"{"gpt-4o":"my-gpt4o"}"#);
+        assert!(channel_serves_model(&row, "gpt-4o"));
+        assert!(
+            !channel_serves_model(&row, "my-gpt4o"),
+            "映射的值不应被当作上游可服务模型"
+        );
+    }
+
+    #[test]
+    fn channel_serves_model_accepts_either_source() {
+        let row = row_with(r#"["a"]"#, r#"{"b":"x"}"#);
+        assert!(channel_serves_model(&row, "a"));
+        assert!(channel_serves_model(&row, "b"));
+        assert!(!channel_serves_model(&row, "c"));
+    }
+
+    #[test]
+    fn channel_serves_model_tolerates_malformed_json() {
+        // 两个字段都不是合法 JSON：应返回 false 而不是 panic
+        let row = row_with("not-json", "also-not-json");
+        assert!(!channel_serves_model(&row, "gpt-4o"));
+
+        // models 是对象而非数组 -> 反序列化失败，回落到 mapping
+        let row = row_with("{}", r#"{"gpt-4o":"x"}"#);
+        assert!(channel_serves_model(&row, "gpt-4o"));
+
+        // mapping 为 null -> .get() 恒为 None
+        let row = row_with("[]", "null");
+        assert!(!channel_serves_model(&row, "gpt-4o"));
+    }
+
+    #[test]
+    fn channel_serves_model_empty_fields_yield_false() {
+        let row = row_with("", "");
+        assert!(!channel_serves_model(&row, "gpt-4o"));
+    }
+
+    // ============================================================
+    // dedupe_sources —— 来源去重（键 = kb_id + doc_title + content）
+    // ============================================================
+
+    fn src(kb: &str, title: &str, content: &str, score: f32) -> Source {
+        Source {
+            kb_id: kb.into(),
+            doc_title: title.into(),
+            content: content.into(),
+            score,
+        }
+    }
+
+    fn keys(v: &[Source]) -> Vec<(String, String, String)> {
+        v.iter()
+            .map(|s| (s.kb_id.clone(), s.doc_title.clone(), s.content.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn dedupe_sources_empty_in_empty_out() {
+        assert!(dedupe_sources(vec![]).is_empty());
+    }
+
+    #[test]
+    fn dedupe_sources_keeps_unique_in_order() {
+        let out = dedupe_sources(vec![
+            src("kb1", "a", "x", 0.9),
+            src("kb1", "b", "y", 0.8),
+            src("kb2", "c", "z", 0.7),
+        ]);
+        assert_eq!(
+            keys(&out),
+            vec![
+                ("kb1".to_string(), "a".to_string(), "x".to_string()),
+                ("kb1".to_string(), "b".to_string(), "y".to_string()),
+                ("kb2".to_string(), "c".to_string(), "z".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn dedupe_sources_collapses_full_key_match_keeping_first() {
+        let out = dedupe_sources(vec![
+            src("kb1", "t", "same", 0.9),
+            src("kb1", "t", "same", 0.3), // 全键相同 -> 丢弃
+            src("kb1", "t", "other", 0.8),
+        ]);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].score, 0.9, "应保留首次出现的那条（含其分数）");
+        assert_eq!(out[1].content, "other");
+    }
+
+    #[test]
+    fn dedupe_sources_requires_all_three_fields_to_match() {
+        let out = dedupe_sources(vec![
+            src("kb1", "t", "c", 1.0),
+            src("kb2", "t", "c", 0.9), // kb_id 不同 -> 保留
+            src("kb1", "u", "c", 0.8), // doc_title 不同 -> 保留
+            src("kb1", "t", "d", 0.7), // content 不同 -> 保留
+            src("kb1", "t", "c", 0.6), // 三者全同 -> 去重
+        ]);
+        assert_eq!(out.len(), 4);
+        assert_eq!(out.last().unwrap().score, 0.7);
+    }
+
+    #[test]
+    fn dedupe_sources_handles_many_repeats() {
+        let mut v = Vec::new();
+        for i in 0..50 {
+            v.push(src("kb", "t", &format!("c{}", i % 5), i as f32));
+        }
+        let out = dedupe_sources(v);
+        assert_eq!(out.len(), 5);
+        assert_eq!(out[0].content, "c0");
+        assert_eq!(out[4].content, "c4");
+    }
+
+    // ============================================================
+    // decrypt_pick_upstream_key —— 解密并加权挑选上游 key
+    // 依赖 crypto 的硬编码占位密钥，无 DB / 无网络，可在单测内往返
+    // ============================================================
+
+    fn enc(s: &str) -> String {
+        crypto::encrypt(s).expect("encrypt 不应失败")
+    }
+
+    #[test]
+    fn decrypt_pick_upstream_key_legacy_single_key() {
+        assert_eq!(
+            decrypt_pick_upstream_key(&enc("sk-legacy-123")).unwrap(),
+            "sk-legacy-123"
+        );
+    }
+
+    #[test]
+    fn decrypt_pick_upstream_key_multi_key_picks_a_member() {
+        let payload = r#"[{"key":"sk-a","weight":1},{"key":"sk-b","weight":1}]"#;
+        let got = decrypt_pick_upstream_key(&enc(payload)).unwrap();
+        assert!(
+            got == "sk-a" || got == "sk-b",
+            "应从数组内挑一条，实际: {got}"
+        );
+    }
+
+    #[test]
+    fn decrypt_pick_upstream_key_multi_key_respects_weight() {
+        let payload = r#"[{"key":"sk-a","weight":1},{"key":"sk-b","weight":1000}]"#;
+        let mut a = 0usize;
+        for _ in 0..500 {
+            if decrypt_pick_upstream_key(&enc(payload)).unwrap() == "sk-a" {
+                a += 1;
+            }
+        }
+        // 期望约 0.5 次，阈值 10 极其宽松，确保不会 flaky
+        assert!(a < 10, "sk-a 命中 {a} 次，权重 1:1000 下不应如此频繁");
+    }
+
+    #[test]
+    fn decrypt_pick_upstream_key_empty_plaintext_is_error() {
+        assert!(decrypt_pick_upstream_key(&enc("")).is_err());
+    }
+
+    #[test]
+    fn decrypt_pick_upstream_key_invalid_ciphertext_is_error() {
+        assert!(decrypt_pick_upstream_key("not-valid-base64-ciphertext").is_err());
+    }
+
+    #[test]
+    fn known_quirk_all_keys_empty_falls_back_to_raw_json() {
+        // 已知缺陷：数组内所有 key 均为空串时 pairs 为空，函数会落到 legacy 单 key
+        // 分支，把整段 JSON 原文当作密钥返回。此处固化现状，便于修复时立刻暴露。
+        let got = decrypt_pick_upstream_key(&enc(r#"[{"key":"","weight":1}]"#)).unwrap();
+        assert!(
+            got.starts_with("["),
+            "现状：返回了原始 JSON 文本，实际: {got}"
+        );
+    }
+
+    #[test]
+    fn known_quirk_empty_array_falls_back_to_raw_json() {
+        // 同上：空数组被当成 legacy 单 key 原文返回。
+        assert_eq!(decrypt_pick_upstream_key(&enc("[]")).unwrap(), "[]");
+    }
+}
