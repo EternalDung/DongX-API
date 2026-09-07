@@ -60,7 +60,7 @@ fn weighted_pick(pairs: &[(String, i32)]) -> Option<String> {
 
 /// 解密渠道密钥并加权随机挑选一条上游 key。
 fn decrypt_pick_upstream_key(cred_encrypted: &str) -> Result<String, AppError> {
-    let plaintext = crypto::decrypt(cred_encrypted).map_err(AppError::Crypto)?;
+    let plaintext = crypto::decrypt(cred_encrypted)?;
 
     if let Ok(keys) = serde_json::from_str::<Vec<Value>>(&plaintext) {
         if !keys.is_empty() {

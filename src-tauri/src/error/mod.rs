@@ -38,6 +38,8 @@ pub enum AppError {
     #[error("Internal error: {0}")]
     #[serde(serialize_with = "serialize_to_string")]
     Internal(String),
+    #[error("Conflict: {0}")]
+    Conflict(String),
 }
 
 /// Serialize a string-wrapped error as a plain string (not an object)
@@ -53,6 +55,11 @@ where
 
 impl From<sqlx::Error> for AppError {
     fn from(e: sqlx::Error) -> Self {
+        if let sqlx::Error::Database(db_err) = &e {
+            if db_err.is_unique_violation() {
+                return AppError::Conflict(db_err.message().to_string());
+            }
+        }
         AppError::Database(e.to_string())
     }
 }
@@ -94,6 +101,7 @@ impl AppError {
             AppError::NotFound(_) => StatusCode::NOT_FOUND,
             AppError::Validation(_) => StatusCode::BAD_REQUEST,
             AppError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
+            AppError::Conflict(_) => StatusCode::CONFLICT,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -104,6 +112,7 @@ impl AppError {
             AppError::NotFound(_) => "not_found",
             AppError::Validation(_) => "validation_error",
             AppError::Unauthorized(_) => "unauthorized",
+            AppError::Conflict(_) => "conflict_error",
             AppError::Proxy(_) => "proxy_error",
             AppError::Crypto(_) => "crypto_error",
             AppError::Internal(_) => "internal_error",

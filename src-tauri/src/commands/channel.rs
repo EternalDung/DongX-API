@@ -90,7 +90,7 @@ fn encrypt_keys(keys: &[KeyEntry]) -> AppResult<String> {
         Ok(String::new())
     } else {
         let json = serde_json::to_string(keys).unwrap_or_else(|_| "[]".into());
-        crypto::encrypt(&json).map_err(AppError::Crypto)
+        crypto::encrypt(&json)
     }
 }
 
@@ -237,7 +237,7 @@ pub async fn test_channel(state: State<'_, Arc<AppState>>, id: String) -> AppRes
     let keys: Vec<KeyEntry> = if row.cred_encrypted.is_empty() {
         vec![]
     } else {
-        let raw = crypto::decrypt(&row.cred_encrypted).map_err(AppError::Crypto)?;
+        let raw = crypto::decrypt(&row.cred_encrypted)?;
         serde_json::from_str(&raw).unwrap_or_else(|_| {
             vec![KeyEntry {
                 key: raw,

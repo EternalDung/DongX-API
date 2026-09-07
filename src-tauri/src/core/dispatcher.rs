@@ -174,7 +174,7 @@ fn weighted_pick(pairs: &[(String, i32)]) -> Option<String> {
 /// - Multi-key JSON array: `[{"key":"sk-...","weight":7}, ...]`
 /// - Legacy single key: the plaintext is the key itself.
 fn pick_upstream_key(cred_encrypted: &str) -> AppResult<String> {
-    let plaintext = crypto::decrypt(cred_encrypted).map_err(AppError::Crypto)?;
+    let plaintext = crypto::decrypt(cred_encrypted)?;
 
     // Multi-key JSON array.
     if let Ok(keys) = serde_json::from_str::<Vec<serde_json::Value>>(&plaintext) {

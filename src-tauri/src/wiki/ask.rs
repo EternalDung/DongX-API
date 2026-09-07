@@ -243,7 +243,7 @@ async fn call_chat_once(
 }
 
 fn decrypt_pick_upstream_key(cred_encrypted: &str) -> AppResult<String> {
-    let plaintext = crypto::decrypt(cred_encrypted).map_err(AppError::Crypto)?;
+    let plaintext = crypto::decrypt(cred_encrypted)?;
 
     if let Ok(keys) = serde_json::from_str::<Vec<Value>>(&plaintext) {
         if !keys.is_empty() {
