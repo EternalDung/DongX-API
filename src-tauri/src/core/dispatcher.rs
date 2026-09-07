@@ -1,8 +1,8 @@
-use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::collections::HashSet;
 
+use crate::core::weighted::weighted_pick;
 use crate::crypto;
 use crate::db::repository::{channel_health, channels};
 use crate::error::{AppError, AppResult};
@@ -146,26 +146,6 @@ fn channel_serves_model(c: &ChannelRow, model: &str) -> bool {
     let mapping: serde_json::Value =
         serde_json::from_str(&c.model_mapping).unwrap_or_else(|_| serde_json::json!({}));
     mapping.get(model).is_some()
-}
-
-/// Weighted-random selection. `weight` clamped to >=1 so every entry has a chance.
-fn weighted_pick(pairs: &[(String, i32)]) -> Option<String> {
-    if pairs.is_empty() {
-        return None;
-    }
-    let total: i32 = pairs.iter().map(|(_, w)| (*w).max(1)).sum();
-    if total <= 0 {
-        return Some(pairs[0].0.clone());
-    }
-    let mut rng = rand::thread_rng();
-    let mut r = rng.gen_range(0..total);
-    for (id, w) in pairs {
-        r -= (*w).max(1);
-        if r < 0 {
-            return Some(id.clone());
-        }
-    }
-    Some(pairs[0].0.clone())
 }
 
 /// Decrypt the channel credential and weighted-pick one upstream key.

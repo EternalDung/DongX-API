@@ -1,7 +1,6 @@
 //! 问答：向量化问题 → 检索相关分块 → 构造上下文 → 复用网关分发机制发起
 //! chat 完成。对应 `/v1/rag/ask` 与 Tauri 命令 `ask_kb`。
 
-use rand::Rng;
 use serde::Serialize;
 use serde_json::Value;
 use sqlx::SqlitePool;
@@ -9,6 +8,7 @@ use sqlx::SqlitePool;
 use crate::adapter::{get_adaptor, ChannelConfig, ProxyRequest};
 use crate::core::dispatcher::DispatchContext;
 use crate::core::failover::{Failover, Step};
+use crate::core::weighted::weighted_pick;
 use crate::crypto;
 use crate::db::repository::request_logs;
 use crate::error::AppError;
@@ -31,31 +31,6 @@ pub struct Source {
 pub struct AskResult {
     pub answer: String,
     pub sources: Vec<Source>,
-}
-
-/// 按（id, weight）列表做加权随机挑选。weight clamp 到 ≥1。
-fn weighted_pick(pairs: &[(String, i32)]) -> Option<String> {
-    if pairs.is_empty() {
-        return None;
-    }
-    let total: i32 = pairs.iter().map(|(_, w)| (*w).max(1)).sum();
-    let mut rng = rand::thread_rng();
-    let pick_idx = if total <= 0 {
-        0
-    } else {
-        let mut r = rng.gen_range(0..total);
-        let mut i = 0;
-        for (_id, w) in pairs {
-            let w = (*w).max(1);
-            r -= w;
-            if r < 0 {
-                break;
-            }
-            i += 1;
-        }
-        i
-    };
-    pairs.get(pick_idx).map(|(id, _)| id.clone())
 }
 
 /// 解密渠道密钥并加权随机挑选一条上游 key。
@@ -906,68 +881,6 @@ pub async fn ask_deep_research(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::{HashMap, HashSet};
-
-    // ============================================================
-    // weighted_pick —— 加权随机挑选
-    // ============================================================
-
-    fn pair(id: &str, w: i32) -> (String, i32) {
-        (id.to_string(), w)
-    }
-
-    #[test]
-    fn weighted_pick_empty_returns_none() {
-        assert_eq!(weighted_pick(&[]), None);
-    }
-
-    #[test]
-    fn weighted_pick_single_always_that_id() {
-        for _ in 0..20 {
-            assert_eq!(weighted_pick(&[pair("only", 1)]).as_deref(), Some("only"));
-        }
-    }
-
-    #[test]
-    fn weighted_pick_clamps_non_positive_weight_to_one() {
-        // 0 与负数都被 clamp 到 1，故三项应大致均分。
-        let pairs = vec![pair("a", 0), pair("b", -5), pair("c", 1)];
-        let mut counts: HashMap<String, usize> = HashMap::new();
-        for _ in 0..3000 {
-            *counts.entry(weighted_pick(&pairs).unwrap()).or_insert(0) += 1;
-        }
-        // 理论各 1000，sigma 约 26，正负 250 约 9 sigma，不会 flaky
-        for id in ["a", "b", "c"] {
-            let n = *counts.get(id).unwrap_or(&0);
-            assert!((750..=1250).contains(&n), "{id} 命中 {n} 次，应在 750~1250");
-        }
-    }
-
-    #[test]
-    fn weighted_pick_respects_weight_ratio() {
-        let pairs = vec![pair("light", 1), pair("heavy", 3)];
-        let mut light = 0usize;
-        for _ in 0..4000 {
-            if weighted_pick(&pairs).unwrap() == "light" {
-                light += 1;
-            }
-        }
-        // 期望 1000，sigma 约 27，正负 300 约 11 sigma
-        assert!(
-            (700..=1300).contains(&light),
-            "light 命中 {light} 次，应在 700~1300"
-        );
-    }
-
-    #[test]
-    fn weighted_pick_never_returns_none_or_unknown_id() {
-        let pairs = vec![pair("a", 2), pair("b", 5), pair("c", 1)];
-        let valid: HashSet<&str> = ["a", "b", "c"].into_iter().collect();
-        for _ in 0..500 {
-            let got = weighted_pick(&pairs).expect("非空输入不应返回 None");
-            assert!(valid.contains(got.as_str()), "返回了未知 id: {got}");
-        }
-    }
 
     // ============================================================
     // channel_serves_model —— 渠道是否服务于给定模型

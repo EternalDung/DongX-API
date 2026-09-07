@@ -6,6 +6,7 @@ use serde_json::Value;
 use sqlx::SqlitePool;
 
 use crate::adapter::{get_adaptor, ChannelConfig, ProxyRequest};
+use crate::core::weighted::weighted_pick;
 use crate::crypto;
 use crate::db::repository::request_logs;
 use crate::error::{AppError, AppResult};
@@ -269,22 +270,6 @@ fn decrypt_pick_upstream_key(cred_encrypted: &str) -> AppResult<String> {
         return Err(AppError::Crypto("上游密钥为空".into()));
     }
     Ok(plaintext)
-}
-
-/// 按权重随机挑选一个上游密钥。
-fn weighted_pick(pairs: &[(String, i32)]) -> Option<String> {
-    let total: i32 = pairs.iter().map(|(_, w)| (*w).max(0)).sum();
-    if total <= 0 {
-        return None;
-    }
-    let mut r = (rand::random::<u32>() % total.max(0) as u32) as i32;
-    for (k, w) in pairs {
-        r -= (*w).max(0);
-        if r < 0 {
-            return Some(k.clone());
-        }
-    }
-    pairs.last().map(|(k, _)| k.clone())
 }
 
 /// Wiki 内部 LLM 调用的落库助手：与网关 `spawn_log` 写入同一张 `request_logs` 表，
