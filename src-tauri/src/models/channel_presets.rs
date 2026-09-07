@@ -653,3 +653,168 @@ pub fn groups_for_protocols() -> Vec<ProtocolPresetGroup> {
     })
     .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    fn all_presets() -> Vec<ChannelPreset> {
+        groups_for_protocols()
+            .into_iter()
+            .flat_map(|g| g.presets)
+            .collect()
+    }
+
+    #[test]
+    fn groups_cover_all_three_protocols() {
+        let groups = groups_for_protocols();
+        let protocols: Vec<ChannelProtocol> = groups.iter().map(|g| g.protocol).collect();
+        assert_eq!(protocols.len(), 3);
+        assert!(protocols.contains(&ChannelProtocol::OpenAI));
+        assert!(protocols.contains(&ChannelProtocol::Anthropic));
+        assert!(protocols.contains(&ChannelProtocol::Ollama));
+        // 每个协议至少要有 custom + 一个厂商项
+        for g in &groups {
+            assert!(
+                g.presets.len() >= 2,
+                "协议 {:?} 的预设数量异常: {}",
+                g.protocol,
+                g.presets.len()
+            );
+        }
+    }
+
+    #[test]
+    fn custom_preset_is_always_first() {
+        for group in groups_for_protocols() {
+            let first = group.presets.first().expect("每组至少一个 preset");
+            assert_eq!(
+                first.provider,
+                ChannelProvider::Custom,
+                "协议 {:?} 的自定义项未置顶",
+                group.protocol
+            );
+            assert_eq!(first.region, RegionGroup::Custom);
+            assert_eq!(first.id, format!("{}:custom", group.protocol.as_str()));
+        }
+    }
+
+    #[test]
+    fn preset_ids_are_globally_unique() {
+        let mut seen = HashSet::new();
+        for p in all_presets() {
+            assert!(seen.insert(p.id.clone()), "重复 preset id: {}", p.id);
+        }
+    }
+
+    #[test]
+    fn vendor_presets_have_valid_urls_and_required_fields() {
+        for p in all_presets() {
+            if p.provider == ChannelProvider::Custom {
+                continue; // 自定义项的 URL 由用户填写，允许为空
+            }
+            assert!(!p.display_name.is_empty(), "{} 缺 display_name", p.id);
+            assert!(!p.icon_key.is_empty(), "{} 缺 icon_key", p.id);
+            assert!(!p.legacy_type.is_empty(), "{} 缺 legacy_type", p.id);
+            for url in [&p.native_base_url, &p.legacy_base_url] {
+                assert!(
+                    url.starts_with("https://") || url.starts_with("http://"),
+                    "{} 的 URL 非法: {:?}",
+                    p.id,
+                    url
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn default_checked_endpoints_are_subset_of_native_endpoints() {
+        for p in all_presets() {
+            assert!(
+                !p.native_endpoints.is_empty(),
+                "{} 未声明任何原生端点",
+                p.id
+            );
+            for e in &p.default_checked_endpoints {
+                assert!(
+                    p.native_endpoints.contains(e),
+                    "{} 默认勾选了未声明的端点 {:?}",
+                    p.id,
+                    e
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn model_suggestions_are_documented_and_dated() {
+        for p in all_presets() {
+            for m in &p.model_suggestions {
+                assert!(!m.id.is_empty(), "{} 存在空模型 id", p.id);
+                assert!(
+                    m.source_url.starts_with("https://"),
+                    "{} 的模型 {} 缺少 https 官方来源: {}",
+                    p.id,
+                    m.id,
+                    m.source_url
+                );
+                // verified_at 必须是 YYYY-MM-DD
+                let d = &m.verified_at;
+                assert_eq!(
+                    d.len(),
+                    10,
+                    "{} 的 {} verified_at 应为 YYYY-MM-DD: {}",
+                    p.id,
+                    m.id,
+                    d
+                );
+                assert_eq!(
+                    &d[4..5],
+                    "-",
+                    "{} 的 {} verified_at 格式错误: {}",
+                    p.id,
+                    m.id,
+                    d
+                );
+                assert_eq!(
+                    &d[7..8],
+                    "-",
+                    "{} 的 {} verified_at 格式错误: {}",
+                    p.id,
+                    m.id,
+                    d
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn all_presets_carry_current_revision() {
+        for p in all_presets() {
+            assert_eq!(
+                p.preset_revision, PRESET_REVISION,
+                "{} 的 revision 未同步",
+                p.id
+            );
+        }
+    }
+
+    #[test]
+    fn presets_are_sorted_by_region() {
+        for group in groups_for_protocols() {
+            let seq: Vec<u8> = group
+                .presets
+                .iter()
+                .map(|p| region_order(p.region))
+                .collect();
+            let mut sorted = seq.clone();
+            sorted.sort_unstable();
+            assert_eq!(
+                seq, sorted,
+                "协议 {:?} 的 preset 未按区域排序: {:?}",
+                group.protocol, seq
+            );
+        }
+    }
+}
