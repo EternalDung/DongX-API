@@ -212,9 +212,7 @@ async fn atomic_write(path: &Path, data: &[u8]) -> Result<(), String> {
     tokio::fs::write(&tmp, data)
         .await
         .map_err(|e| format!("写入临时文件失败: {e}"))?;
-    tokio::fs::rename(&tmp, path)
-        .await
-        .map_err(|e| {
+    tokio::fs::rename(&tmp, path).await.map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         format!("替换文件失败: {e}")
     })?;
@@ -329,7 +327,9 @@ fn backup_path(config_path: &Path) -> PathBuf {
 
 async fn backup_config(config_path: &Path) -> Result<(), String> {
     if config_path.exists() {
-        let content = tokio::fs::read(config_path).await.map_err(|e| format!("读取配置失败: {e}"))?;
+        let content = tokio::fs::read(config_path)
+            .await
+            .map_err(|e| format!("读取配置失败: {e}"))?;
         atomic_write(&backup_path(config_path), &content).await?;
     }
     Ok(())
@@ -338,7 +338,9 @@ async fn backup_config(config_path: &Path) -> Result<(), String> {
 async fn restore_config(config_path: &Path) -> Result<(), String> {
     let backup = backup_path(config_path);
     if backup.exists() {
-        let content = tokio::fs::read(&backup).await.map_err(|e| format!("读取备份失败: {e}"))?;
+        let content = tokio::fs::read(&backup)
+            .await
+            .map_err(|e| format!("读取备份失败: {e}"))?;
         atomic_write(config_path, &content).await?;
         let _ = tokio::fs::remove_file(&backup).await;
         Ok(())
@@ -371,7 +373,9 @@ async fn write_claude_code(
 ) -> Result<(), String> {
     let settings_path = config_dir.join("settings.json");
     let mut settings: serde_json::Value = if settings_path.exists() {
-        read_json_file(&settings_path).await.unwrap_or_else(|_| serde_json::json!({}))
+        read_json_file(&settings_path)
+            .await
+            .unwrap_or_else(|_| serde_json::json!({}))
     } else {
         serde_json::json!({})
     };
@@ -403,7 +407,8 @@ async fn write_codex(
     // 不写 auth.json 的 OPENAI_API_KEY，避免 Codex 拿它去 OpenAI 验证。
     let config_path = config_dir.join("config.toml");
     let existing_text = if config_path.exists() {
-        tokio::fs::read_to_string(&config_path).await
+        tokio::fs::read_to_string(&config_path)
+            .await
             .map_err(|e| format!("Failed to read config.toml: {e}"))?
     } else {
         String::new()
@@ -455,7 +460,9 @@ async fn write_opencode(
 ) -> Result<(), String> {
     let config_path = config_dir.join("opencode.json");
     let mut config: serde_json::Value = if config_path.exists() {
-        read_json_file(&config_path).await.unwrap_or_else(|_| serde_json::json!({}))
+        read_json_file(&config_path)
+            .await
+            .unwrap_or_else(|_| serde_json::json!({}))
     } else {
         serde_json::json!({"$schema": "https://opencode.ai/config.json"})
     };
@@ -493,7 +500,9 @@ async fn write_openclaw(
 ) -> Result<(), String> {
     let config_path = config_dir.join("config.json");
     let mut config: serde_json::Value = if config_path.exists() {
-        read_json_file(&config_path).await.unwrap_or_else(|_| serde_json::json!({}))
+        read_json_file(&config_path)
+            .await
+            .unwrap_or_else(|_| serde_json::json!({}))
     } else {
         serde_json::json!({})
     };
@@ -519,7 +528,9 @@ async fn write_hermes(
 ) -> Result<(), String> {
     let config_path = config_dir.join("config.json");
     let mut config: serde_json::Value = if config_path.exists() {
-        read_json_file(&config_path).await.unwrap_or_else(|_| serde_json::json!({}))
+        read_json_file(&config_path)
+            .await
+            .unwrap_or_else(|_| serde_json::json!({}))
     } else {
         serde_json::json!({})
     };
