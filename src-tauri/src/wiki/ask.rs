@@ -66,8 +66,15 @@ pub async fn ask(pool: &SqlitePool, project_id: &str, question: &str) -> AppResu
     // 链路追踪：本次 Wiki 问答共用一个 trace_id。
     let trace_id = Uuid::new_v4().to_string();
 
-    let (answer, pt, ct, dur) =
-        call_chat_once(pool, &proj.name, &channel, &proj.chat_model, &body, &trace_id).await?;
+    let (answer, pt, ct, dur) = call_chat_once(
+        pool,
+        &proj.name,
+        &channel,
+        &proj.chat_model,
+        &body,
+        &trace_id,
+    )
+    .await?;
 
     let citations = ranked
         .iter()

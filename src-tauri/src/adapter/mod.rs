@@ -86,10 +86,7 @@ pub trait Adaptor: Send + Sync {
         &self,
         request: &ProxyRequest,
         config: &ChannelConfig,
-    ) -> Result<
-        (u16, serde_json::Value, Option<TokenUsage>, Option<String>),
-        anyhow::Error,
-    >;
+    ) -> Result<(u16, serde_json::Value, Option<TokenUsage>, Option<String>), anyhow::Error>;
 
     /// Forward a streaming (SSE) request. Returns the raw upstream response;
     /// the caller streams `bytes_stream()` through to the client.
@@ -271,9 +268,7 @@ pub(crate) fn extract_usage(body: &serde_json::Value) -> Option<TokenUsage> {
 /// `request-id`. This is the id the *model provider* assigns to the call —
 /// distinct from DongX's server-generated gateway `trace_id`. `None` when the
 /// upstream didn't return one (or it wasn't decodable).
-pub(crate) fn extract_provider_request_id(
-    headers: &reqwest::header::HeaderMap,
-) -> Option<String> {
+pub(crate) fn extract_provider_request_id(headers: &reqwest::header::HeaderMap) -> Option<String> {
     headers
         .get("x-request-id")
         .or_else(|| headers.get("request-id"))

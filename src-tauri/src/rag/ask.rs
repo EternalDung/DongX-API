@@ -192,23 +192,23 @@ async fn call_chat_once(
                 .and_then(|u| u.get("total_tokens"))
                 .and_then(|v| v.as_u64())
                 .unwrap_or(pt + ct);
-                   log_rag_attempt(
-                    pool.clone(),
-                    kb_name,
-                    "rag",
-                    model,
-                    &row.name,
-                    status as i32,
-                    pt as i64,
-                    ct as i64,
-                    tt as i64,
-                    dur,
-                    None,
-                    Some(chat_body.to_string()),
-                    Some(body.to_string()),
-                    trace_id,
-                    provider_request_id,
-                );
+            log_rag_attempt(
+                pool.clone(),
+                kb_name,
+                "rag",
+                model,
+                &row.name,
+                status as i32,
+                pt as i64,
+                ct as i64,
+                tt as i64,
+                dur,
+                None,
+                Some(chat_body.to_string()),
+                Some(body.to_string()),
+                trace_id,
+                provider_request_id,
+            );
             let answer = body
                 .get("choices")
                 .and_then(|c| c.get(0))
@@ -220,23 +220,23 @@ async fn call_chat_once(
             Ok(answer)
         }
         Err(e) => {
-                   log_rag_attempt(
-                    pool.clone(),
-                    kb_name,
-                    "rag",
-                    model,
-                    &row.name,
-                    502,
-                    0,
-                    0,
-                    0,
-                    dur,
-                    Some(e.to_string()),
-                    Some(chat_body.to_string()),
-                    None,
-                    trace_id,
-                    None,
-                );
+            log_rag_attempt(
+                pool.clone(),
+                kb_name,
+                "rag",
+                model,
+                &row.name,
+                502,
+                0,
+                0,
+                0,
+                dur,
+                Some(e.to_string()),
+                Some(chat_body.to_string()),
+                None,
+                trace_id,
+                None,
+            );
             Err(e.into())
         }
     }
@@ -424,23 +424,23 @@ pub async fn ask(
                         .and_then(|m| m.as_str())
                         .unwrap_or("上游返回错误")
                         .to_string();
-                           log_rag_attempt(
-                            pool.clone(),
-                            &kb.name,
-                            "rag",
-                            model,
-                            &selected.name,
-                            status as i32,
-                            0,
-                            0,
-                            0,
-                            dur,
-                            Some(msg.clone()),
-                            Some(chat_body.to_string()),
-                            Some(body.to_string()),
-                            &trace_id,
-                            provider_request_id,
-                        );
+                    log_rag_attempt(
+                        pool.clone(),
+                        &kb.name,
+                        "rag",
+                        model,
+                        &selected.name,
+                        status as i32,
+                        0,
+                        0,
+                        0,
+                        dur,
+                        Some(msg.clone()),
+                        Some(chat_body.to_string()),
+                        Some(body.to_string()),
+                        &trace_id,
+                        provider_request_id,
+                    );
                     let retryable =
                         status >= 500 || status == 429 || status == 408 || status == 409;
                     if !retryable || !fo.should_retry() {
@@ -449,23 +449,23 @@ pub async fn ask(
                 }
                 Err(e) => {
                     let dur = af_start.elapsed().as_millis() as i64;
-                           log_rag_attempt(
-                            pool.clone(),
-                            &kb.name,
-                            "rag",
-                            model,
-                            &selected.name,
-                            502,
-                            0,
-                            0,
-                            0,
-                            dur,
-                            Some(e.to_string()),
-                            Some(chat_body.to_string()),
-                            None,
-                            &trace_id,
-                            None,
-                        );
+                    log_rag_attempt(
+                        pool.clone(),
+                        &kb.name,
+                        "rag",
+                        model,
+                        &selected.name,
+                        502,
+                        0,
+                        0,
+                        0,
+                        dur,
+                        Some(e.to_string()),
+                        Some(chat_body.to_string()),
+                        None,
+                        &trace_id,
+                        None,
+                    );
                     if !fo.should_retry() {
                         return Err(AppError::Proxy(e.to_string()));
                     }
