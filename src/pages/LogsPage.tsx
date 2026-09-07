@@ -18,6 +18,7 @@ import {
   ShieldCheck,
   ShieldOff,
   X,
+  Link2,
 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -140,6 +141,7 @@ export function LogsPage() {
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const [keyword, setKeyword] = useState("");
+  const [traceFilter, setTraceFilter] = useState("");
   const [channelFilter, setChannelFilter] = useState("all");
   const [modelFilter, setModelFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
@@ -180,6 +182,7 @@ export function LogsPage() {
     try {
       const list = await logApi.list({
         keyword: keyword.trim() || undefined,
+        trace_id: traceFilter.trim() || undefined,
         channel_name: channelFilter !== "all" ? channelFilter : undefined,
         model: modelFilter !== "all" ? modelFilter : undefined,
         page: p + 1, // backend is 1-indexed
@@ -213,7 +216,7 @@ export function LogsPage() {
     }, 300);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [keyword, channelFilter, modelFilter]);
+  }, [keyword, traceFilter, channelFilter, modelFilter]);
 
   const modelOptions = useMemo(
     () => Array.from(new Set(channels.flatMap((c) => c.models))).sort(),
@@ -244,6 +247,7 @@ export function LogsPage() {
 
   const resetFilters = () => {
     setKeyword("");
+    setTraceFilter("");
     setChannelFilter("all");
     setModelFilter("all");
     setStatusFilter("all");
@@ -251,6 +255,7 @@ export function LogsPage() {
 
   const hasFilter =
     keyword.trim() !== "" ||
+    traceFilter.trim() !== "" ||
     channelFilter !== "all" ||
     modelFilter !== "all" ||
     statusFilter !== "all";
@@ -306,6 +311,15 @@ export function LogsPage() {
             placeholder="关键词：模型 / 渠道 / 错误信息"
             value={keyword}
             onChange={(e) => setKeyword(e.target.value)}
+          />
+        </div>
+        <div className="relative">
+          <Link2 className="absolute top-1/2 left-2.5 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            className="w-60 pl-8 font-mono text-xs"
+            placeholder="Trace ID 精确匹配（链路追踪）"
+            value={traceFilter}
+            onChange={(e) => setTraceFilter(e.target.value)}
           />
         </div>
         <Select value={channelFilter} onValueChange={setChannelFilter}>
@@ -380,6 +394,7 @@ export function LogsPage() {
                     <TableHead>模型</TableHead>
                     <TableHead>状态</TableHead>
                     <TableHead>安全</TableHead>
+                    <TableHead>链路</TableHead>
                     <TableHead className="text-right">Tokens</TableHead>
                     <TableHead className="text-right">耗时</TableHead>
                     <TableHead className="w-10 text-center">操作</TableHead>
@@ -424,6 +439,24 @@ export function LogsPage() {
                               <span className="text-xs text-muted-foreground">-</span>
                             )}
                           </TableCell>
+                          <TableCell>
+                            {l.trace_id ? (
+                              <button
+                                type="button"
+                                title={`按此 Trace ID 过滤：${l.trace_id}`}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setTraceFilter(l.trace_id!);
+                                }}
+                                className="inline-flex max-w-28 items-center gap-1 rounded-full border px-2 py-0.5 font-mono text-[10px] text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground"
+                              >
+                                <Link2 className="h-3 w-3 shrink-0" />
+                                <span className="truncate">{l.trace_id.slice(0, 8)}</span>
+                              </button>
+                            ) : (
+                              <span className="text-xs text-muted-foreground">-</span>
+                            )}
+                          </TableCell>
                           <TableCell className="text-right font-mono text-xs tabular-nums">
                             {l.total_tokens > 0 ? (
                               <span title={`P:${l.prompt_tokens} / C:${l.completion_tokens}`}>
@@ -452,8 +485,8 @@ export function LogsPage() {
                         </TableRow>
                         {expanded && (
                           <TableRow className="hover:bg-transparent">
-                            <TableCell colSpan={11} className="bg-muted/30 p-4">
-                              <LogDetail id={l.id} />
+                            <TableCell colSpan={12} className="bg-muted/30 p-4">
+                              <LogDetail id={l.id} onTraceClick={setTraceFilter} />
                             </TableCell>
                           </TableRow>
                         )}
@@ -545,7 +578,7 @@ export function LogsPage() {
 // ─── 展开明细卡片 ────────────────────────────────────────────────────────────
 // 点击列表行后展开，调用 logApi.detail(id) 取完整行（含 request/response body）。
 
-function LogDetail({ id }: { id: string }) {
+function LogDetail({ id, onTraceClick }: { id: string; onTraceClick?: (traceId: string) => void }) {
   const [detail, setDetail] = useState<RequestLog | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -600,6 +633,46 @@ function LogDetail({ id }: { id: string }) {
         <StatCard label="流式" value={detail.is_stream ? "是" : "否"} />
         <StatCard label="重试" value={detail.is_retry ? "是" : "否"} />
       </div>
+
+      {/* 链路追踪：网关 trace_id（同一请求内所有日志行共享）+ 上游请求 ID */}
+      {(detail.trace_id || detail.provider_request_id) && (
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+          {detail.trace_id && (
+            <StatCard label="Trace ID（网关链路）" mono>
+              <span className="flex items-center gap-1.5">
+                <span className="truncate" title={detail.trace_id}>
+                  {detail.trace_id}
+                </span>
+                <CopyButton value={detail.trace_id} label="Trace ID" variant="pill" />
+                {onTraceClick && (
+                  <button
+                    type="button"
+                    title="按此 Trace ID 过滤列表"
+                    onClick={() => onTraceClick(detail.trace_id!)}
+                    className="rounded-full px-2 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                  >
+                    <Link2 className="h-3 w-3" />
+                  </button>
+                )}
+              </span>
+            </StatCard>
+          )}
+          {detail.provider_request_id && (
+            <StatCard label="上游请求 ID" mono>
+              <span className="flex items-center gap-1.5">
+                <span className="truncate" title={detail.provider_request_id}>
+                  {detail.provider_request_id}
+                </span>
+                <CopyButton
+                  value={detail.provider_request_id}
+                  label="上游请求 ID"
+                  variant="pill"
+                />
+              </span>
+            </StatCard>
+          )}
+        </div>
+      )}
 
       {/* 错误信息 */}
       {detail.error_message && (

@@ -67,7 +67,7 @@ pub async fn embed_texts(
             stream: false,
         };
 
-        let (status, resp) = adaptor
+        let (status, resp, _provider_request_id) = adaptor
             .forward_embeddings(&proxy_req, &config)
             .await
             .map_err(AppError::from)?;

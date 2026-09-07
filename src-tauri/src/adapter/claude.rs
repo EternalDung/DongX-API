@@ -129,7 +129,7 @@ impl Adaptor for ClaudeAdaptor {
         &self,
         _request: &ProxyRequest,
         _config: &ChannelConfig,
-    ) -> Result<(u16, serde_json::Value), anyhow::Error> {
+    ) -> Result<(u16, serde_json::Value, Option<String>), anyhow::Error> {
         Err(anyhow::anyhow!(
             "Embeddings API 不支持 Anthropic (Claude) 渠道"
         ))
@@ -209,7 +209,7 @@ impl Adaptor for ClaudeAdaptor {
         &self,
         request: &ProxyRequest,
         config: &ChannelConfig,
-    ) -> Result<(u16, Value, Option<TokenUsage>), anyhow::Error> {
+    ) -> Result<(u16, Value, Option<TokenUsage>, Option<String>), anyhow::Error> {
         let client = build_client(config)?;
         let resp = client
             .post(self.request_url(config))
@@ -220,13 +220,14 @@ impl Adaptor for ClaudeAdaptor {
             .await?;
 
         let status = resp.status().as_u16();
+        let provider_request_id = crate::adapter::extract_provider_request_id(resp.headers());
         let body: Value = resp.json().await?;
 
         // Non-streaming: convert back to OpenAI format; usage moves from
         // input/output_tokens into prompt/completion_tokens.
         let usage = extract_usage(&body);
         let converted = self.to_openai_response(&request.model, &body);
-        Ok((status, converted, usage))
+        Ok((status, converted, usage, provider_request_id))
     }
 
     async fn forward_stream(

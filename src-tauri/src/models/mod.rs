@@ -85,6 +85,8 @@ pub struct RequestLogRow {
     pub security_action: String,
     pub sanitized: bool,
     pub blocked_reason: Option<String>,
+    pub trace_id: Option<String>,
+    pub provider_request_id: Option<String>,
 }
 
 /// Slim variant for list queries (excludes heavy request/response bodies).

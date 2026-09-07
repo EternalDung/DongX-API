@@ -38,7 +38,7 @@ impl Adaptor for DeepSeekAdaptor {
         &self,
         request: &ProxyRequest,
         config: &ChannelConfig,
-    ) -> Result<(u16, serde_json::Value, Option<crate::adapter::TokenUsage>), anyhow::Error> {
+    ) -> Result<(u16, serde_json::Value, Option<crate::adapter::TokenUsage>, Option<String>), anyhow::Error> {
         self.0.forward(request, config).await
     }
 

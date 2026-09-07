@@ -328,6 +328,7 @@ pub struct LogFilter {
     pub end_time: Option<String>,
     pub page: u32,
     pub page_size: u32,
+    pub trace_id: Option<String>,
 }
 
 pub mod request_logs {
@@ -359,6 +360,10 @@ pub mod request_logs {
         security_action: &str,
         sanitized: bool,
         blocked_reason: Option<&str>,
+        // 链路追踪：网关侧强制生成的 trace_id（一次请求内所有日志行共享）。
+        trace_id: Option<&str>,
+        // 上游返回的请求 ID（如 x-request-id / request-id），用于向提供商排查。
+        provider_request_id: Option<&str>,
     ) -> Result<String, sqlx::Error> {
         let id = new_id();
         let ts = now();
@@ -368,9 +373,10 @@ pub mod request_logs {
                 upstream_model, mode, status_code, prompt_tokens, completion_tokens,
                 total_tokens, duration_ms, error_message, is_stream, is_retry,
                 created_at, request_body, response_body, risk_level, risk_score,
-                risk_summary, security_action, sanitized, blocked_reason)
+                risk_summary, security_action, sanitized, blocked_reason, trace_id,
+                provider_request_id)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,
-                ?19,?20,?21,?22,?23,?24,?25)",
+                ?19,?20,?21,?22,?23,?24,?25,?26,?27)",
         )
         .bind(&id)
         // seq 现为 INTEGER PRIMARY KEY AUTOINCREMENT（迁移 007），
@@ -399,6 +405,8 @@ pub mod request_logs {
         .bind(security_action)
         .bind(sanitized)
         .bind(blocked_reason)
+        .bind(trace_id)
+        .bind(provider_request_id)
         .execute(pool)
         .await?;
 
@@ -413,7 +421,7 @@ pub mod request_logs {
         let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(
             "SELECT id, seq, api_key_name, api_key_id, channel_name, model, mode, status_code,
                     total_tokens, duration_ms, is_stream, is_retry, created_at,
-                    error_message, risk_level, risk_score, security_action
+                    error_message, risk_level, risk_score, security_action, trace_id
              FROM request_logs WHERE 1=1 ",
         );
 
@@ -438,6 +446,9 @@ pub mod request_logs {
         }
         if let Some(e) = &filter.end_time {
             qb.push(" AND created_at <= ").push_bind(e.clone());
+        }
+        if let Some(t) = &filter.trace_id {
+            qb.push(" AND trace_id = ").push_bind(t.clone());
         }
 
         let page_size = filter.page_size.clamp(1, 200);
@@ -913,6 +924,8 @@ mod tests {
             None,
             "allow",
             sanitized,
+            None,
+            Some("trace-test"),
             None,
         )
         .await

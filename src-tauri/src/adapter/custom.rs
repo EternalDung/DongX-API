@@ -108,7 +108,7 @@ impl Adaptor for CustomAdaptor {
         &self,
         request: &ProxyRequest,
         config: &ChannelConfig,
-    ) -> Result<(u16, serde_json::Value, Option<TokenUsage>), anyhow::Error> {
+    ) -> Result<(u16, serde_json::Value, Option<TokenUsage>, Option<String>), anyhow::Error> {
         let client = build_client(config)?;
         let mut body = request.body.clone();
         body["model"] = json!(map_model(request, config));
@@ -124,9 +124,10 @@ impl Adaptor for CustomAdaptor {
             .await?;
 
         let status = resp.status().as_u16();
+        let provider_request_id = crate::adapter::extract_provider_request_id(resp.headers());
         let body: serde_json::Value = resp.json().await?;
         let usage = extract_usage(&body);
-        Ok((status, body, usage))
+        Ok((status, body, usage, provider_request_id))
     }
 
     async fn forward_stream(

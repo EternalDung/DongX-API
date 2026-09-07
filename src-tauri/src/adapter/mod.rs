@@ -78,12 +78,18 @@ pub trait Adaptor: Send + Sync {
     /// Test channel connectivity with a minimal request; measure latency.
     async fn test(&self, config: &ChannelConfig) -> Result<TestResult, anyhow::Error>;
 
-    /// Forward a non-streaming request. Returns (status, body, usage).
+    /// Forward a non-streaming request. Returns (status, body, usage,
+    /// provider_request_id). The 4th element is the upstream's own request id
+    /// echoed back via response headers (e.g. `x-request-id` / `request-id`) —
+    /// distinct from DongX's server-generated gateway `trace_id`.
     async fn forward(
         &self,
         request: &ProxyRequest,
         config: &ChannelConfig,
-    ) -> Result<(u16, serde_json::Value, Option<TokenUsage>), anyhow::Error>;
+    ) -> Result<
+        (u16, serde_json::Value, Option<TokenUsage>, Option<String>),
+        anyhow::Error,
+    >;
 
     /// Forward a streaming (SSE) request. Returns the raw upstream response;
     /// the caller streams `bytes_stream()` through to the client.
@@ -96,12 +102,13 @@ pub trait Adaptor: Send + Sync {
     /// Forward an embeddings request to the OpenAI-compatible `/v1/embeddings`
     /// endpoint. Default implementation POSTs the raw body with Bearer auth;
     /// providers without an embeddings API (Claude / Gemini) override this to
-    /// return a clear error instead of a confusing 404.
+    /// return a clear error instead of a confusing 404. Returns
+    /// (status, body, provider_request_id).
     async fn forward_embeddings(
         &self,
         request: &ProxyRequest,
         config: &ChannelConfig,
-    ) -> Result<(u16, serde_json::Value), anyhow::Error> {
+    ) -> Result<(u16, serde_json::Value, Option<String>), anyhow::Error> {
         let _ = self;
         let client = build_client(config)?;
         let base = config.base_url.trim_end_matches('/');
@@ -113,6 +120,7 @@ pub trait Adaptor: Send + Sync {
             .send()
             .await?;
         let status = resp.status().as_u16();
+        let provider_request_id = extract_provider_request_id(resp.headers());
         // Read the raw body once, then parse. This keeps the real upstream
         // status + a body snippet in the error instead of an opaque
         // "error decoding response body" when the payload isn't JSON
@@ -123,7 +131,7 @@ pub trait Adaptor: Send + Sync {
             let snippet: String = text.chars().take(300).collect();
             anyhow::anyhow!("嵌入上游返回非 JSON（HTTP {}）：{}", status, snippet)
         })?;
-        Ok((status, body))
+        Ok((status, body, provider_request_id))
     }
 }
 
@@ -255,6 +263,22 @@ pub(crate) fn extract_usage(body: &serde_json::Value) -> Option<TokenUsage> {
         });
     }
     None
+}
+
+/// Extract the upstream's own request id from response headers, if present.
+///
+/// OpenAI-compatible providers echo `x-request-id`; Anthropic uses
+/// `request-id`. This is the id the *model provider* assigns to the call —
+/// distinct from DongX's server-generated gateway `trace_id`. `None` when the
+/// upstream didn't return one (or it wasn't decodable).
+pub(crate) fn extract_provider_request_id(
+    headers: &reqwest::header::HeaderMap,
+) -> Option<String> {
+    headers
+        .get("x-request-id")
+        .or_else(|| headers.get("request-id"))
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
 }
 
 /// Apply model mapping if configured: gateway model -> upstream model.

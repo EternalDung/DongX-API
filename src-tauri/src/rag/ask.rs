@@ -4,6 +4,7 @@
 use serde::Serialize;
 use serde_json::Value;
 use sqlx::SqlitePool;
+use uuid::Uuid;
 
 use crate::adapter::{get_adaptor, ChannelConfig, ProxyRequest};
 use crate::core::dispatcher::DispatchContext;
@@ -67,11 +68,14 @@ fn log_rag_attempt(
     error_message: Option<String>,
     request_body: Option<String>,
     response_body: Option<String>,
+    trace_id: &str,
+    provider_request_id: Option<String>,
 ) {
     let api_key_name = format!("RAG: {}", kb_name);
     let channel = channel_name.to_string();
     let model = model.to_string();
     let mode = mode.to_string();
+    let trace_id = trace_id.to_string();
     tokio::spawn(async move {
         if let Err(e) = request_logs::insert(
             &pool,
@@ -97,6 +101,8 @@ fn log_rag_attempt(
             "allow",
             false,
             None,
+            Some(trace_id.as_str()),
+            provider_request_id.as_deref(),
         )
         .await
         {
@@ -113,6 +119,7 @@ async fn call_chat_once(
     row: &ChannelRow,
     model: &str,
     chat_body: &Value,
+    trace_id: &str,
 ) -> Result<String, AppError> {
     let upstream_api_key = pick_upstream_key(&row.cred_encrypted)?;
     let models: Vec<String> = serde_json::from_str(&row.models).unwrap_or_default();
@@ -143,7 +150,7 @@ async fn call_chat_once(
     let fwd = adaptor.forward(&proxy_req, &channel_config).await;
     let dur = af_start.elapsed().as_millis() as i64;
     match fwd {
-        Ok((status, body, _usage)) => {
+        Ok((status, body, _usage, provider_request_id)) => {
             if !(200..300).contains(&status) {
                 let msg = body
                     .get("error")
@@ -165,6 +172,8 @@ async fn call_chat_once(
                     Some(msg.clone()),
                     Some(chat_body.to_string()),
                     Some(body.to_string()),
+                    trace_id,
+                    provider_request_id,
                 );
                 return Err(AppError::Proxy(format!("上游返回 {}: {}", status, msg)));
             }
@@ -183,21 +192,23 @@ async fn call_chat_once(
                 .and_then(|u| u.get("total_tokens"))
                 .and_then(|v| v.as_u64())
                 .unwrap_or(pt + ct);
-            log_rag_attempt(
-                pool.clone(),
-                kb_name,
-                "rag",
-                model,
-                &row.name,
-                status as i32,
-                pt as i64,
-                ct as i64,
-                tt as i64,
-                dur,
-                None,
-                Some(chat_body.to_string()),
-                Some(body.to_string()),
-            );
+                   log_rag_attempt(
+                    pool.clone(),
+                    kb_name,
+                    "rag",
+                    model,
+                    &row.name,
+                    status as i32,
+                    pt as i64,
+                    ct as i64,
+                    tt as i64,
+                    dur,
+                    None,
+                    Some(chat_body.to_string()),
+                    Some(body.to_string()),
+                    trace_id,
+                    provider_request_id,
+                );
             let answer = body
                 .get("choices")
                 .and_then(|c| c.get(0))
@@ -209,21 +220,23 @@ async fn call_chat_once(
             Ok(answer)
         }
         Err(e) => {
-            log_rag_attempt(
-                pool.clone(),
-                kb_name,
-                "rag",
-                model,
-                &row.name,
-                502,
-                0,
-                0,
-                0,
-                dur,
-                Some(e.to_string()),
-                Some(chat_body.to_string()),
-                None,
-            );
+                   log_rag_attempt(
+                    pool.clone(),
+                    kb_name,
+                    "rag",
+                    model,
+                    &row.name,
+                    502,
+                    0,
+                    0,
+                    0,
+                    dur,
+                    Some(e.to_string()),
+                    Some(chat_body.to_string()),
+                    None,
+                    trace_id,
+                    None,
+                );
             Err(e.into())
         }
     }
@@ -257,6 +270,7 @@ pub async fn ask(
         return Err(AppError::Validation("回答模型不能为空".into()));
     }
 
+    let trace_id = Uuid::new_v4().to_string();
     let kb = get_kb(pool, &kb_ids[0]).await?;
     // 纯关键词模式无需向量：跳过嵌入，省一次上游调用 + 配额。
     let need_embed = !matches!(mode, RetrievalMode::Keyword);
@@ -325,7 +339,7 @@ pub async fn ask(
                 row.name, model
             )));
         }
-        call_chat_once(pool, &kb.name, &row, model, &chat_body).await?
+        call_chat_once(pool, &kb.name, &row, model, &chat_body, &trace_id).await?
     } else {
         let ctx_disp = DispatchContext {
             model: model.to_string(),
@@ -359,7 +373,7 @@ pub async fn ask(
             let af_start = std::time::Instant::now();
             let adaptor = get_adaptor(&selected.channel_type);
             match adaptor.forward(&proxy_req, &config).await {
-                Ok((status, body, _usage)) => {
+                Ok((status, body, _usage, provider_request_id)) => {
                     let dur = af_start.elapsed().as_millis() as i64;
                     if (200..300).contains(&status) {
                         let pt = body
@@ -391,6 +405,8 @@ pub async fn ask(
                             None,
                             Some(chat_body.to_string()),
                             Some(body.to_string()),
+                            &trace_id,
+                            provider_request_id,
                         );
                         out = body
                             .get("choices")
@@ -408,21 +424,23 @@ pub async fn ask(
                         .and_then(|m| m.as_str())
                         .unwrap_or("上游返回错误")
                         .to_string();
-                    log_rag_attempt(
-                        pool.clone(),
-                        &kb.name,
-                        "rag",
-                        model,
-                        &selected.name,
-                        status as i32,
-                        0,
-                        0,
-                        0,
-                        dur,
-                        Some(msg.clone()),
-                        Some(chat_body.to_string()),
-                        Some(body.to_string()),
-                    );
+                           log_rag_attempt(
+                            pool.clone(),
+                            &kb.name,
+                            "rag",
+                            model,
+                            &selected.name,
+                            status as i32,
+                            0,
+                            0,
+                            0,
+                            dur,
+                            Some(msg.clone()),
+                            Some(chat_body.to_string()),
+                            Some(body.to_string()),
+                            &trace_id,
+                            provider_request_id,
+                        );
                     let retryable =
                         status >= 500 || status == 429 || status == 408 || status == 409;
                     if !retryable || !fo.should_retry() {
@@ -431,21 +449,23 @@ pub async fn ask(
                 }
                 Err(e) => {
                     let dur = af_start.elapsed().as_millis() as i64;
-                    log_rag_attempt(
-                        pool.clone(),
-                        &kb.name,
-                        "rag",
-                        model,
-                        &selected.name,
-                        502,
-                        0,
-                        0,
-                        0,
-                        dur,
-                        Some(e.to_string()),
-                        Some(chat_body.to_string()),
-                        None,
-                    );
+                           log_rag_attempt(
+                            pool.clone(),
+                            &kb.name,
+                            "rag",
+                            model,
+                            &selected.name,
+                            502,
+                            0,
+                            0,
+                            0,
+                            dur,
+                            Some(e.to_string()),
+                            Some(chat_body.to_string()),
+                            None,
+                            &trace_id,
+                            None,
+                        );
                     if !fo.should_retry() {
                         return Err(AppError::Proxy(e.to_string()));
                     }
@@ -483,6 +503,7 @@ async fn chat_completion(
     channel_id: Option<&str>,
     system: &str,
     user: &str,
+    trace_id: &str,
 ) -> Result<String, AppError> {
     let chat_body = serde_json::json!({
         "model": model,
@@ -512,7 +533,7 @@ async fn chat_completion(
                 row.name, model
             )));
         }
-        call_chat_once(pool, kb_name, &row, model, &chat_body).await
+        call_chat_once(pool, kb_name, &row, model, &chat_body, trace_id).await
     } else {
         let ctx_disp = DispatchContext {
             model: model.to_string(),
@@ -546,7 +567,7 @@ async fn chat_completion(
             let af_start = std::time::Instant::now();
             let adaptor = get_adaptor(&selected.channel_type);
             match adaptor.forward(&proxy_req, &config).await {
-                Ok((status, body, _usage)) => {
+                Ok((status, body, _usage, provider_request_id)) => {
                     let dur = af_start.elapsed().as_millis() as i64;
                     if (200..300).contains(&status) {
                         let pt = body
@@ -578,6 +599,8 @@ async fn chat_completion(
                             None,
                             Some(chat_body.to_string()),
                             Some(body.to_string()),
+                            trace_id,
+                            provider_request_id,
                         );
                         out = body
                             .get("choices")
@@ -609,6 +632,8 @@ async fn chat_completion(
                         Some(msg.clone()),
                         Some(chat_body.to_string()),
                         Some(body.to_string()),
+                        trace_id,
+                        provider_request_id,
                     );
                     let retryable =
                         status >= 500 || status == 429 || status == 408 || status == 409;
@@ -631,6 +656,8 @@ async fn chat_completion(
                         dur,
                         Some(e.to_string()),
                         Some(chat_body.to_string()),
+                        None,
+                        trace_id,
                         None,
                     );
                     if !fo.should_retry() {
@@ -687,6 +714,9 @@ pub async fn ask_deep_research(
         return Err(AppError::Validation("回答模型不能为空".into()));
     }
 
+    // 链路追踪：本次 Deep Research 全部 LLM 子调用共用一个 trace_id。
+    let trace_id = Uuid::new_v4().to_string();
+
     let kb = get_kb(pool, &kb_ids[0]).await?;
     // 纯关键词模式无需向量：跳过嵌入，省一次上游调用 + 配额。
     let need_embed = !matches!(mode, RetrievalMode::Keyword);
@@ -720,6 +750,7 @@ pub async fn ask_deep_research(
                 channel_id,
                 "你是一个研究助手，根据已有发现生成下一步搜索查询。只返回查询本身。",
                 &prompt,
+                &trace_id,
             )
             .await
             {
@@ -802,6 +833,7 @@ pub async fn ask_deep_research(
             channel_id,
             "你是深度研究助手。基于 RAG 内容进行多轮迭代研究，逐步深入分析。",
             &round_prompt,
+            &trace_id,
         )
         .await
         {
@@ -838,6 +870,7 @@ pub async fn ask_deep_research(
         channel_id,
         "你是深度研究助手，综合多轮研究发现给出最终回答。",
         &final_prompt,
+        &trace_id,
     )
     .await?;
 

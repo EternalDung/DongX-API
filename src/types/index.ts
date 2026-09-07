@@ -180,6 +180,10 @@ export interface RequestLog {
   security_action: SecurityAction;
   sanitized: boolean;
   blocked_reason: string | null;
+  /** 网关侧强制生成的链路追踪 ID：一次请求内所有日志行共享 */
+  trace_id: string | null;
+  /** 上游返回的请求 ID（x-request-id / request-id），用于向提供商排查 */
+  provider_request_id: string | null;
 }
 
 // ============================================================

@@ -69,6 +69,8 @@ async fn run_chat_pipeline(
 ) -> Response {
     let state: Arc<AppState> = app.state::<Arc<AppState>>().inner().clone();
     let start = std::time::Instant::now();
+    // 链路追踪：网关侧强制生成的 trace_id，贯穿本次请求的所有故障转移重试。
+    let trace_id = uuid::Uuid::new_v4().to_string();
 
     // 单请求内设置/规则缓存：启动与设置变更时由 AppState.settings_cache 加载，
     // 这里只读一次本地镜像，避免每条请求 20+ 次 settings/rules 的重复读库。
@@ -193,15 +195,17 @@ async fn run_chat_pipeline(
             0,
             0,
             duration_ms,
-            gate.outcome.blocked_reason.clone(),
-            is_stream,
-            false,
-            raw_request.clone(),
-            None,
-            mode,
-            sec_outcome.clone(),
-            sec_findings.clone(),
-        );
+                gate.outcome.blocked_reason.clone(),
+                is_stream,
+                false,
+                raw_request.clone(),
+                None,
+                mode,
+                sec_outcome.clone(),
+                sec_findings.clone(),
+                Some(trace_id.clone()),
+                None,
+            );
         return error_response(
             StatusCode::FORBIDDEN,
             "security_blocked",
@@ -242,6 +246,7 @@ async fn run_chat_pipeline(
             resp_body: serde_json::Value,
             usage: Option<adapter::TokenUsage>,
             upstream_model: String,
+            provider_request_id: Option<String>,
         },
         Stream {
             selected: dispatcher::SelectedChannel,
@@ -325,6 +330,8 @@ async fn run_chat_pipeline(
                         mode,
                         sec_outcome.clone(),
                         sec_findings.clone(),
+                        Some(trace_id.clone()),
+                        None,
                     );
                     // 按上游状态分类：5xx/429/408/409 计入熔断，其余 4xx 不计。
                     record_upstream_outcome(
@@ -345,7 +352,7 @@ async fn run_chat_pipeline(
             }
         } else {
             match adaptor.forward(&proxy_req, &config).await {
-                Ok((status, resp_body, usage)) => {
+                Ok((status, resp_body, usage, provider_request_id)) => {
                     record_upstream_outcome(&state, is_stream, &selected.id, true, false, "").await;
                     success = Some(Success::NonStream {
                         selected,
@@ -353,6 +360,7 @@ async fn run_chat_pipeline(
                         resp_body,
                         usage,
                         upstream_model,
+                        provider_request_id,
                     });
                     break;
                 }
@@ -379,6 +387,8 @@ async fn run_chat_pipeline(
                         mode,
                         sec_outcome.clone(),
                         sec_findings.clone(),
+                        Some(trace_id.clone()),
+                        None,
                     );
                     // 上游连接/超时失败 → 可重试，计入熔断。
                     record_upstream_outcome(&state, is_stream, &selected.id, false, true, &msg)
@@ -435,6 +445,7 @@ async fn run_chat_pipeline(
                 mode,
                 sec_outcome.clone(),
                 sec_findings.clone(),
+                trace_id.clone(),
             )
             .await;
         }
@@ -444,6 +455,7 @@ async fn run_chat_pipeline(
             resp_body,
             usage,
             upstream_model,
+            provider_request_id,
         } => {
             let (pt, ct, tt) = usage
                 .as_ref()
@@ -529,6 +541,8 @@ async fn run_chat_pipeline(
                 mode,
                 sec_outcome.clone(),
                 sec_findings.clone(),
+                Some(trace_id.clone()),
+                provider_request_id.clone(),
             );
 
             // Return upstream body + status.
@@ -582,6 +596,8 @@ pub async fn embeddings(
 ) -> Response {
     let state: Arc<AppState> = app.state::<Arc<AppState>>().inner().clone();
     let start = std::time::Instant::now();
+    // 链路追踪：embeddings 是独立入口（不经 run_chat_pipeline），自备 trace_id。
+    let trace_id = uuid::Uuid::new_v4().to_string();
     let mode = "embedding";
 
     // 1. Auth
@@ -681,6 +697,8 @@ pub async fn embeddings(
             mode,
             sec_outcome.clone(),
             sec_findings.clone(),
+            Some(trace_id.clone()),
+            None,
         );
         return error_response(
             StatusCode::FORBIDDEN,
@@ -740,7 +758,7 @@ pub async fn embeddings(
         let adaptor = adapter::get_adaptor(&selected.channel_type);
 
         match adaptor.forward_embeddings(&proxy_req, &config).await {
-            Ok((status, resp_body)) => {
+            Ok((status, resp_body, provider_request_id)) => {
                 record_upstream_outcome(&state, false, &selected.id, true, false, "").await;
 
                 // 嵌入用量以 prompt_tokens 计（OpenAI 返回 usage.prompt_tokens）。
@@ -774,6 +792,8 @@ pub async fn embeddings(
                     mode,
                     sec_outcome.clone(),
                     sec_findings.clone(),
+                    Some(trace_id.clone()),
+                    provider_request_id.clone(),
                 );
 
                 let st = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
@@ -1063,6 +1083,8 @@ fn spawn_log(
     mode: &'static str,
     sec: SecurityOutcome,
     findings: Vec<SecurityFinding>,
+    trace_id: Option<String>,
+    provider_request_id: Option<String>,
 ) {
     tokio::spawn(async move {
         let log_id = match request_logs::insert(
@@ -1089,6 +1111,8 @@ fn spawn_log(
             &sec.security_action,
             sec.sanitized,
             sec.blocked_reason.as_deref(),
+            trace_id.as_deref(),
+            provider_request_id.as_deref(),
         )
         .await
         {
@@ -1205,6 +1229,7 @@ async fn serve_stream(
     mode: &'static str,
     sec: SecurityOutcome,
     findings: Vec<SecurityFinding>,
+    trace_id: String,
 ) -> Response {
     // `resp` 已在调用方（故障转移循环）确认是 2xx，这里直接构建 SSE。
     let converter = match channel_type {
@@ -1212,6 +1237,10 @@ async fn serve_stream(
         "gemini" => StreamConverter::Gemini,
         _ => StreamConverter::None,
     };
+    // 流式响应的 provider_request_id 来自已确认 2xx 的上游响应头
+    // （forward_stream 返回的是原始 reqwest::Response，未经过 adaptor 的
+    // forward，故在此自行抓取）。
+    let provider_request_id = crate::adapter::extract_provider_request_id(resp.headers());
 
     // Responses streaming: the shared pipeline produced a Chat SSE stream.
     // Convert it into Responses SSE events here AND own the log (with the full
@@ -1238,6 +1267,8 @@ async fn serve_stream(
             "responses",
             sec.clone(),
             findings.clone(),
+            trace_id.clone(),
+            provider_request_id.clone(),
         );
         let (parts, body) = chat_resp.into_parts();
         if !parts.status.is_success() {
@@ -1258,6 +1289,8 @@ async fn serve_stream(
             mode,
             sec,
             findings,
+            trace_id,
+            provider_request_id,
         );
     }
 
@@ -1287,6 +1320,8 @@ async fn serve_stream(
             "messages",
             sec.clone(),
             findings.clone(),
+            trace_id.clone(),
+            provider_request_id.clone(),
         );
         let (parts, body) = chat_resp.into_parts();
         if !parts.status.is_success() {
@@ -1307,6 +1342,8 @@ async fn serve_stream(
             mode,
             sec,
             findings,
+            trace_id,
+            provider_request_id,
         );
     }
 
@@ -1328,6 +1365,8 @@ async fn serve_stream(
         mode,
         sec,
         findings,
+        trace_id,
+        provider_request_id,
     )
 }
 
@@ -1365,6 +1404,8 @@ fn build_stream_response(
     mode: &'static str,
     sec: SecurityOutcome,
     findings: Vec<SecurityFinding>,
+    trace_id: String,
+    provider_request_id: Option<String>,
 ) -> Response {
     use tokio::sync::mpsc;
 
@@ -1626,6 +1667,8 @@ fn build_stream_response(
                 mode,
                 sec_final,
                 findings_final,
+                Some(trace_id.clone()),
+                provider_request_id.clone(),
             );
         }
     });
@@ -1669,6 +1712,8 @@ fn build_responses_stream_response(
     mode: &'static str,
     sec: SecurityOutcome,
     findings: Vec<SecurityFinding>,
+    trace_id: String,
+    provider_request_id: Option<String>,
 ) -> Response {
     use futures_util::StreamExt;
     use tokio::sync::mpsc;
@@ -1827,6 +1872,8 @@ fn build_responses_stream_response(
             mode,
             sec_final,
             findings_final,
+            Some(trace_id.clone()),
+            provider_request_id.clone(),
         );
     });
 
@@ -1867,6 +1914,8 @@ fn build_messages_stream_response(
     mode: &'static str,
     sec: SecurityOutcome,
     findings: Vec<SecurityFinding>,
+    trace_id: String,
+    provider_request_id: Option<String>,
 ) -> Response {
     use futures_util::StreamExt;
     use tokio::sync::mpsc;
@@ -2036,6 +2085,8 @@ fn build_messages_stream_response(
             mode,
             sec_final,
             findings_final,
+            Some(trace_id.clone()),
+            provider_request_id.clone(),
         );
     });
 

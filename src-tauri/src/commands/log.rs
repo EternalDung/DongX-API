@@ -18,6 +18,8 @@ pub struct LogQuery {
     pub status_code: Option<i32>,
     pub start_time: Option<String>,
     pub end_time: Option<String>,
+    /// 链路追踪过滤：精确匹配网关生成的 trace_id。
+    pub trace_id: Option<String>,
     pub page: Option<u32>,
     pub page_size: Option<u32>,
 }
@@ -36,6 +38,7 @@ pub async fn list_logs(
         status_code: q.status_code,
         start_time: q.start_time,
         end_time: q.end_time,
+        trace_id: q.trace_id,
         page: q.page.unwrap_or(1),
         page_size: q.page_size.unwrap_or(20),
     };

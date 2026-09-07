@@ -168,7 +168,7 @@ impl Adaptor for GeminiAdaptor {
         &self,
         _request: &ProxyRequest,
         _config: &ChannelConfig,
-    ) -> Result<(u16, serde_json::Value), anyhow::Error> {
+    ) -> Result<(u16, serde_json::Value, Option<String>), anyhow::Error> {
         Err(anyhow::anyhow!(
             "Embeddings API 不支持 Google (Gemini) 渠道"
         ))
@@ -246,7 +246,7 @@ impl Adaptor for GeminiAdaptor {
         &self,
         request: &ProxyRequest,
         config: &ChannelConfig,
-    ) -> Result<(u16, Value, Option<TokenUsage>), anyhow::Error> {
+    ) -> Result<(u16, Value, Option<TokenUsage>, Option<String>), anyhow::Error> {
         let model = map_model(request, config);
         let url = self.request_url(config, &model, false);
         let gemini_body = self.to_gemini_request(request);
@@ -261,6 +261,7 @@ impl Adaptor for GeminiAdaptor {
 
         let status = resp.status();
         let status_code = status.as_u16();
+        let provider_request_id = crate::adapter::extract_provider_request_id(resp.headers());
         let gemini_json: Value = resp.json().await?;
 
         // Surface upstream errors in OpenAI error shape instead of 502-ing.
@@ -270,12 +271,12 @@ impl Adaptor for GeminiAdaptor {
                 .and_then(|m| m.as_str())
                 .unwrap_or("Gemini 上游返回错误");
             let err_body = json!({ "error": { "message": msg, "type": "upstream_error" } });
-            return Ok((status_code, err_body, None));
+            return Ok((status_code, err_body, None, provider_request_id));
         }
 
         let openai_response = self.to_openai_response(&model, &gemini_json);
         let usage = extract_usage(&openai_response);
-        Ok((status_code, openai_response, usage))
+        Ok((status_code, openai_response, usage, provider_request_id))
     }
 
     async fn forward_stream(

@@ -130,6 +130,8 @@ export interface LogQuery {
   status_code?: number;
   start_time?: string;
   end_time?: string;
+  /** 链路追踪过滤：精确匹配网关生成的 trace_id */
+  trace_id?: string;
   page?: number;
   page_size?: number;
 }

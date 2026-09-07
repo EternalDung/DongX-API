@@ -90,7 +90,7 @@ impl Adaptor for OpenAIAdaptor {
         &self,
         request: &ProxyRequest,
         config: &ChannelConfig,
-    ) -> Result<(u16, serde_json::Value, Option<TokenUsage>), anyhow::Error> {
+    ) -> Result<(u16, serde_json::Value, Option<TokenUsage>, Option<String>), anyhow::Error> {
         let client = build_client(config)?;
         let resp = client
             .post(self.request_url(config))
@@ -100,6 +100,8 @@ impl Adaptor for OpenAIAdaptor {
             .await?;
 
         let status = resp.status().as_u16();
+        // 抓取上游返回的 provider_request_id（OpenAI 兼容 X-Request-Id）。
+        let provider_request_id = crate::adapter::extract_provider_request_id(resp.headers());
         // Read the raw body once, then parse, so a non-JSON upstream response
         // (proxy/HTML error page, or an undecoded compressed body) surfaces the
         // real HTTP status + a snippet instead of an opaque
@@ -110,7 +112,7 @@ impl Adaptor for OpenAIAdaptor {
             anyhow::anyhow!("上游返回非 JSON（HTTP {}）：{}", status, snippet)
         })?;
         let usage = extract_usage(&body);
-        Ok((status, body, usage))
+        Ok((status, body, usage, provider_request_id))
     }
 
     async fn forward_stream(

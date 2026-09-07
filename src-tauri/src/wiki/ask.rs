@@ -4,6 +4,7 @@
 
 use serde_json::Value;
 use sqlx::SqlitePool;
+use uuid::Uuid;
 
 use crate::adapter::{get_adaptor, ChannelConfig, ProxyRequest};
 use crate::core::upstream_key::pick_upstream_key;
@@ -62,8 +63,11 @@ pub async fn ask(pool: &SqlitePool, project_id: &str, question: &str) -> AppResu
         "temperature": 0.3
     });
 
+    // 链路追踪：本次 Wiki 问答共用一个 trace_id。
+    let trace_id = Uuid::new_v4().to_string();
+
     let (answer, pt, ct, dur) =
-        call_chat_once(pool, &proj.name, &channel, &proj.chat_model, &body).await?;
+        call_chat_once(pool, &proj.name, &channel, &proj.chat_model, &body, &trace_id).await?;
 
     let citations = ranked
         .iter()
@@ -133,6 +137,7 @@ async fn call_chat_once(
     row: &ChannelRow,
     model: &str,
     chat_body: &Value,
+    trace_id: &str,
 ) -> AppResult<(String, i64, i64, i64)> {
     let upstream_api_key = pick_upstream_key(&row.cred_encrypted)?;
     let models: Vec<String> = serde_json::from_str(&row.models).unwrap_or_default();
@@ -163,7 +168,7 @@ async fn call_chat_once(
     let fwd = adaptor.forward(&proxy_req, &channel_config).await;
     let dur = af_start.elapsed().as_millis() as i64;
     match fwd {
-        Ok((status, body, _usage)) => {
+        Ok((status, body, _usage, provider_request_id)) => {
             if !(200..300).contains(&status) {
                 let msg = body
                     .get("error")
@@ -184,6 +189,8 @@ async fn call_chat_once(
                     Some(msg.clone()),
                     Some(chat_body.to_string()),
                     Some(body.to_string()),
+                    trace_id,
+                    provider_request_id,
                 );
                 return Err(AppError::Proxy(format!("上游返回 {status}: {msg}")));
             }
@@ -218,6 +225,8 @@ async fn call_chat_once(
                 None,
                 Some(chat_body.to_string()),
                 Some(body.to_string()),
+                trace_id,
+                provider_request_id,
             );
             Ok((answer, pt, ct, dur))
         }
@@ -235,6 +244,8 @@ async fn call_chat_once(
                 dur,
                 Some(msg.clone()),
                 Some(chat_body.to_string()),
+                None,
+                trace_id,
                 None,
             );
             Err(AppError::Proxy(msg))
@@ -258,10 +269,13 @@ fn log_wiki_attempt(
     error_message: Option<String>,
     request_body: Option<String>,
     response_body: Option<String>,
+    trace_id: &str,
+    provider_request_id: Option<String>,
 ) {
     let api_key_name = format!("WIKI: {kb_name}");
     let channel = channel_name.to_string();
     let model = model.to_string();
+    let trace_id = trace_id.to_string();
     tokio::spawn(async move {
         if let Err(e) = request_logs::insert(
             &pool,
@@ -287,6 +301,8 @@ fn log_wiki_attempt(
             "allow",
             false,
             None,
+            Some(trace_id.as_str()),
+            provider_request_id.as_deref(),
         )
         .await
         {
