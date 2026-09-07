@@ -388,6 +388,11 @@ pub fn completed_events(
     state: &mut ResponsesStreamState,
     usage: &StreamUsage,
 ) -> Vec<String> {
+    // 幂等保护：与 anthropic_stream::finalize 一致，重复调用（如重试路径）不应重复发出
+    // response.completed 与 [DONE]。
+    if state.completed_sent {
+        return Vec::new();
+    }
     let mut events = Vec::new();
     let msg_id = msg_id_of(response_id);
     let reasoning_id = reasoning_id_of(response_id);
@@ -612,4 +617,151 @@ pub fn completed_events(
     state.completed_sent = true;
     state.sequence_number = seq;
     events
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn usage(p: i64, c: i64) -> StreamUsage {
+        StreamUsage {
+            prompt_tokens: p,
+            completion_tokens: c,
+            total_tokens: p + c,
+        }
+    }
+
+    /// 包装成一个 `data:` SSE 帧（chat.completion.chunk）。
+    fn frame(delta: serde_json::Value) -> String {
+        format!("data: {}\n\n", json!({ "choices": [ { "delta": delta } ] }))
+    }
+
+    /// 抽取事件名序列；`data: [DONE]` 这类无 `event:` 的帧会被跳过。
+    fn event_names(events: &[String]) -> Vec<&str> {
+        events
+            .iter()
+            .filter_map(|e| e.lines().find(|l| l.starts_with("event: ")))
+            .map(|l| l.trim_start_matches("event: ").trim())
+            .collect()
+    }
+
+    /// 针对「单条字符串内含多个事件」的场景（如 created_events），按空行切帧。
+    fn event_names_sse(sse: &str) -> Vec<&str> {
+        sse.split("\n\n")
+            .filter(|b| !b.trim().is_empty())
+            .filter_map(|b| b.lines().find(|l| l.starts_with("event: ")))
+            .map(|l| l.trim_start_matches("event: ").trim())
+            .collect()
+    }
+
+    #[test]
+    fn created_events_emits_created_then_in_progress() {
+        let s = created_events("resp_test", "gpt-4o");
+        assert_eq!(
+            event_names_sse(&s),
+            vec!["response.created", "response.in_progress"]
+        );
+        assert!(s.contains("\"status\":\"in_progress\""));
+        assert!(s.contains("\"model\":\"gpt-4o\""));
+    }
+
+    #[test]
+    fn text_stream_emits_item_lifecycle_then_delta() {
+        let mut st = ResponsesStreamState::default();
+        let ev = convert_chunk(&frame(json!({ "content": "Hi" })), "resp_test", &mut st);
+
+        assert_eq!(
+            event_names(&ev),
+            vec![
+                "response.output_item.added",
+                "response.content_part.added",
+                "response.output_text.delta",
+            ]
+        );
+        assert_eq!(st.text_output_index, 0);
+        assert_eq!(st.next_output_index, 1);
+        assert_eq!(st.accumulated_content, "Hi");
+
+        // 后续文本只追加 delta，不再重复 added
+        let ev2 = convert_chunk(&frame(json!({ "content": " there" })), "resp_test", &mut st);
+        assert_eq!(event_names(&ev2), vec!["response.output_text.delta"]);
+        assert_eq!(st.accumulated_content, "Hi there");
+    }
+
+    #[test]
+    fn reasoning_and_text_get_distinct_output_index() {
+        let mut st = ResponsesStreamState::default();
+        convert_chunk(
+            &frame(json!({ "reasoning_content": "think" })),
+            "resp_test",
+            &mut st,
+        );
+        convert_chunk(&frame(json!({ "content": "answer" })), "resp_test", &mut st);
+
+        assert_eq!(st.reasoning_output_index, 0);
+        assert_eq!(st.text_output_index, 1);
+        assert_eq!(st.accumulated_reasoning, "think");
+        assert_eq!(st.accumulated_content, "answer");
+    }
+
+    #[test]
+    fn completed_events_closes_items_and_ends_with_done() {
+        let mut st = ResponsesStreamState::default();
+        convert_chunk(&frame(json!({ "content": "Hi" })), "resp_test", &mut st);
+        let ev = completed_events("resp_test", "gpt-4o", &mut st, &usage(5, 2));
+        let names = event_names(&ev);
+
+        assert!(
+            names.contains(&"response.output_text.done"),
+            "实际: {names:?}"
+        );
+        assert!(
+            names.contains(&"response.content_part.done"),
+            "实际: {names:?}"
+        );
+        assert!(
+            names.contains(&"response.output_item.done"),
+            "实际: {names:?}"
+        );
+        assert!(names.contains(&"response.completed"), "实际: {names:?}");
+        assert_eq!(ev.last().unwrap(), "data: [DONE]\n\n");
+        assert!(st.completed_sent);
+
+        // usage 落到 response.completed 上
+        let completed = ev
+            .iter()
+            .find(|e| e.contains("response.completed"))
+            .unwrap();
+        assert!(completed.contains("\"output_tokens\":2"));
+        assert!(completed.contains("\"total_tokens\":7"));
+    }
+
+    #[test]
+    fn malformed_or_done_frames_produce_no_events() {
+        let mut st = ResponsesStreamState::default();
+        let ev = convert_chunk(
+            "data: not-json\n\ndata: [DONE]\n\nno-data-line\n\n",
+            "resp_test",
+            &mut st,
+        );
+        assert!(ev.is_empty(), "非法帧与 [DONE] 应被跳过");
+        assert!(!st.text_item_added);
+    }
+
+    #[test]
+    fn completed_events_is_idempotent() {
+        let mut st = ResponsesStreamState::default();
+        convert_chunk(&frame(json!({ "content": "Hi" })), "resp_test", &mut st);
+        let first = completed_events("resp_test", "gpt-4o", &mut st, &usage(1, 1));
+        let second = completed_events("resp_test", "gpt-4o", &mut st, &usage(1, 1));
+
+        assert!(second.is_empty(), "第二次调用应被幂等守卫挡住");
+        assert_eq!(
+            event_names(&first)
+                .iter()
+                .filter(|n| **n == "response.completed")
+                .count(),
+            1
+        );
+    }
 }

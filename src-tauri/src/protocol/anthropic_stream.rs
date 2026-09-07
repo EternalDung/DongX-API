@@ -234,3 +234,120 @@ fn message_stop() -> String {
         json!({ "type": "message_stop" })
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn usage(p: i64, c: i64) -> StreamUsage {
+        StreamUsage {
+            prompt_tokens: p,
+            completion_tokens: c,
+            total_tokens: p + c,
+        }
+    }
+
+    /// 包装成 chat.completion.chunk 的 choices[0].delta。
+    fn chunk(delta: serde_json::Value) -> serde_json::Value {
+        json!({ "choices": [ { "delta": delta } ] })
+    }
+
+    /// 抽取 SSE 文本里的事件名序列（按 `event: xxx` 行，空帧跳过）。
+    fn event_names(sse: &str) -> Vec<&str> {
+        sse.split("\n\n")
+            .filter(|b| !b.trim().is_empty())
+            .filter_map(|b| b.lines().find(|l| l.starts_with("event: ")))
+            .map(|l| l.trim_start_matches("event: ").trim())
+            .collect()
+    }
+
+    #[test]
+    fn text_only_stream_emits_full_lifecycle() {
+        let mut st = AnthropicStreamState::new("claude-x".into(), "msg_1".into());
+        let mut out = String::new();
+        st.on_chat_chunk(&chunk(json!({ "content": "Hel" })), &mut out);
+        st.on_chat_chunk(&chunk(json!({ "content": "lo" })), &mut out);
+        st.finalize(&usage(7, 3), &mut out);
+
+        assert_eq!(
+            event_names(&out),
+            vec![
+                "message_start",
+                "content_block_start",
+                "content_block_delta",
+                "content_block_delta",
+                "content_block_stop",
+                "message_delta",
+                "message_stop",
+            ]
+        );
+        // 唯一的文本块 index=0
+        assert!(
+            out.contains("\"index\":0"),
+            "文本块应从 index 0 开始: {out}"
+        );
+        assert!(out.contains("Hel") && out.contains("lo"));
+        // message_delta 携带流末 usage
+        assert!(out.contains("\"output_tokens\":3"));
+    }
+
+    #[test]
+    fn thinking_then_text_opens_two_blocks_in_order() {
+        let mut st = AnthropicStreamState::new("claude-x".into(), "msg_2".into());
+        let mut out = String::new();
+        st.on_chat_chunk(&chunk(json!({ "reasoning_content": "step1" })), &mut out);
+        st.on_chat_chunk(&chunk(json!({ "content": "answer" })), &mut out);
+        st.finalize(&usage(1, 1), &mut out);
+
+        assert_eq!(
+            event_names(&out),
+            vec![
+                "message_start",
+                "content_block_start", // thinking idx 0
+                "content_block_delta",
+                "content_block_stop",  // 关闭 thinking
+                "content_block_start", // text idx 1
+                "content_block_delta",
+                "content_block_stop", // 关闭 text
+                "message_delta",
+                "message_stop",
+            ]
+        );
+        // thinking 块必须排在 text 块之前
+        let thinking_at = out.find("\"type\":\"thinking\"").expect("应有 thinking 块");
+        let text_at = out.find("\"type\":\"text\"").expect("应有 text 块");
+        assert!(thinking_at < text_at, "thinking 必须排在 text 之前");
+    }
+
+    #[test]
+    fn finalize_is_idempotent() {
+        let mut st = AnthropicStreamState::new("m".into(), "msg_3".into());
+        let mut out = String::new();
+        st.on_chat_chunk(&chunk(json!({ "content": "x" })), &mut out);
+        st.finalize(&usage(1, 1), &mut out);
+        st.finalize(&usage(1, 1), &mut out); // 重复调用应无副作用
+
+        assert_eq!(out.matches("event: message_stop").count(), 1);
+        assert_eq!(out.matches("event: message_delta").count(), 1);
+    }
+
+    #[test]
+    fn empty_delta_does_not_open_block() {
+        let mut st = AnthropicStreamState::new("m".into(), "msg_4".into());
+        let mut out = String::new();
+        st.on_chat_chunk(&chunk(json!({ "content": "" })), &mut out);
+        st.on_chat_chunk(&chunk(json!({ "reasoning_content": "" })), &mut out);
+
+        // 只应留下惰性发出的 message_start，不产生任何 content block
+        assert_eq!(event_names(&out), vec!["message_start"]);
+    }
+
+    #[test]
+    fn chunk_without_choices_is_ignored() {
+        let mut st = AnthropicStreamState::new("m".into(), "msg_5".into());
+        let mut out = String::new();
+        st.on_chat_chunk(&json!({ "object": "chat.completion.chunk" }), &mut out);
+
+        assert_eq!(event_names(&out), vec!["message_start"]);
+    }
+}
