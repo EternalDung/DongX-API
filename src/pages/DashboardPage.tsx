@@ -1,15 +1,23 @@
 import { useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { sleep } from "@/lib/async";
 import {
   Activity,
-  Coins,
-  Network,
-  Timer,
-  RefreshCw,
   ArrowUpRight,
-  KeyRound,
   BarChart3,
+  ChevronDown,
+  ChevronUp,
+  BookText,
+  Coins,
+  Database,
+  FileStack,
+  FileText,
+  KeyRound,
+  LayoutDashboard,
+  Network,
+  RefreshCw,
   ShieldCheck,
+  Timer,
 } from "lucide-react";
 import {
   Card,
@@ -21,10 +29,11 @@ import {
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { EmptyState } from "@/components/ui/empty-state";
+import { ModelStatsTable } from "@/components/dashboard/ModelStatsTable";
 import { StatusBadge, type StatusTone } from "@/components/ui/status-badge";
 import { cn } from "@/lib/utils";
-import { statsApi, channelApi } from "@/lib/api";
-import type { DashboardStats, Channel } from "@/types";
+import { statsApi, channelApi, knowledgeApi, wikiApi } from "@/lib/api";
+import type { DashboardStats, Channel, KnowledgeBase, WikiProject } from "@/types";
 
 function formatNumber(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -50,6 +59,8 @@ interface StatDef {
   tone?: StatTone;
   /** 0-100，存在时渲染一条占比进度条 */
   progress?: number;
+  /** 有 href 时整卡可点击跳转对应页面 */
+  href?: string;
 }
 
 const TONE_VALUE: Record<StatTone, string> = {
@@ -82,10 +93,19 @@ const TONE_DOT: Record<StatTone, string> = {
 };
 
 function StatCard({ stat }: { stat: StatDef }) {
+  const navigate = useNavigate();
   const Icon = stat.icon;
   const tone = stat.tone ?? "primary";
+  const clickable = !!stat.href;
   return (
-    <Card className="group relative overflow-hidden transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md">
+    <Card
+      className={cn(
+        "group relative overflow-hidden transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md",
+        clickable &&
+          "cursor-pointer hover:border-primary/40 hover:ring-1 hover:ring-primary/30",
+      )}
+      onClick={clickable ? () => navigate(stat.href!) : undefined}
+    >
       <CardContent className="pt-6">
         <div className="flex items-start justify-between">
           <div className="space-y-1">
@@ -122,7 +142,9 @@ function StatCard({ stat }: { stat: StatDef }) {
         )}
 
         <div className="mt-3 flex items-center gap-1.5 text-xs text-muted-foreground">
-          {stat.tone ? (
+          {clickable ? (
+            <ArrowUpRight className="h-3.5 w-3.5 text-primary" />
+          ) : stat.tone ? (
             <span className={cn("h-1.5 w-1.5 rounded-full", TONE_DOT[tone])} />
           ) : (
             <ArrowUpRight className="h-3.5 w-3.5 text-success" />
@@ -140,7 +162,7 @@ function calcAvailability(stats: DashboardStats | null): number | null {
   return Math.round((stats.active_channels / stats.total_channels) * 100);
 }
 
-/** 可用率配色阈值：≥80 健康 / ≥50 警告 / 否则危险 */
+/** 可用率配色阈值：>=80 健康 / >=50 警告 / 否则危险 */
 function availabilityTone(pct: number | null): StatTone {
   if (pct === null) return "primary";
   if (pct >= 80) return "success";
@@ -151,10 +173,12 @@ function availabilityTone(pct: number | null): StatTone {
 export function DashboardPage() {
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [channels, setChannels] = useState<Channel[]>([]);
+  const [ragKbs, setRagKbs] = useState<KnowledgeBase[]>([]);
+  const [wikiProjects, setWikiProjects] = useState<WikiProject[]>([]);
   const [loading, setLoading] = useState(true);
 
-  // 方案A：骨架仅在「确无数据」(首屏) 显示；刷新时保留旧卡片，只让按钮图标旋转。
   const [spinning, setSpinning] = useState(false);
+  const [cardsCollapsed, setCardsCollapsed] = useState(false);
   const loadedRef = useRef(false);
 
   const load = async () => {
@@ -163,9 +187,16 @@ export function DashboardPage() {
     setSpinning(true);
     const started = Date.now();
     try {
-      const [s, c] = await Promise.all([statsApi.getDashboard(), channelApi.list()]);
+      const [s, c, kbs, wikis] = await Promise.all([
+        statsApi.getDashboard(),
+        channelApi.list(),
+        knowledgeApi.list(),
+        wikiApi.list(),
+      ]);
       setStats(s);
       setChannels(c);
+      setRagKbs(kbs);
+      setWikiProjects(wikis);
     } catch (e) {
       console.error("Failed to load dashboard:", e);
     } finally {
@@ -182,6 +213,15 @@ export function DashboardPage() {
   }, []);
 
   const availability = calcAvailability(stats);
+
+  const ragDocCount = ragKbs.reduce((sum, kb) => sum + (kb.doc_count ?? 0), 0);
+  const wikiPageCount = wikiProjects.reduce((sum, p) => sum + (p.page_count ?? 0), 0);
+
+  const overviewSummary = stats
+    ? `今日 ${formatNumber(stats.today_requests)} 请求 · ${formatNumber(
+        stats.today_total_tokens,
+      )} Token · 活跃 ${stats.active_channels}/${stats.total_channels} 渠道`
+    : "正在加载概览数据…";
 
   const cards: StatDef[] = [
     {
@@ -237,42 +277,120 @@ export function DashboardPage() {
       icon: KeyRound,
       description: "已创建网关密钥",
     },
+    {
+      title: "RAG 知识库",
+      value: String(ragKbs.length),
+      icon: Database,
+      description: "点击进入 RAG 管理",
+      tone: "primary",
+      href: "/services?tab=rag",
+    },
+    {
+      title: "RAG 文档",
+      value: String(ragDocCount),
+      icon: FileText,
+      description: "已摄入文档总数",
+    },
+    {
+      title: "Wiki 项目",
+      value: String(wikiProjects.length),
+      icon: BookText,
+      description: "点击进入 Wiki 管理",
+      tone: "primary",
+      href: "/services?tab=wiki",
+    },
+    {
+      title: "Wiki 页面",
+      value: String(wikiPageCount),
+      icon: FileStack,
+      description: "已沉淀页面总数",
+    },
   ];
 
   return (
     <div>
       <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">仪表盘</h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            请求统计、Token 消耗、渠道状态概览
-          </p>
+        <div className="flex items-center gap-2.5">
+          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary/10 text-primary ring-1 ring-inset ring-primary/15">
+            <LayoutDashboard className="h-6 w-6" />
+          </div>
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight">仪表盘</h1>
+            <p className="mt-1 text-sm text-muted-foreground">
+              请求统计、Token 消耗、渠道状态概览
+            </p>
+          </div>
         </div>
-        <Button variant="outline" size="sm" onClick={load} disabled={spinning}>
-          <RefreshCw className={spinning ? "animate-spin" : ""} />
-          刷新
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setCardsCollapsed((v) => !v)}
+          >
+            {cardsCollapsed ? (
+              <ChevronDown className="h-4 w-4" />
+            ) : (
+              <ChevronUp className="h-4 w-4" />
+            )}
+            {cardsCollapsed ? "展开" : "折叠"}
+          </Button>
+          <Button variant="outline" size="sm" onClick={load} disabled={spinning}>
+            <RefreshCw className={spinning ? "animate-spin" : ""} />
+            刷新
+          </Button>
+        </div>
       </div>
 
-      {/* 统计卡片 */}
-      <div className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        {loading
-          ? Array.from({ length: 8 }).map((_, i) => (
-              <Card key={i}>
-                <CardContent className="pt-6">
-                  <div className="flex items-start justify-between">
-                    <div className="space-y-2">
-                      <Skeleton className="h-4 w-20" />
-                      <Skeleton className="h-8 w-24" />
-                    </div>
-                    <Skeleton className="h-11 w-11 rounded-xl" />
-                  </div>
-                  <Skeleton className="mt-3 h-3 w-32" />
-                </CardContent>
-              </Card>
-            ))
-          : cards.map((card) => <StatCard key={card.title} stat={card} />)}
-      </div>
+      {/* 统计概览（可折叠） */}
+      <Card className="mt-6">
+        <CardHeader className="flex flex-row items-center justify-between gap-4 space-y-0">
+          <div className="min-w-0">
+            <CardTitle>统计概览</CardTitle>
+            <CardDescription className="truncate">
+              {cardsCollapsed
+                ? `${overviewSummary} · 已折叠 12 项`
+                : overviewSummary}
+            </CardDescription>
+          </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setCardsCollapsed((v) => !v)}
+            aria-label={cardsCollapsed ? "展开统计概览" : "折叠统计概览"}
+          >
+            {cardsCollapsed ? (
+              <ChevronDown className="h-4 w-4" />
+            ) : (
+              <ChevronUp className="h-4 w-4" />
+            )}
+          </Button>
+        </CardHeader>
+        {!cardsCollapsed && (
+          <CardContent>
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+              {loading
+                ? Array.from({ length: 12 }).map((_, i) => (
+                    <Card key={i}>
+                      <CardContent className="pt-6">
+                        <div className="flex items-start justify-between">
+                          <div className="space-y-2">
+                            <Skeleton className="h-4 w-20" />
+                            <Skeleton className="h-8 w-24" />
+                          </div>
+                          <Skeleton className="h-11 w-11 rounded-xl" />
+                        </div>
+                        <Skeleton className="mt-3 h-3 w-32" />
+                      </CardContent>
+                    </Card>
+                  ))
+                : cards.map((card) => <StatCard key={card.title} stat={card} />)}
+            </div>
+          </CardContent>
+        )}
+      </Card>
+
+      {/* 模型调用统计 */}
+      <ModelStatsTable />
 
       {/* 渠道状态列表 */}
       <Card className="mt-6">

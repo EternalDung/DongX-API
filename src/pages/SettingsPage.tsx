@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { sleep } from "@/lib/async";
-import { RefreshCw, Save, RotateCw, Play, Square, Plus, Pencil, Trash2, ChevronUp, ChevronDown } from "lucide-react";
+import { RefreshCw, Save, RotateCw, Play, Square, Plus, Pencil, Trash2, ChevronUp, ChevronDown, Settings as SettingsIcon } from "lucide-react";
 import {
   Card,
   CardContent,
@@ -877,9 +877,14 @@ export function SettingsPage() {
   return (
     <div>
       <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">设置</h1>
-          <p className="mt-1 text-sm text-muted-foreground">服务配置、通用设置、界面、限流与重试</p>
+        <div className="flex items-center gap-2.5">
+          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary/10 text-primary ring-1 ring-inset ring-primary/15">
+            <SettingsIcon className="h-6 w-6" />
+          </div>
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight">设置</h1>
+            <p className="mt-1 text-sm text-muted-foreground">服务配置、通用设置、界面、限流与重试</p>
+          </div>
         </div>
         <div className="flex gap-2">
           <Button variant="outline" size="sm" onClick={load} disabled={spinning}>

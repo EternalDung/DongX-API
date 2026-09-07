@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use tauri::State;
 
-use crate::db::repository::{request_logs, security_findings, settings, LogFilter};
+use crate::db::repository::{request_logs, security_findings, settings, stats, LogFilter};
 use crate::error::{AppError, AppResult};
 use crate::AppState;
 
@@ -126,4 +126,21 @@ pub async fn delete_log(id: String, state: State<'_, Arc<AppState>>) -> AppResul
         return Err(AppError::NotFound(format!("日志 {} 不存在", id)));
     }
     Ok(n)
+}
+
+/// 按模型聚合的调用统计（支持时间窗过滤）。供 Dashboard「模型调用明细」表使用。
+///
+/// `from`/`to` 为 RFC3339 时间字符串；任一为 None 则不限时间。
+/// 返回每个模型的请求数、Token 用量（含缓存命中）、成功率、平均延迟等。
+#[tauri::command]
+pub async fn get_model_stats(
+    from: Option<String>,
+    to: Option<String>,
+    state: State<'_, Arc<AppState>>,
+) -> AppResult<Vec<serde_json::Value>> {
+    let rows = stats::model_stats(&state.db, from.as_deref(), to.as_deref()).await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| serde_json::to_value(&r).unwrap_or_default())
+        .collect())
 }

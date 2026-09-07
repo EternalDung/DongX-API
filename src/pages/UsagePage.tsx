@@ -582,8 +582,8 @@ export function UsagePage() {
       {/* ── 顶部标题 ──────────────────────────────────────── */}
       <div>
         <div className="flex items-center gap-2.5">
-          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-primary/10 text-primary ring-1 ring-inset ring-primary/15">
-            <BookOpen className="h-5 w-5" />
+          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary/10 text-primary ring-1 ring-inset ring-primary/15">
+            <BookOpen className="h-6 w-6" />
           </div>
           <div>
             <h1 className="text-2xl font-semibold tracking-tight">LLM 使用</h1>

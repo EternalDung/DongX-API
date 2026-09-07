@@ -130,6 +130,11 @@ impl GeminiAdaptor {
             .and_then(|t| t.as_u64())
             .unwrap_or(prompt_tokens + completion_tokens);
 
+        let cached_tokens = usage_meta
+            .and_then(|u| u.get("cachedContentTokenCount"))
+            .and_then(|t| t.as_u64())
+            .unwrap_or(0);
+
         json!({
             "id": format!("chatcmpl-{}", uuid::Uuid::new_v4().simple()),
             "object": "chat.completion",
@@ -144,6 +149,7 @@ impl GeminiAdaptor {
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": total_tokens,
+                "cached_tokens": cached_tokens,
             },
         })
     }

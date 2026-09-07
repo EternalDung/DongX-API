@@ -275,16 +275,21 @@ export function LogsPage() {
   return (
     <div>
       <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">请求日志</h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            逐条请求明细：状态、Token、耗时
-            {filtered.length !== logs.length && (
-              <span className="ml-1 font-mono text-xs">
-                （{filtered.length}/{logs.length}）
-              </span>
-            )}
-          </p>
+        <div className="flex items-center gap-2.5">
+          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary/10 text-primary ring-1 ring-inset ring-primary/15">
+            <ScrollText className="h-6 w-6" />
+          </div>
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight">请求日志</h1>
+            <p className="mt-1 text-sm text-muted-foreground">
+              逐条请求明细：状态、Token、耗时
+              {filtered.length !== logs.length && (
+                <span className="ml-1 font-mono text-xs">
+                  （{filtered.length}/{logs.length}）
+                </span>
+              )}
+            </p>
+          </div>
         </div>
         <div className="flex gap-2">
           <Button variant="outline" size="sm" onClick={() => load(page)} disabled={spinning}>

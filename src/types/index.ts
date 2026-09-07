@@ -201,6 +201,21 @@ export interface DashboardStats {
   total_tokens: number;
 }
 
+/** 按模型聚合的调用统计（GROUP BY model），供 Dashboard「模型调用明细」表使用。 */
+export interface ModelStat {
+  model: string;
+  request_count: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cached_tokens: number;
+  total_tokens: number;
+  success_count: number;
+  total_count: number;
+  avg_latency_ms: number;
+  /** 该模型出现最多的数据面：chat / responses / messages */
+  primary_mode: string;
+}
+
 // ============================================================
 // Settings
 // ============================================================

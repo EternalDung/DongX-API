@@ -12,7 +12,7 @@ use sqlx::sqlite::Sqlite;
 use sqlx::{QueryBuilder, Row, SqlitePool};
 
 use crate::models::{
-    ChannelRow, DashboardStatsRow, GatewayKeyRow, RequestLogListItem, RequestLogRow,
+    ChannelRow, DashboardStatsRow, GatewayKeyRow, ModelStat, RequestLogListItem, RequestLogRow,
     RequestSecurityFindingRow, SettingRow,
 };
 
@@ -364,6 +364,7 @@ pub mod request_logs {
         trace_id: Option<&str>,
         // 上游返回的请求 ID（如 x-request-id / request-id），用于向提供商排查。
         provider_request_id: Option<&str>,
+        cached_tokens: i64,
     ) -> Result<String, sqlx::Error> {
         let id = new_id();
         let ts = now();
@@ -374,9 +375,9 @@ pub mod request_logs {
                 total_tokens, duration_ms, error_message, is_stream, is_retry,
                 created_at, request_body, response_body, risk_level, risk_score,
                 risk_summary, security_action, sanitized, blocked_reason, trace_id,
-                provider_request_id)
+                provider_request_id, cached_tokens)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,
-                ?19,?20,?21,?22,?23,?24,?25,?26,?27)",
+                ?19,?20,?21,?22,?23,?24,?25,?26,?27,?28)",
         )
         .bind(&id)
         // seq 现为 INTEGER PRIMARY KEY AUTOINCREMENT（迁移 007），
@@ -407,6 +408,7 @@ pub mod request_logs {
         .bind(blocked_reason)
         .bind(trace_id)
         .bind(provider_request_id)
+        .bind(cached_tokens)
         .execute(pool)
         .await?;
 
@@ -682,6 +684,116 @@ pub mod stats {
         .fetch_one(pool)
         .await
     }
+
+    /// 按模型聚合调用统计，支持时间窗过滤（from/to 为 RFC3339 字符串；
+    /// 任一为 None 则不限时间）。成功 = `error_message` 为空。
+    /// `primary_mode` 取该模型出现最多的 mode（chat/responses/messages），
+    /// 用于前端展示「该模型主要走哪条数据面」。
+    pub async fn model_stats(
+        pool: &SqlitePool,
+        from: Option<&str>,
+        to: Option<&str>,
+    ) -> Result<Vec<ModelStat>, sqlx::Error> {
+        // 1) 聚合主查询（不含 primary_mode）
+        let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(
+            "SELECT model,
+                    COUNT(*)                                   AS request_count,
+                    COALESCE(SUM(prompt_tokens), 0)            AS prompt_tokens,
+                    COALESCE(SUM(completion_tokens), 0)        AS completion_tokens,
+                    COALESCE(SUM(cached_tokens), 0)            AS cached_tokens,
+                    COALESCE(SUM(total_tokens), 0)             AS total_tokens,
+                    COALESCE(SUM(CASE WHEN error_message IS NULL OR error_message = ''
+                                      THEN 1 ELSE 0 END), 0)   AS success_count,
+                    COUNT(*)                                   AS total_count,
+                    COALESCE(CAST(AVG(duration_ms) AS REAL), 0.0) AS avg_latency_ms
+             FROM request_logs",
+        );
+        if from.is_some() || to.is_some() {
+            qb.push(" WHERE ");
+            let mut first = true;
+            if let Some(f) = from {
+                qb.push("created_at >= ");
+                qb.push_bind(f);
+                first = false;
+            }
+            if let Some(t) = to {
+                if !first {
+                    qb.push(" AND ");
+                }
+                qb.push("created_at <= ");
+                qb.push_bind(t);
+            }
+        }
+        qb.push(" GROUP BY model ORDER BY total_tokens DESC");
+        let base: Vec<ModelStatBase> = qb.build_query_as::<ModelStatBase>().fetch_all(pool).await?;
+
+        // 2) 每个模型的 primary_mode（出现最多的 mode）
+        let mut qb2: QueryBuilder<Sqlite> =
+            QueryBuilder::new("SELECT model, mode FROM request_logs");
+        if from.is_some() || to.is_some() {
+            qb2.push(" WHERE ");
+            let mut first = true;
+            if let Some(f) = from {
+                qb2.push("created_at >= ");
+                qb2.push_bind(f);
+                first = false;
+            }
+            if let Some(t) = to {
+                if !first {
+                    qb2.push(" AND ");
+                }
+                qb2.push("created_at <= ");
+                qb2.push_bind(t);
+            }
+        }
+        qb2.push(" GROUP BY model, mode ORDER BY model, COUNT(*) DESC");
+        let mode_rows: Vec<ModeCountRow> =
+            qb2.build_query_as::<ModeCountRow>().fetch_all(pool).await?;
+        let mut top_mode: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for r in mode_rows {
+            top_mode.entry(r.model).or_insert(r.mode);
+        }
+
+        // 3) 合并
+        Ok(base
+            .into_iter()
+            .map(|b| {
+                let model = b.model.clone();
+                ModelStat {
+                    model: b.model,
+                    request_count: b.request_count,
+                    prompt_tokens: b.prompt_tokens,
+                    completion_tokens: b.completion_tokens,
+                    cached_tokens: b.cached_tokens,
+                    total_tokens: b.total_tokens,
+                    success_count: b.success_count,
+                    total_count: b.total_count,
+                    avg_latency_ms: b.avg_latency_ms,
+                    primary_mode: top_mode.get(&model).cloned().unwrap_or_default(),
+                }
+            })
+            .collect())
+    }
+
+    #[derive(Debug, Clone, sqlx::FromRow)]
+    struct ModelStatBase {
+        pub model: String,
+        pub request_count: i64,
+        pub prompt_tokens: i64,
+        pub completion_tokens: i64,
+        pub cached_tokens: i64,
+        pub total_tokens: i64,
+        pub success_count: i64,
+        pub total_count: i64,
+        pub avg_latency_ms: f64,
+    }
+
+    #[derive(Debug, Clone, sqlx::FromRow)]
+    struct ModeCountRow {
+        pub model: String,
+        pub mode: String,
+    }
 }
 
 // ============================================================
@@ -927,6 +1039,7 @@ mod tests {
             None,
             Some("trace-test"),
             None,
+            0,
         )
         .await
         .expect("insert log")

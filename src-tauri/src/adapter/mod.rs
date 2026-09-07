@@ -48,6 +48,7 @@ pub struct TokenUsage {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub total_tokens: u64,
+    pub cached_tokens: u64,
 }
 
 /// Strategy interface: one implementation per provider protocol.
@@ -239,9 +240,16 @@ pub(crate) fn extract_usage(body: &serde_json::Value) -> Option<TokenUsage> {
         usage.get("prompt_tokens").and_then(|v| v.as_u64()),
         usage.get("completion_tokens").and_then(|v| v.as_u64()),
     ) {
+        let cached = usage
+            .get("prompt_tokens_details")
+            .and_then(|d| d.get("cached_tokens"))
+            .and_then(|v| v.as_u64())
+            .or_else(|| usage.get("cached_tokens").and_then(|v| v.as_u64()))
+            .unwrap_or(0);
         return Some(TokenUsage {
             prompt_tokens: p,
             completion_tokens: c,
+            cached_tokens: cached,
             total_tokens: usage
                 .get("total_tokens")
                 .and_then(|v| v.as_u64())
@@ -253,9 +261,14 @@ pub(crate) fn extract_usage(body: &serde_json::Value) -> Option<TokenUsage> {
         usage.get("input_tokens").and_then(|v| v.as_u64()),
         usage.get("output_tokens").and_then(|v| v.as_u64()),
     ) {
+        let cached = usage
+            .get("cache_read_input_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         return Some(TokenUsage {
             prompt_tokens: p,
             completion_tokens: c,
+            cached_tokens: cached,
             total_tokens: p + c,
         });
     }
@@ -321,6 +334,7 @@ pub struct StreamUsage {
     pub prompt_tokens: i64,
     pub completion_tokens: i64,
     pub total_tokens: i64,
+    pub cached_tokens: i64,
 }
 
 /// Which transform a streaming attempt needs. `None` = native OpenAI SSE

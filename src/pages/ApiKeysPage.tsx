@@ -199,11 +199,16 @@ export function ApiKeysPage() {
   return (
     <div>
       <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">密钥管理</h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            网关密钥管理：创建 sk-dongapi-* 密钥、配额限制、绑定渠道
-          </p>
+        <div className="flex items-center gap-2.5">
+          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary/10 text-primary ring-1 ring-inset ring-primary/15">
+            <KeyRound className="h-6 w-6" />
+          </div>
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight">密钥管理</h1>
+            <p className="mt-1 text-sm text-muted-foreground">
+              网关密钥管理：创建 sk-dongapi-* 密钥、配额限制、绑定渠道
+            </p>
+          </div>
         </div>
         <div className="flex gap-2">
           <Button variant="outline" size="sm" onClick={load} disabled={spinning}>

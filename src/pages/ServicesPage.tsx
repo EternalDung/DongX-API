@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, useRef } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Plus, Trash2, BookOpen, Globe, Zap, RefreshCw, AlertTriangle, Copy, Check, Terminal, Layers, Wifi, Server, Code2, Info } from "lucide-react";
+import { Plus, Trash2, BookOpen, Globe, Zap, RefreshCw, AlertTriangle, Copy, Check, Terminal, Layers, Wifi, Server, Code2, Info, Boxes } from "lucide-react";
 import {
   Tabs,
   TabsContent,
@@ -670,13 +670,18 @@ export function ServicesPage() {
       <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
         {/* 标题 + 右上角分类标签：标题区随激活页签动态切换 */}
         <div className="flex items-start justify-between gap-4">
-          <div>
-            <h1 className="text-2xl font-semibold tracking-tight">
-              {TABS.find((t) => t.id === activeTab)?.label}
-            </h1>
-            <p className="mt-1 text-sm text-muted-foreground">
-              {TABS.find((t) => t.id === activeTab)?.desc}
-            </p>
+          <div className="flex items-center gap-2.5">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary/10 text-primary ring-1 ring-inset ring-primary/15">
+              <Boxes className="h-6 w-6" />
+            </div>
+            <div>
+              <h1 className="text-2xl font-semibold tracking-tight">
+                {TABS.find((t) => t.id === activeTab)?.label}
+              </h1>
+              <p className="mt-1 text-sm text-muted-foreground">
+                {TABS.find((t) => t.id === activeTab)?.desc}
+              </p>
+            </div>
           </div>
           <TabsList>
             {TABS.map((t) => (

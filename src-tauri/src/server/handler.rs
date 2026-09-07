@@ -205,6 +205,7 @@ async fn run_chat_pipeline(
             sec_findings.clone(),
             Some(trace_id.clone()),
             None,
+            0,
         );
         return error_response(
             StatusCode::FORBIDDEN,
@@ -332,6 +333,7 @@ async fn run_chat_pipeline(
                         sec_findings.clone(),
                         Some(trace_id.clone()),
                         None,
+                        0,
                     );
                     // 按上游状态分类：5xx/429/408/409 计入熔断，其余 4xx 不计。
                     record_upstream_outcome(
@@ -389,6 +391,7 @@ async fn run_chat_pipeline(
                         sec_findings.clone(),
                         Some(trace_id.clone()),
                         None,
+                        0,
                     );
                     // 上游连接/超时失败 → 可重试，计入熔断。
                     record_upstream_outcome(&state, is_stream, &selected.id, false, true, &msg)
@@ -543,6 +546,7 @@ async fn run_chat_pipeline(
                 sec_findings.clone(),
                 Some(trace_id.clone()),
                 provider_request_id.clone(),
+                usage.as_ref().map(|u| u.cached_tokens as i64).unwrap_or(0),
             );
 
             // Return upstream body + status.
@@ -699,6 +703,7 @@ pub async fn embeddings(
             sec_findings.clone(),
             Some(trace_id.clone()),
             None,
+            0,
         );
         return error_response(
             StatusCode::FORBIDDEN,
@@ -794,6 +799,7 @@ pub async fn embeddings(
                     sec_findings.clone(),
                     Some(trace_id.clone()),
                     provider_request_id.clone(),
+                    0,
                 );
 
                 let st = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
@@ -1085,6 +1091,7 @@ fn spawn_log(
     findings: Vec<SecurityFinding>,
     trace_id: Option<String>,
     provider_request_id: Option<String>,
+    cached_tokens: i64,
 ) {
     tokio::spawn(async move {
         let log_id = match request_logs::insert(
@@ -1113,6 +1120,7 @@ fn spawn_log(
             sec.blocked_reason.as_deref(),
             trace_id.as_deref(),
             provider_request_id.as_deref(),
+            cached_tokens,
         )
         .await
         {
@@ -1669,6 +1677,7 @@ fn build_stream_response(
                 findings_final,
                 Some(trace_id.clone()),
                 provider_request_id.clone(),
+                acc.cached_tokens,
             );
         }
     });
@@ -1874,6 +1883,7 @@ fn build_responses_stream_response(
             findings_final,
             Some(trace_id.clone()),
             provider_request_id.clone(),
+            acc.cached_tokens,
         );
     });
 
@@ -2087,6 +2097,7 @@ fn build_messages_stream_response(
             findings_final,
             Some(trace_id.clone()),
             provider_request_id.clone(),
+            acc.cached_tokens,
         );
     });
 

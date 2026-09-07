@@ -20,6 +20,7 @@ import type {
   RequestLog,
   SecurityFinding,
   DashboardStats,
+  ModelStat,
   Settings,
   ServerStatus,
   CustomRule,
@@ -359,7 +360,13 @@ export const statsApi = {
   /** 获取仪表盘统计数据（今日请求量、token 用量、活跃渠道等） */
   getDashboard: (): Promise<DashboardStats> =>
     invoke<DashboardStats>("get_dashboard_stats"),
+
+  /** 按模型聚合的调用统计；from/to 为 RFC3339 时间字符串，可空（空=不限时间窗）。 */
+  getModelStats: (
+    opts?: { from?: string; to?: string },
+  ): Promise<ModelStat[]> => invoke<ModelStat[]>("get_model_stats", opts ?? {}),
 };
+
 
 // ============================================================
 // 客户端接入配置 API

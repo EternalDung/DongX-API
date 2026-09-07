@@ -87,6 +87,23 @@ pub struct RequestLogRow {
     pub blocked_reason: Option<String>,
     pub trace_id: Option<String>,
     pub provider_request_id: Option<String>,
+    pub cached_tokens: i64,
+}
+
+/// 按模型聚合的调用统计，供 Dashboard「模型调用明细」表使用。
+/// 由 repository::model_stats 通过 GROUP BY model 查询构造。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ModelStat {
+    pub model: String,
+    pub request_count: i64,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub cached_tokens: i64,
+    pub total_tokens: i64,
+    pub success_count: i64,
+    pub total_count: i64,
+    pub avg_latency_ms: f64,
+    pub primary_mode: String,
 }
 
 /// Slim variant for list queries (excludes heavy request/response bodies).

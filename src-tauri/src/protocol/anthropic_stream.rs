@@ -244,6 +244,7 @@ mod tests {
             prompt_tokens: p,
             completion_tokens: c,
             total_tokens: p + c,
+            cached_tokens: 0,
         }
     }
 

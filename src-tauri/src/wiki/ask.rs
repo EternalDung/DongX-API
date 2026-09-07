@@ -310,6 +310,7 @@ fn log_wiki_attempt(
             None,
             Some(trace_id.as_str()),
             provider_request_id.as_deref(),
+            0,
         )
         .await
         {

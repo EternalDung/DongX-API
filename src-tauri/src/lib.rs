@@ -114,6 +114,7 @@ pub fn run() {
             commands::log::get_log_security_findings,
             commands::log::clear_logs,
             commands::log::delete_log,
+            commands::log::get_model_stats,
             commands::mcp::get_mcp_status,
             commands::security::list_custom_rules,
             commands::security::create_custom_rule,
