@@ -6,6 +6,7 @@
 
 use std::fs;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use regex::Regex;
 use sqlx::SqlitePool;
@@ -127,7 +128,8 @@ struct RawPage {
 
 /// 按一级标题 `#` 切分 Markdown 为多个页面；首个页面标记为索引页。
 fn split_pages(content: &str) -> Vec<RawPage> {
-    let re_head = Regex::new(r"(?m)^#\s+(.+?)\s*$").unwrap();
+    static RE_HEAD: OnceLock<Regex> = OnceLock::new();
+    let re_head = RE_HEAD.get_or_init(|| Regex::new(r"(?m)^#\s+(.+?)\s*$").unwrap());
     let matches: Vec<_> = re_head.captures_iter(content).collect();
 
     if matches.is_empty() {
@@ -180,7 +182,8 @@ fn split_pages(content: &str) -> Vec<RawPage> {
 
 /// 提取正文中的 `[[页面标题]]` 引用（去重、保序）。
 fn extract_links(content: &str) -> Vec<String> {
-    let re = Regex::new(r"\[\[([^\[\]]+)\]\]").unwrap();
+    static RE_LINK: OnceLock<Regex> = OnceLock::new();
+    let re = RE_LINK.get_or_init(|| Regex::new(r"\[\[([^\[\]]+)\]\]").unwrap());
     let mut out = Vec::new();
     for m in re.captures_iter(content) {
         let inner = m[1].trim().to_string();
@@ -223,7 +226,8 @@ fn infer_kind(title: &str) -> String {
 
 /// 生成 URL 友好 slug：非字母数字（含中文）与数字外的字符折叠为 `-`。
 fn slugify(title: &str) -> String {
-    let re = Regex::new(r"[^a-z0-9\u4e00-\u9fff]+").unwrap();
+    static RE_SLUG: OnceLock<Regex> = OnceLock::new();
+    let re = RE_SLUG.get_or_init(|| Regex::new(r"[^a-z0-9\u4e00-\u9fff]+").unwrap());
     let s = re.replace_all(&title.to_lowercase(), "-").to_string();
     s.trim_matches('-').to_string()
 }

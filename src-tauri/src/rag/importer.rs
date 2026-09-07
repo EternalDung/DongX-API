@@ -14,6 +14,7 @@
 //! - `max_file_size`：跳过超过该字节数的文件。
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use regex::Regex;
 use sqlx::SqlitePool;
@@ -532,7 +533,7 @@ async fn ingest_file(
 
 /// 朴素 HTML 标签剥离（保留可见文本）。
 fn strip_html(s: &str) -> String {
-    // 编译一次（lazy 风格：函数内静态缓存代价不高，每次调用重编译仅一次/导入）。
-    let re = Regex::new(r"<[^>]*>").unwrap();
+    static RE_HTML: OnceLock<Regex> = OnceLock::new();
+    let re = RE_HTML.get_or_init(|| Regex::new(r"<[^>]*>").unwrap());
     re.replace_all(s, " ").to_string()
 }
