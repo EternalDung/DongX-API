@@ -8,8 +8,7 @@ use sqlx::SqlitePool;
 use crate::adapter::{get_adaptor, ChannelConfig, ProxyRequest};
 use crate::core::dispatcher::DispatchContext;
 use crate::core::failover::{Failover, Step};
-use crate::core::weighted::weighted_pick;
-use crate::crypto;
+use crate::core::upstream_key::pick_upstream_key;
 use crate::db::repository::request_logs;
 use crate::error::AppError;
 use crate::models::ChannelRow;
@@ -31,36 +30,6 @@ pub struct Source {
 pub struct AskResult {
     pub answer: String,
     pub sources: Vec<Source>,
-}
-
-/// 解密渠道密钥并加权随机挑选一条上游 key。
-fn decrypt_pick_upstream_key(cred_encrypted: &str) -> Result<String, AppError> {
-    let plaintext = crypto::decrypt(cred_encrypted)?;
-
-    if let Ok(keys) = serde_json::from_str::<Vec<Value>>(&plaintext) {
-        if !keys.is_empty() {
-            let pairs: Vec<(String, i32)> = keys
-                .iter()
-                .filter_map(|k| {
-                    let key = k.get("key")?.as_str()?.to_string();
-                    if key.is_empty() {
-                        return None;
-                    }
-                    let weight = k.get("weight").and_then(|v| v.as_i64()).unwrap_or(1) as i32;
-                    Some((key, weight))
-                })
-                .collect();
-            if !pairs.is_empty() {
-                return weighted_pick(&pairs)
-                    .ok_or_else(|| AppError::Crypto("无可用上游密钥".into()));
-            }
-        }
-    }
-
-    if plaintext.is_empty() {
-        return Err(AppError::Crypto("上游密钥为空".into()));
-    }
-    Ok(plaintext)
 }
 
 /// 渠道是否服务于给定模型（列在 `models` 或被 `model_mapping` 映射到）。
@@ -145,7 +114,7 @@ async fn call_chat_once(
     model: &str,
     chat_body: &Value,
 ) -> Result<String, AppError> {
-    let upstream_api_key = decrypt_pick_upstream_key(&row.cred_encrypted)?;
+    let upstream_api_key = pick_upstream_key(&row.cred_encrypted)?;
     let models: Vec<String> = serde_json::from_str(&row.models).unwrap_or_default();
     let model_mapping: Value =
         serde_json::from_str(&row.model_mapping).unwrap_or_else(|_| serde_json::json!({}));
@@ -1033,70 +1002,7 @@ mod tests {
         assert_eq!(out[4].content, "c4");
     }
 
-    // ============================================================
-    // decrypt_pick_upstream_key —— 解密并加权挑选上游 key
-    // 依赖 crypto 的硬编码占位密钥，无 DB / 无网络，可在单测内往返
-    // ============================================================
-
-    fn enc(s: &str) -> String {
-        crypto::encrypt(s).expect("encrypt 不应失败")
-    }
-
-    #[test]
-    fn decrypt_pick_upstream_key_legacy_single_key() {
-        assert_eq!(
-            decrypt_pick_upstream_key(&enc("sk-legacy-123")).unwrap(),
-            "sk-legacy-123"
-        );
-    }
-
-    #[test]
-    fn decrypt_pick_upstream_key_multi_key_picks_a_member() {
-        let payload = r#"[{"key":"sk-a","weight":1},{"key":"sk-b","weight":1}]"#;
-        let got = decrypt_pick_upstream_key(&enc(payload)).unwrap();
-        assert!(
-            got == "sk-a" || got == "sk-b",
-            "应从数组内挑一条，实际: {got}"
-        );
-    }
-
-    #[test]
-    fn decrypt_pick_upstream_key_multi_key_respects_weight() {
-        let payload = r#"[{"key":"sk-a","weight":1},{"key":"sk-b","weight":1000}]"#;
-        let mut a = 0usize;
-        for _ in 0..500 {
-            if decrypt_pick_upstream_key(&enc(payload)).unwrap() == "sk-a" {
-                a += 1;
-            }
-        }
-        // 期望约 0.5 次，阈值 10 极其宽松，确保不会 flaky
-        assert!(a < 10, "sk-a 命中 {a} 次，权重 1:1000 下不应如此频繁");
-    }
-
-    #[test]
-    fn decrypt_pick_upstream_key_empty_plaintext_is_error() {
-        assert!(decrypt_pick_upstream_key(&enc("")).is_err());
-    }
-
-    #[test]
-    fn decrypt_pick_upstream_key_invalid_ciphertext_is_error() {
-        assert!(decrypt_pick_upstream_key("not-valid-base64-ciphertext").is_err());
-    }
-
-    #[test]
-    fn known_quirk_all_keys_empty_falls_back_to_raw_json() {
-        // 已知缺陷：数组内所有 key 均为空串时 pairs 为空，函数会落到 legacy 单 key
-        // 分支，把整段 JSON 原文当作密钥返回。此处固化现状，便于修复时立刻暴露。
-        let got = decrypt_pick_upstream_key(&enc(r#"[{"key":"","weight":1}]"#)).unwrap();
-        assert!(
-            got.starts_with("["),
-            "现状：返回了原始 JSON 文本，实际: {got}"
-        );
-    }
-
-    #[test]
-    fn known_quirk_empty_array_falls_back_to_raw_json() {
-        // 同上：空数组被当成 legacy 单 key 原文返回。
-        assert_eq!(decrypt_pick_upstream_key(&enc("[]")).unwrap(), "[]");
-    }
+    // 上游 key 的「解密 + 加权挑选」已统一到 `core::upstream_key::pick_upstream_key`，
+    // 其行为（含「数组内无有效 key 不再回退成 JSON 原文」这一修复）在
+    // `core/upstream_key.rs` 的单测中固化，此处不再重复。
 }

@@ -6,8 +6,7 @@ use serde_json::Value;
 use sqlx::SqlitePool;
 
 use crate::adapter::{get_adaptor, ChannelConfig, ProxyRequest};
-use crate::core::weighted::weighted_pick;
-use crate::crypto;
+use crate::core::upstream_key::pick_upstream_key;
 use crate::db::repository::request_logs;
 use crate::error::{AppError, AppResult};
 use crate::models::ChannelRow;
@@ -135,7 +134,7 @@ async fn call_chat_once(
     model: &str,
     chat_body: &Value,
 ) -> AppResult<(String, i64, i64, i64)> {
-    let upstream_api_key = decrypt_pick_upstream_key(&row.cred_encrypted)?;
+    let upstream_api_key = pick_upstream_key(&row.cred_encrypted)?;
     let models: Vec<String> = serde_json::from_str(&row.models).unwrap_or_default();
     let model_mapping: Value =
         serde_json::from_str(&row.model_mapping).unwrap_or_else(|_| serde_json::json!({}));
@@ -241,35 +240,6 @@ async fn call_chat_once(
             Err(AppError::Proxy(msg))
         }
     }
-}
-
-fn decrypt_pick_upstream_key(cred_encrypted: &str) -> AppResult<String> {
-    let plaintext = crypto::decrypt(cred_encrypted)?;
-
-    if let Ok(keys) = serde_json::from_str::<Vec<Value>>(&plaintext) {
-        if !keys.is_empty() {
-            let pairs: Vec<(String, i32)> = keys
-                .iter()
-                .filter_map(|k| {
-                    let key = k.get("key")?.as_str()?.to_string();
-                    if key.is_empty() {
-                        return None;
-                    }
-                    let weight = k.get("weight").and_then(|v| v.as_i64()).unwrap_or(1) as i32;
-                    Some((key, weight))
-                })
-                .collect();
-            if !pairs.is_empty() {
-                return weighted_pick(&pairs)
-                    .ok_or_else(|| AppError::Crypto("无可用上游密钥".into()));
-            }
-        }
-    }
-
-    if plaintext.is_empty() {
-        return Err(AppError::Crypto("上游密钥为空".into()));
-    }
-    Ok(plaintext)
 }
 
 /// Wiki 内部 LLM 调用的落库助手：与网关 `spawn_log` 写入同一张 `request_logs` 表，

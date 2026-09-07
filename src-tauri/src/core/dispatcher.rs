@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::collections::HashSet;
 
+use crate::core::upstream_key::pick_upstream_key;
 use crate::core::weighted::weighted_pick;
-use crate::crypto;
 use crate::db::repository::{channel_health, channels};
 use crate::error::{AppError, AppResult};
 use crate::models::ChannelRow;
@@ -146,40 +146,4 @@ fn channel_serves_model(c: &ChannelRow, model: &str) -> bool {
     let mapping: serde_json::Value =
         serde_json::from_str(&c.model_mapping).unwrap_or_else(|_| serde_json::json!({}));
     mapping.get(model).is_some()
-}
-
-/// Decrypt the channel credential and weighted-pick one upstream key.
-///
-/// Supports two storage shapes:
-/// - Multi-key JSON array: `[{"key":"sk-...","weight":7}, ...]`
-/// - Legacy single key: the plaintext is the key itself.
-fn pick_upstream_key(cred_encrypted: &str) -> AppResult<String> {
-    let plaintext = crypto::decrypt(cred_encrypted)?;
-
-    // Multi-key JSON array.
-    if let Ok(keys) = serde_json::from_str::<Vec<serde_json::Value>>(&plaintext) {
-        if !keys.is_empty() {
-            let pairs: Vec<(String, i32)> = keys
-                .iter()
-                .filter_map(|k| {
-                    let key = k.get("key")?.as_str()?.to_string();
-                    if key.is_empty() {
-                        return None;
-                    }
-                    let weight = k.get("weight").and_then(|v| v.as_i64()).unwrap_or(1) as i32;
-                    Some((key, weight))
-                })
-                .collect();
-            if !pairs.is_empty() {
-                return weighted_pick(&pairs)
-                    .ok_or_else(|| AppError::Crypto("无可用上游密钥".into()));
-            }
-        }
-    }
-
-    // Legacy single key.
-    if plaintext.is_empty() {
-        return Err(AppError::Crypto("上游密钥为空".into()));
-    }
-    Ok(plaintext)
 }
