@@ -23,17 +23,21 @@ use tauri::State;
 /// `FromRow` 供 `list_knowledge_bases` 的 `query_as` 直接映射；
 /// `Serialize` 供 Tauri 命令返回 JSON 给前端。
 /// `doc_count` / `chunk_count` 由 list 查询的 LEFT JOIN 子查询聚合得出。
-#[derive(Debug, sqlx::FromRow, Serialize)]
+#[derive(Debug, sqlx::FromRow, Serialize, ts_rs::TS)]
+#[ts(export_to = "rag.ts")]
 pub struct KnowledgeBase {
     pub id: String,
     pub name: String,
     pub description: String,
     pub embedding_model: String,
     pub embedding_channel_id: String,
+    #[ts(type = "number")]
     pub status: i64,
     /// 是否将本知识库暴露给 MCP 层（0=否 1=是）。
+    #[ts(type = "number")]
     pub mcp_exposed: i64,
     /// 单次向量化批大小（NULL=取引擎默认）。
+    #[ts(type = "number | null")]
     pub embedding_batch_size: Option<i64>,
     /// 摄入时排除的目录（逗号分隔，NULL=不排除）。
     pub exclude_dirs: Option<String>,
@@ -42,17 +46,22 @@ pub struct KnowledgeBase {
     /// 摄入时仅包含的文件类型（逗号分隔，NULL=全部）。
     pub include_file_types: Option<String>,
     /// 分块大小（字符数，0=引擎默认）。
+    #[ts(type = "number")]
     pub chunk_size: i64,
     /// 分块重叠字符数（0=引擎默认）。
+    #[ts(type = "number")]
     pub chunk_overlap: i64,
     pub created_at: String,
     pub updated_at: String,
+    #[ts(type = "number")]
     pub doc_count: i64,
+    #[ts(type = "number")]
     pub chunk_count: i64,
 }
 
 /// 新建知识库入参（对齐前端 `KnowledgeBaseInput`）。
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, ts_rs::TS)]
+#[ts(export_to = "rag.ts")]
 pub struct KnowledgeBaseInput {
     pub name: String,
     pub description: String,
@@ -61,6 +70,7 @@ pub struct KnowledgeBaseInput {
     /// 自动挑选，保持「只传模型」的老调用方式继续可用。
     #[serde(default)]
     #[allow(dead_code)]
+    #[ts(optional)]
     pub embedding_channel_id: Option<String>,
 }
 
@@ -74,24 +84,36 @@ pub struct KnowledgeBaseInput {
 /// 共享过滤：`subpath` / `excluded_dirs` / `included_files` 为逗号分隔字符串，
 /// `max_file_size_mb` 以 MB 为单位（NULL/0 → 引擎默认 1MB）。
 /// 这些过滤与知识库设置里的全局过滤在命令层合并后生效。
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, ts_rs::TS)]
+#[ts(export_to = "rag.ts")]
 pub struct ImportSourceInput {
     pub source_type: String,
+    #[ts(optional)]
     pub repo_url: Option<String>,
+    #[ts(optional)]
     pub branch: Option<String>,
+    #[ts(optional)]
     pub token: Option<String>,
+    #[ts(optional)]
     pub url: Option<String>,
+    #[ts(optional)]
     pub dir_path: Option<String>,
+    #[ts(optional)]
     pub subpath: Option<String>,
+    #[ts(optional)]
     pub excluded_dirs: Option<String>,
+    #[ts(optional)]
     pub included_files: Option<String>,
+    #[ts(optional)]
+    #[ts(type = "number")]
     pub max_file_size_mb: Option<i64>,
 }
 
 /// 来源记录（对齐前端 `KbSource`）。
 /// `FromRow` 映射 `kb_sources`；`Serialize` 供 Tauri 命令返回 JSON。
 /// **注意**：不返回 `token` 字段，避免把密钥回传到前端。
-#[derive(Debug, sqlx::FromRow, Serialize)]
+#[derive(Debug, sqlx::FromRow, Serialize, ts_rs::TS)]
+#[ts(export_to = "rag.ts")]
 pub struct KbSource {
     pub id: String,
     pub kb_id: String,
@@ -102,6 +124,7 @@ pub struct KbSource {
     pub dir_path: Option<String>,
     pub subpath: Option<String>,
     pub status: String,
+    #[ts(type = "number")]
     pub file_count: i64,
     pub error_message: Option<String>,
     pub created_at: String,
@@ -109,7 +132,8 @@ pub struct KbSource {
 }
 
 /// 检索命中的单个分块（对应前端 `RetrievalHit`）。
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
+#[ts(export_to = "rag.ts")]
 pub struct RetrievalHit {
     pub doc_id: String,
     pub doc_title: String,
@@ -120,13 +144,20 @@ pub struct RetrievalHit {
 
 /// 更新知识库入参（对齐前端 `KnowledgeBaseUpdate`）。
 /// 所有字段可选，仅传变更项；`updated_at` 由命令统一刷新。
-#[derive(Debug, serde::Deserialize, Default)]
+#[derive(Debug, serde::Deserialize, Default, ts_rs::TS)]
+#[ts(export_to = "rag.ts")]
 pub struct KnowledgeBaseUpdate {
+    #[ts(optional)]
     pub name: Option<String>,
+    #[ts(optional)]
     pub description: Option<String>,
     /// 启用 RAG 开关：0=禁用 1=启用（复用 status 列）。
+    #[ts(optional)]
+    #[ts(type = "number")]
     pub status: Option<i64>,
     /// MCP 暴露开关：0=否 1=是。
+    #[ts(optional)]
+    #[ts(type = "number")]
     pub mcp_exposed: Option<i64>,
     /// 嵌入模型。
     ///
@@ -134,20 +165,31 @@ pub struct KnowledgeBaseUpdate {
     /// 与新值不一致，会被 [`compute_index_status`] 判定为 stale，
     /// 必须调用 `reindex_kb` 重建后才能正常检索（否则向量/混合检索会静默
     /// 返回无意义的结果；纯关键词检索不受影响）。
+    #[ts(optional)]
     pub embedding_model: Option<String>,
     /// 绑定的嵌入渠道（须为已启用渠道）。
     ///
     /// 与 `embedding_model` 配套：换渠道通常也要换模型，因为各渠道提供的
     /// 嵌入模型不同。这里只校验渠道存在且启用，不硬校验模型是否在该渠道的
     /// `models` 列表里——很多中转站的模型列表并不完整。
+    #[ts(optional)]
     pub embedding_channel_id: Option<String>,
+    #[ts(optional = nullable)]
+    #[ts(type = "number | null")]
     pub embedding_batch_size: Option<i64>,
+    #[ts(optional = nullable)]
     pub exclude_dirs: Option<String>,
+    #[ts(optional = nullable)]
     pub exclude_files: Option<String>,
+    #[ts(optional = nullable)]
     pub include_file_types: Option<String>,
     /// 分块大小（字符数，0=引擎默认）。
+    #[ts(optional = nullable)]
+    #[ts(type = "number | null")]
     pub chunk_size: Option<i64>,
     /// 分块重叠字符数（0=引擎默认）。
+    #[ts(optional = nullable)]
+    #[ts(type = "number | null")]
     pub chunk_overlap: Option<i64>,
 }
 
@@ -515,18 +557,24 @@ pub async fn ask_kb(
 
 /// 知识库文档（对齐前端 `KbDocument`）。
 /// `FromRow` 映射 `kb_documents`；`Serialize` 供 Tauri 命令返回 JSON。
-#[derive(Debug, sqlx::FromRow, Serialize)]
+#[derive(Debug, sqlx::FromRow, Serialize, ts_rs::TS)]
+#[ts(export_to = "rag.ts")]
 pub struct KbDocument {
     pub id: String,
     pub kb_id: String,
     pub title: String,
     pub source_type: String,
     pub source_ref: String,
+    #[ts(type = "number")]
     pub char_count: i64,
+    #[ts(type = "number")]
     pub chunk_count: i64,
+    #[ts(type = "number")]
     pub status: i64,
     pub error_message: Option<String>,
+    #[ts(type = "number")]
     pub file_size: i64,
+    #[ts(type = "number")]
     pub token_count: i64,
     pub created_at: String,
     pub updated_at: String,
@@ -553,21 +601,30 @@ pub async fn list_documents(
 
 /// 文档分片摘要（用于前端「查看分片」下钻预览）。
 /// 返回完整 `content`，由前端按需内联展开全文；分页已限制单次体量。
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
+#[ts(export_to = "rag.ts")]
+#[ts(rename = "KbDocumentChunk")]
 pub struct DocumentChunk {
+    #[ts(type = "number")]
     pub seq: i64,
+    #[ts(type = "number")]
     pub token_count: i64,
     pub symbol_name: Option<String>,
     pub symbol_kind: Option<String>,
     pub language: Option<String>,
+    #[ts(type = "number | null")]
     pub line_start: Option<i64>,
+    #[ts(type = "number | null")]
     pub line_end: Option<i64>,
     pub content: String,
 }
 
 /// 分页分片结果。
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
+#[ts(export_to = "rag.ts")]
+#[ts(rename = "KbDocumentChunksPage")]
 pub struct DocumentChunksPage {
+    #[ts(type = "number")]
     pub total: i64,
     pub chunks: Vec<DocumentChunk>,
 }
@@ -899,13 +956,19 @@ pub async fn retrieve_kb(
 ///   （改了嵌入模型后旧分块即 stale，需要重建索引）；
 /// - `is_complete`：全部分块都已向量化；
 /// - `is_stale`：存在 stale 分块。
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
+#[ts(export_to = "rag.ts")]
 pub struct IndexStatus {
+    #[ts(type = "number")]
     pub doc_count: i64,
+    #[ts(type = "number")]
     pub chunk_count: i64,
+    #[ts(type = "number")]
     pub embedded_count: i64,
+    #[ts(type = "number")]
     pub stale_count: i64,
     /// 全部分块的 token 总数（来自上游嵌入响应的 prompt_tokens 汇总）。
+    #[ts(type = "number")]
     pub total_tokens: i64,
     /// 知识库当前绑定的嵌入模型（判定 stale 的基准）。
     pub embedding_model: String,

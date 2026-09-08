@@ -11,7 +11,8 @@ use crate::rag::parser::{detect_kind_by_content, detect_kind_by_name, FileKind};
 use crate::rag::store::{content_hash, find_document_by_hash, get_kb, insert_document, ChunkInput};
 
 /// 摄入结果。
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
+#[ts(export_to = "rag.ts")]
 pub struct IngestResult {
     pub document_id: String,
     pub chunk_count: usize,

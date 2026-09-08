@@ -39,7 +39,8 @@ const PROJECT_SELECT: &str = "SELECT wp.id, wp.name, wp.description, wp.channel_
 // ===========================================================================
 
 /// Wiki 项目（含派生统计）。
-#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
+#[derive(Debug, Clone, sqlx::FromRow, Serialize, ts_rs::TS)]
+#[ts(export_to = "wiki.ts")]
 pub struct WikiProject {
     pub id: String,
     pub name: String,
@@ -49,11 +50,17 @@ pub struct WikiProject {
     pub maintenance_prompt: String,
     pub chat_channel_id: String,
     pub chat_model: String,
+    #[ts(type = "number")]
     pub mcp_exposed: i64,
+    #[ts(type = "number")]
     pub status: i64,
+    #[ts(type = "number")]
     pub source_count: i64,
+    #[ts(type = "number")]
     pub page_count: i64,
+    #[ts(type = "number")]
     pub link_count: i64,
+    #[ts(type = "number")]
     pub token_estimate: i64,
     pub last_ingest_at: Option<String>,
     pub created_at: String,
@@ -78,7 +85,8 @@ pub struct WikiProjectBase {
 }
 
 /// Wiki 来源。
-#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
+#[derive(Debug, Clone, sqlx::FromRow, Serialize, ts_rs::TS)]
+#[ts(export_to = "wiki.ts")]
 pub struct WikiSource {
     pub id: String,
     pub project_id: String,
@@ -86,7 +94,9 @@ pub struct WikiSource {
     pub locator: String,
     pub branch: Option<String>,
     pub status: String,
+    #[ts(type = "number")]
     pub ingested: i64,
+    #[ts(type = "number")]
     pub total: i64,
     pub error: Option<String>,
     pub last_ingest_at: Option<String>,
@@ -110,7 +120,8 @@ pub struct WikiPageRow {
 }
 
 /// 页面响应（links 解析为字符串数组，对齐前端 WikiPage）。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[ts(export_to = "wiki.ts")]
 pub struct WikiPage {
     pub id: String,
     pub project_id: String,
@@ -120,13 +131,15 @@ pub struct WikiPage {
     pub is_index: bool,
     pub kind: String,
     pub links: Vec<String>,
+    #[ts(type = "number")]
     pub tokens: i64,
     pub updated_at: String,
     pub created_at: String,
 }
 
 /// Wiki 问答引用片段。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[ts(export_to = "wiki.ts")]
 pub struct WikiCitation {
     pub title: String,
     pub slug: String,
@@ -134,12 +147,16 @@ pub struct WikiCitation {
 }
 
 /// Wiki 问答结果。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[ts(export_to = "wiki.ts")]
 pub struct WikiAskResult {
     pub answer: String,
     pub citations: Vec<WikiCitation>,
+    #[ts(type = "number")]
     pub prompt_tokens: i64,
+    #[ts(type = "number")]
     pub completion_tokens: i64,
+    #[ts(type = "number")]
     pub duration_ms: i64,
 }
 

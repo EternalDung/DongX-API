@@ -18,7 +18,9 @@ use crate::rag::retrieve::{retrieve, RetrievalMode, RetrievedChunk};
 use crate::rag::store::get_kb;
 
 /// 单个引用来源（返回给前端）。
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
+#[ts(export_to = "rag.ts")]
+#[ts(rename = "RagSource")]
 pub struct Source {
     pub kb_id: String,
     pub doc_title: String,
@@ -27,7 +29,8 @@ pub struct Source {
 }
 
 /// 问答结果。
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
+#[ts(export_to = "rag.ts")]
 pub struct AskResult {
     pub answer: String,
     pub sources: Vec<Source>,

@@ -29,32 +29,49 @@ use crate::AppState;
 // 输入结构（对齐前端 WikiProjectInput / WikiProjectUpdate / WikiSourceInput）
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ts_rs::TS)]
+#[ts(export_to = "wiki.ts")]
 pub struct WikiProjectInput {
     pub name: String,
     pub description: String,
     pub channel_id: String,
     pub model: String,
+    #[ts(optional)]
+    #[ts(type = "number")]
     pub mcp_exposed: Option<i64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ts_rs::TS)]
+#[ts(export_to = "wiki.ts")]
 pub struct WikiProjectUpdate {
+    #[ts(optional)]
     pub name: Option<String>,
+    #[ts(optional)]
     pub description: Option<String>,
+    #[ts(optional)]
+    #[ts(type = "number")]
     pub status: Option<i64>,
+    #[ts(optional)]
     pub channel_id: Option<String>,
+    #[ts(optional)]
     pub model: Option<String>,
+    #[ts(optional)]
     pub maintenance_prompt: Option<String>,
+    #[ts(optional)]
     pub chat_channel_id: Option<String>,
+    #[ts(optional)]
     pub chat_model: Option<String>,
+    #[ts(optional)]
+    #[ts(type = "number")]
     pub mcp_exposed: Option<i64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ts_rs::TS)]
+#[ts(export_to = "wiki.ts")]
 pub struct WikiSourceInput {
     pub kind: String,
     pub locator: String,
+    #[ts(optional)]
     pub branch: Option<String>,
 }
 

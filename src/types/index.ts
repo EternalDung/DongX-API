@@ -375,136 +375,71 @@ export interface ServiceStatus {
 }
 
 // ============================================================
-// Knowledge Base (RAG)
-// 知识库：RAG 检索的数据源。每个知识库绑定一个嵌入模型/渠道，
-// 摄入文档后分块并向量化，问答时检索相关片段。
-// 后端由 Phase 1（009_rag.sql + rag commands）落地；前端先接类型与 API。
+// RAG / Wiki
+// ------------------------------------------------------------
+// 以下类型由 ts-rs 从 Rust 结构体生成，**不要手改**：
+//   src/types/generated/rag.ts   （RAG：知识库 / 文档 / 分片 / 检索 / 问答）
+//   src/types/generated/wiki.ts  （Wiki：项目 / 来源 / 页面 / 问答）
+// 重新生成（Rust 类型变更后执行）：
+//   cd src-tauri && cargo test --features ts-export --lib export_ts_bindings
+// 本文件只做少量「收窄」：Rust 侧用 i64 / String 表达的枚举，
+// 前端需要更严格的字面量联合类型。
 // ============================================================
+
+import type { KnowledgeBase as KnowledgeBaseGenerated } from "./generated/rag";
+import type {
+  WikiPage as WikiPageGenerated,
+  WikiProject as WikiProjectGenerated,
+  WikiSource as WikiSourceGenerated,
+} from "./generated/wiki";
+
+export type {
+  AskResult,
+  ImportSourceInput,
+  IngestResult,
+  IndexStatus,
+  KbDocument,
+  KbDocumentChunk,
+  KbDocumentChunksPage,
+  KbSource,
+  KnowledgeBaseInput,
+  KnowledgeBaseUpdate,
+  RagSource,
+  RetrievalHit,
+} from "./generated/rag";
+
+export type {
+  WikiAskResult,
+  WikiCitation,
+  WikiProjectInput,
+  WikiProjectUpdate,
+  WikiSourceInput,
+} from "./generated/wiki";
 
 /** 知识库状态：0 禁用 / 1 启用 */
 export type KnowledgeBaseStatus = 0 | 1;
 
-export interface KnowledgeBase {
-  id: string;
-  name: string;
-  description: string;
-  /** 用于向量化的嵌入模型名（如 text-embedding-3-small） */
-  embedding_model: string;
-  /** 提供该嵌入模型的渠道 id */
-  embedding_channel_id: string;
-  doc_count: number;
-  chunk_count: number;
-  status: KnowledgeBaseStatus;
-  /** 是否将本知识库暴露给 MCP 层（0=否 1=是） */
-  mcp_exposed: number;
-  /** 单次向量化批大小（null=取引擎默认） */
-  embedding_batch_size: number | null;
-  /** 摄入时排除的目录（逗号分隔，null=不排除） */
-  exclude_dirs: string | null;
-  /** 摄入时排除的文件（逗号分隔，null=不排除） */
-  exclude_files: string | null;
-  /** 摄入时仅包含的文件类型（逗号分隔，null=全部） */
-  include_file_types: string | null;
-  /** 分块大小（token 数，0=引擎默认 512） */
-  chunk_size: number | null;
-  /** 分块重叠 token 数（0=引擎默认 64） */
-  chunk_overlap: number | null;
-  created_at: string;
-  updated_at: string;
-}
+/** Wiki 项目状态：0 禁用 / 1 就绪 */
+export type WikiProjectStatus = 0 | 1;
 
-/** 新建知识库参数 — 对应 Rust KnowledgeBaseInput */
-export interface KnowledgeBaseInput {
-  name: string;
-  description: string;
-  embedding_model: string;
-}
+/** 来源类型：git 仓库 / 网页 URL / 本地目录 */
+export type WikiSourceKind = "git" | "url" | "local_dir";
 
-/** 更新知识库参数（部分更新）— 对应 Rust KnowledgeBaseUpdate */
-export interface KnowledgeBaseUpdate {
-  name?: string;
-  description?: string;
-  /** 启用 RAG 开关：0=禁用 1=启用（复用 status 列） */
-  status?: number;
-  /** MCP 暴露开关：0=否 1=是 */
-  mcp_exposed?: number;
-  /**
-   * 嵌入模型。不同模型的向量空间不兼容：改模型后旧分块立刻变 stale，
-   * 需调用 reindex 重建索引，否则向量/混合检索会静默返回错误结果。
-   */
-  embedding_model?: string;
-  /** 绑定的嵌入渠道（必填，须为已启用渠道）。换渠道通常也要换模型 */
-  embedding_channel_id?: string;
-  embedding_batch_size?: number | null;
-  exclude_dirs?: string | null;
-  exclude_files?: string | null;
-  include_file_types?: string | null;
-  /** 分块大小（token 数，0=引擎默认 512） */
-  chunk_size?: number | null;
-  /** 分块重叠 token 数（0=引擎默认 64） */
-  chunk_overlap?: number | null;
-}
+/** 来源状态。注意：摄入中状态只存在于「源」粒度，不会冒泡成项目状态。 */
+export type WikiSourceStatus = "pending" | "ingesting" | "ready" | "failed";
 
-/** 摄入文本结果 — 对应 Rust IngestResult */
-export interface IngestResult {
-  /** 新建文档 id */
-  document_id: string;
-  /** 分块数 */
-  chunk_count: number;
-  /** 命中重复上传去重，未重复摄入 */
-  duplicate?: boolean;
-}
+/** 页面分类。LLM 摄入时强制带 kind，用于页面 Tab 的分类过滤。 */
+export type WikiPageKind = "概念" | "实体" | "日志" | "索引" | "摘要";
 
-/** 问答引用来源 — 对应 Rust Source */
-export interface RagSource {
-  kb_id: string;
-  doc_title: string;
-  content: string;
-  score: number;
-}
-
-/** 问答结果 — 对应 Rust AskResult */
-export interface AskResult {
-  answer: string;
-  sources: RagSource[];
-}
-
-/** 检索命中分块 — 对应 Rust RetrievalHit */
-export interface RetrievalHit {
-  doc_id: string;
-  doc_title: string;
-  content: string;
-  /** 余弦相似度（0~1，越大越相关） */
-  score: number;
-}
-
-/** 索引状态 — 对应 Rust IndexStatus */
-export interface IndexStatus {
-  /** 文档数 */
-  doc_count: number;
-  /** 分块总数 */
-  chunk_count: number;
-  /** 已向量化的分块数 */
-  embedded_count: number;
-  /** 嵌入模型与知识库当前模型不一致的分块数（需重建索引） */
-  stale_count: number;
-  /** 全部分块的 token 总数 */
-  total_tokens: number;
-  /** 知识库当前绑定的嵌入模型（判定 stale 的基准） */
-  embedding_model: string;
-  /** 全部分块都已向量化 */
-  is_complete: boolean;
-  /** 存在 stale 分块 */
-  is_stale: boolean;
-}
-
-/** MCP 端点（运行态）— 对应 Rust McpListenAddr */
+// MCP 运行态（Rust McpStatus 在 mcp/ 模块，本轮未纳入 ts-rs 生成，
+// 仍为手写；后续要接生成时把对应结构体挂上 derive(TS) 即可）
+/** MCP 端点（运行态） */
 export interface McpListenAddr {
   host: string;
   port: number;
 }
 
-/** MCP 服务运行态 — 对应 Rust McpStatus */
+/** MCP 服务运行态 */
 export interface McpStatus {
   /** server 进程是否在监听端口 */
   running: boolean;
@@ -516,215 +451,23 @@ export interface McpStatus {
   toolsCount: number;
 }
 
-/** 知识库文档 — 对应 Rust KbDocument */
-export interface KbDocument {
-  id: string;
-  kb_id: string;
-  title: string;
-  /** text | file | url | git */
-  source_type: string;
-  source_ref: string;
-  char_count: number;
-  chunk_count: number;
-  /** 0=处理中 1=已就绪 2=失败 */
-  status: number;
-  error_message: string | null;
-  /** 原始文件字节数 */
-  file_size: number;
-  /** 该文档分块 token 总数 */
-  token_count: number;
-  created_at: string;
-  updated_at: string;
-}
+/** 知识库（Rust KnowledgeBase，status 收窄为 0|1） */
+export type KnowledgeBase = Omit<KnowledgeBaseGenerated, "status"> & {
+  status: KnowledgeBaseStatus;
+};
 
-/** 文档分片摘要 — 对应 Rust DocumentChunk（content 为完整文本，前端按需内联展开） */
-export interface KbDocumentChunk {
-  seq: number;
-  token_count: number;
-  symbol_name: string | null;
-  symbol_kind: string | null;
-  /** 语言标识（如 python / rust / javascript / markdown / text），用于前端 CodeBlock 预览的语言切换 */
-  language: string | null;
-  line_start: number | null;
-  line_end: number | null;
-  content: string;
-}
-
-/** 分页分片结果 — 对应 Rust DocumentChunksPage */
-export interface KbDocumentChunksPage {
-  total: number;
-  chunks: KbDocumentChunk[];
-}
-
-/** 摄入来源 — 对应 Rust KbSource（不含 token 字段） */
-export interface KbSource {
-  id: string;
-  kb_id: string;
-  /** git | url | local_dir */
-  source_type: string;
-  repo_url: string | null;
-  branch: string | null;
-  url: string | null;
-  dir_path: string | null;
-  subpath: string | null;
-  /** fetching | done | error */
-  status: string;
-  file_count: number;
-  error_message: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-/** 导入来源参数 — 对应 Rust ImportSourceInput */
-export interface ImportSourceInput {
-  /** git | url | local_dir */
-  source_type: string;
-  repo_url?: string;
-  branch?: string;
-  token?: string;
-  url?: string;
-  dir_path?: string;
-  subpath?: string;
-  /** 逗号分隔 */
-  excluded_dirs?: string;
-  /** 逗号分隔 */
-  included_files?: string;
-  /** MB */
-  max_file_size_mb?: number;
-}
-
-// ============================================================
-// Wiki
-// Wiki 项目：以「源」为输入，由 LLM 阅读消化后生成结构化的「页面」，
-// 页面之间通过 [[wikilink]] 交叉引用，并在后续摄入中增量更新。
-// 与 RAG 的区别：RAG 每次检索原文片段（不积累），Wiki 沉淀为页面（会积累）。
-// ============================================================
-
-/** Wiki 项目状态：0 禁用 / 1 就绪 */
-export type WikiProjectStatus = 0 | 1;
-
-export interface WikiProject {
-  id: string;
-  name: string;
-  description: string;
-  /** 生成页面所用的渠道 id */
-  channel_id: string;
-  /** 生成页面所用的模型名 */
-  model: string;
-  /** 维护规则：约束页面生成与增量更新风格的 system 提示片段 */
-  maintenance_prompt: string;
-  /** 对话（搜索/问答）所用渠道 id；默认与生成渠道一致，可单独指定 */
-  chat_channel_id: string;
-  /** 对话（搜索/问答）所用模型名 */
-  chat_model: string;
-  /** MCP 暴露开关（预留：后端接入后启用，将 Wiki 以 MCP 工具暴露给外部 Agent） */
-  mcp_exposed: number;
+/** Wiki 项目（Rust WikiProject，status 收窄为 0|1） */
+export type WikiProject = Omit<WikiProjectGenerated, "status"> & {
   status: WikiProjectStatus;
-  /** 已配置来源数 */
-  source_count: number;
-  /** 已生成页面数（含目录页 index.md） */
-  page_count: number;
-  /** 页面间 [[wikilink]] 引用关系数 */
-  link_count: number;
-  /** 全部页面正文的 token 估算 */
-  token_estimate: number;
-  /** 最近一次摄入完成时间 */
-  last_ingest_at: string | null;
-  created_at: string;
-  updated_at: string;
-}
+};
 
-/** 新建 Wiki 项目参数（空白项目，源留到详情页添加） */
-export interface WikiProjectInput {
-  name: string;
-  description: string;
-  channel_id: string;
-  model: string;
-  /** MCP 暴露开关（预留） */
-  mcp_exposed?: number;
-}
-
-/** 更新 Wiki 项目参数（部分更新） */
-export interface WikiProjectUpdate {
-  name?: string;
-  description?: string;
-  /** 0=禁用 1=就绪 */
-  status?: number;
-  channel_id?: string;
-  model?: string;
-  maintenance_prompt?: string;
-  /** 对话（搜索/问答）渠道 id（可选更新） */
-  chat_channel_id?: string;
-  /** 对话（搜索/问答）模型名（可选更新） */
-  chat_model?: string;
-  /** MCP 暴露开关（预留，可选更新） */
-  mcp_exposed?: number;
-}
-
-/** 来源类型：git 仓库 / 网页 URL / 本地目录 */
-export type WikiSourceKind = "git" | "url" | "local_dir";
-
-/** 来源状态。注意：摄入中状态只存在于「源」粒度，不会冒泡成项目状态。 */
-export type WikiSourceStatus = "pending" | "ingesting" | "ready" | "failed";
-
-/** 页面分类。LLM 摄入时强制带 kind，用于页面 Tab 的分类过滤。 */
-export type WikiPageKind = "概念" | "实体" | "日志" | "索引" | "摘要";
-
-export interface WikiSource {
-  id: string;
-  project_id: string;
+/** Wiki 来源（Rust WikiSource，kind / status 收窄） */
+export type WikiSource = Omit<WikiSourceGenerated, "kind" | "status"> & {
   kind: WikiSourceKind;
-  /** git 仓库 URL / 网页 URL / 本地目录绝对路径 */
-  locator: string;
-  branch: string | null;
   status: WikiSourceStatus;
-  /** 摄入进度：已处理文档数 */
-  ingested: number;
-  /** 摄入进度：文档总数 */
-  total: number;
-  /** 最近一次摄入的错误信息 */
-  error: string | null;
-  last_ingest_at: string | null;
-  created_at: string;
-}
+};
 
-export interface WikiSourceInput {
-  kind: WikiSourceKind;
-  locator: string;
-  branch?: string;
-}
-
-export interface WikiPage {
-  id: string;
-  project_id: string;
-  title: string;
-  /** URL 友好标识，用于 [[wikilink]] 定位 */
-  slug: string;
-  /** Markdown 正文 */
-  content: string;
-  /** 是否为目录页 index.md（查询引擎的导航入口，列表中置顶） */
-  is_index: boolean;
-  /** 页面分类：概念/实体/日志/索引/摘要 */
+/** Wiki 页面（Rust WikiPage，kind 收窄） */
+export type WikiPage = Omit<WikiPageGenerated, "kind"> & {
   kind: WikiPageKind;
-  /** 正文中 [[wikilink]] 指向的页面标题 */
-  links: string[];
-  tokens: number;
-  updated_at: string;
-  created_at: string;
-}
-
-/** Wiki 问答引用到的页面片段 */
-export interface WikiCitation {
-  title: string;
-  slug: string;
-  /** 命中片段节选 */
-  excerpt: string;
-}
-
-export interface WikiAskResult {
-  answer: string;
-  citations: WikiCitation[];
-  prompt_tokens: number;
-  completion_tokens: number;
-  duration_ms: number;
-}
+};

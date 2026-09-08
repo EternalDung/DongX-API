@@ -8,6 +8,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "ts-gen": "cd src-tauri && cargo test --features ts-export --lib export_ts_bindings",
     "test": "vitest run",
     "test:watch": "vitest",
     "coverage": "vitest run --coverage"

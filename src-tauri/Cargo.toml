@@ -99,3 +99,15 @@ async-trait = "0.1"                  # adapter trait 需要 dyn Adaptor（原生
 # ============================================================
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# ============================================================
+# TS 契约生成（ts-rs）
+# ------------------------------------------------------------
+# 类型始终带 derive(TS)（纯编译期，无运行时开销）；导出动作由
+# `ts-export` feature 门控：cargo test --features ts-export
+# ============================================================
+ts-rs = "10"
+
+[features]
+# 仅用于门控导出测试：cargo test --features ts-export
+ts-export = []

@@ -20,6 +20,8 @@ mod server;
 mod services;
 mod settings;
 mod tray;
+#[cfg(feature = "ts-export")]
+mod ts_export;
 mod wiki;
 
 use std::sync::{Arc, Mutex, RwLock};
