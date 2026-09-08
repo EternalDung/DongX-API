@@ -15,29 +15,37 @@
 //!   content_block_start (text)
 //!   content_block_delta (text_delta)
 //!   content_block_stop  (text)
+//!   content_block_start (tool_use)   [only if tool_calls present]
+//!   content_block_delta (input_json_delta)
+//!   content_block_stop  (tool_use)
 //! message_delta
 //! message_stop
 //! ```
 //!
 //! The design implements Anthropic's Messages SSE contract as a small faithful
-//! subset that covers the shapes our gateway actually emits: text plus
-//! `reasoning_content` (DeepSeek R1 / o1 / o3 thinking). Tool-use blocks are
-//! not yet emitted (the gateway currently has no tool-calling path).
+//! subset that covers the shapes our gateway actually emits: text,
+//! `reasoning_content` (DeepSeek R1 / o1 / o3 thinking) and tool-calling
+//! (`tool_calls[]` -> `tool_use` blocks with `input_json_delta`).
 
-use serde_json::json;
+use std::collections::HashMap;
+
+use serde_json::{json, Value};
 
 use crate::adapter::StreamUsage;
 
 /// Stateful converter: turns OpenAI `chat.completion.chunk` `data:` frames into
 /// Anthropic Messages SSE events. One instance lives for the whole upstream
-/// stream and tracks which content block (thinking / text) is currently open so
-/// the `content_block_start` / `content_block_stop` lifecycle is emitted exactly
-/// once for each block, in the correct order (thinking before text).
+/// stream and tracks which content block (thinking / text / tool_use) is
+/// currently open so the `content_block_start` / `content_block_stop` lifecycle
+/// is emitted exactly once for each block, in the correct order (thinking
+/// before text before tool_use).
 pub struct AnthropicStreamState {
     pub model: String,
     pub message_id: String,
     started: bool,
-    active_block: Option<BlockKind>,
+    active_block: Option<BlockKey>,
+    /// 当前打开块的 index（仅在 `active_block.is_some()` 时有意义）
+    active_index: u32,
     next_index: u32,
     finalized: bool,
     /// `input_tokens` reported in `message_start` (unknown at start → 0; the
@@ -45,12 +53,25 @@ pub struct AnthropicStreamState {
     pub input_tokens: i64,
     #[allow(dead_code)]
     pub output_tokens: i64,
+    /// OpenAI `tool_calls[].index` -> (id, name)。首帧之后只带 arguments 片段，
+    /// 若该 tool 块被关闭后重现（少数上游会交错），靠这里补回身份信息。
+    tool_meta: HashMap<u32, (String, String)>,
+    /// 是否产出过 tool_use 块 —— 决定 `message_delta` 的 stop_reason。
+    saw_tool_use: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
 enum BlockKind {
     Thinking,
     Text,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum BlockKey {
+    Thinking,
+    Text,
+    /// 携带 OpenAI 的 `tool_calls[].index`
+    Tool(u32),
 }
 
 impl AnthropicStreamState {
@@ -60,10 +81,13 @@ impl AnthropicStreamState {
             message_id,
             started: false,
             active_block: None,
+            active_index: 0,
             next_index: 0,
             finalized: false,
             input_tokens: 0,
             output_tokens: 0,
+            tool_meta: HashMap::new(),
+            saw_tool_use: false,
         }
     }
 
@@ -78,12 +102,18 @@ impl AnthropicStreamState {
 
     /// Consume one parsed Chat `chat.completion.chunk` JSON value, appending any
     /// Anthropic events it produces to `out`.
-    pub fn on_chat_chunk(&mut self, json: &serde_json::Value, out: &mut String) {
+    pub fn on_chat_chunk(&mut self, json: &Value, out: &mut String) {
         self.ensure_started(out);
         let Some(choices) = json.get("choices").and_then(|c| c.as_array()) else {
             return;
         };
         for choice in choices {
+            // finish_reason=tool_calls 决定 message_delta 的 stop_reason
+            if let Some(fr) = choice.get("finish_reason").and_then(|v| v.as_str()) {
+                if fr == "tool_calls" || fr == "function_call" {
+                    self.saw_tool_use = true;
+                }
+            }
             let Some(delta) = choice.get("delta") else {
                 continue;
             };
@@ -107,33 +137,90 @@ impl AnthropicStreamState {
                     );
                 }
             }
+            // tool_calls[] -> Anthropic tool_use blocks
+            if let Some(calls) = delta.get("tool_calls").and_then(|v| v.as_array()) {
+                for call in calls {
+                    self.on_tool_call(call, out);
+                }
+            }
         }
     }
 
-    fn emit_delta(&mut self, kind: BlockKind, delta: &serde_json::Value, out: &mut String) {
-        match self.active_block {
-            None => {
-                let idx = self.next_index;
-                self.next_index += 1;
-                self.active_block = Some(kind);
-                out.push_str(&content_block_start(idx, kind));
+    /// 处理一个 `tool_calls[]` 增量片段：首帧带 id/name，后续帧只带 arguments。
+    fn on_tool_call(&mut self, call: &Value, out: &mut String) {
+        let idx = call.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        let func = call.get("function");
+        if let Some(id) = call.get("id").and_then(|v| v.as_str()) {
+            let name = func
+                .and_then(|f| f.get("name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            self.tool_meta.insert(idx, (id.to_string(), name));
+        } else if let Some(name) = func.and_then(|f| f.get("name")).and_then(|v| v.as_str()) {
+            // 少数上游首帧不带 id，只带 name
+            let entry = self
+                .tool_meta
+                .entry(idx)
+                .or_insert_with(|| (String::new(), String::new()));
+            if entry.1.is_empty() {
+                entry.1 = name.to_string();
             }
-            Some(active) if active != kind => {
-                // Close the current block, then open the new one.
-                out.push_str(&content_block_stop(self.active_index()));
-                let idx = self.next_index;
-                self.next_index += 1;
-                self.active_block = Some(kind);
-                out.push_str(&content_block_start(idx, kind));
-            }
-            Some(_) => {}
         }
-        out.push_str(&content_block_delta(self.active_index(), delta));
+
+        let key = BlockKey::Tool(idx);
+        if self.active_block != Some(key) {
+            let (id, name) = self
+                .tool_meta
+                .get(&idx)
+                .cloned()
+                .unwrap_or_else(|| (String::new(), String::new()));
+            self.open_block(
+                key,
+                json!({ "type": "tool_use", "id": id, "name": name, "input": {} }),
+                out,
+            );
+        }
+        self.saw_tool_use = true;
+
+        if let Some(args) = func
+            .and_then(|f| f.get("arguments"))
+            .and_then(|v| v.as_str())
+        {
+            if !args.is_empty() {
+                out.push_str(&content_block_delta(
+                    self.active_index,
+                    &json!({ "type": "input_json_delta", "partial_json": args }),
+                ));
+            }
+        }
     }
 
-    /// Index of the currently open block.
-    fn active_index(&self) -> u32 {
-        self.next_index.saturating_sub(1)
+    fn emit_delta(&mut self, kind: BlockKind, delta: &Value, out: &mut String) {
+        let (key, block) = match kind {
+            BlockKind::Thinking => (
+                BlockKey::Thinking,
+                json!({ "type": "thinking", "thinking": "" }),
+            ),
+            BlockKind::Text => (BlockKey::Text, json!({ "type": "text", "text": "" })),
+        };
+        self.open_block(key, block, out);
+        out.push_str(&content_block_delta(self.active_index, delta));
+    }
+
+    /// 打开一个内容块；若当前已有别的块在开，先补 `content_block_stop`。
+    fn open_block(&mut self, key: BlockKey, block: Value, out: &mut String) {
+        if self.active_block == Some(key) {
+            return;
+        }
+        if self.active_block.is_some() {
+            out.push_str(&content_block_stop(self.active_index));
+        }
+        let idx = self.next_index;
+        self.next_index += 1;
+        self.active_block = Some(key);
+        self.active_index = idx;
+        out.push_str(&content_block_start(idx, &block));
     }
 
     /// Emit the closing events: close any open block, then `message_delta`
@@ -145,10 +232,15 @@ impl AnthropicStreamState {
         self.finalized = true;
         self.ensure_started(out);
         if self.active_block.is_some() {
-            out.push_str(&content_block_stop(self.active_index()));
+            out.push_str(&content_block_stop(self.active_index));
             self.active_block = None;
         }
-        out.push_str(&message_delta(usage));
+        let stop_reason = if self.saw_tool_use {
+            "tool_use"
+        } else {
+            "end_turn"
+        };
+        out.push_str(&message_delta(usage, stop_reason));
         out.push_str(&message_stop());
     }
 }
@@ -156,13 +248,6 @@ impl AnthropicStreamState {
 // ---------------------------------------------------------------------------
 // Event string builders
 // ---------------------------------------------------------------------------
-
-fn block_type_str(kind: BlockKind) -> &'static str {
-    match kind {
-        BlockKind::Thinking => "thinking",
-        BlockKind::Text => "text",
-    }
-}
 
 fn message_start(st: &AnthropicStreamState) -> String {
     format!(
@@ -183,9 +268,7 @@ fn message_start(st: &AnthropicStreamState) -> String {
     )
 }
 
-fn content_block_start(index: u32, kind: BlockKind) -> String {
-    let t = block_type_str(kind);
-    let block = json!({ "type": t, "text": "" });
+fn content_block_start(index: u32, block: &Value) -> String {
     format!(
         "event: content_block_start\ndata: {}\n\n",
         json!({
@@ -196,7 +279,7 @@ fn content_block_start(index: u32, kind: BlockKind) -> String {
     )
 }
 
-fn content_block_delta(index: u32, delta: &serde_json::Value) -> String {
+fn content_block_delta(index: u32, delta: &Value) -> String {
     format!(
         "event: content_block_delta\ndata: {}\n\n",
         json!({
@@ -214,12 +297,12 @@ fn content_block_stop(index: u32) -> String {
     )
 }
 
-fn message_delta(usage: &StreamUsage) -> String {
+fn message_delta(usage: &StreamUsage, stop_reason: &str) -> String {
     format!(
         "event: message_delta\ndata: {}\n\n",
         json!({
             "type": "message_delta",
-            "delta": { "stop_reason": "end_turn", "stop_sequence": null },
+            "delta": { "stop_reason": stop_reason, "stop_sequence": null },
             "usage": {
                 "input_tokens": usage.prompt_tokens,
                 "output_tokens": usage.completion_tokens,
@@ -290,6 +373,7 @@ mod tests {
         assert!(out.contains("Hel") && out.contains("lo"));
         // message_delta 携带流末 usage
         assert!(out.contains("\"output_tokens\":3"));
+        assert!(out.contains("\"stop_reason\":\"end_turn\""));
     }
 
     #[test]
@@ -350,5 +434,87 @@ mod tests {
         st.on_chat_chunk(&json!({ "object": "chat.completion.chunk" }), &mut out);
 
         assert_eq!(event_names(&out), vec!["message_start"]);
+    }
+
+    #[test]
+    fn tool_call_stream_emits_tool_use_block() {
+        let mut st = AnthropicStreamState::new("claude-x".into(), "msg_6".into());
+        let mut out = String::new();
+        // 首帧带身份，后续帧只带 arguments 片段
+        st.on_chat_chunk(
+            &chunk(
+                json!({ "tool_calls": [{ "index": 0, "id": "toolu_1", "type": "function",
+                "function": { "name": "get_weather", "arguments": "{\"c" } }] }),
+            ),
+            &mut out,
+        );
+        st.on_chat_chunk(
+            &chunk(json!({ "tool_calls": [{ "index": 0,
+                "function": { "arguments": "ity\":\"SF\"}" } }] })),
+            &mut out,
+        );
+        st.on_chat_chunk(
+            &json!({ "choices": [ { "delta": {}, "finish_reason": "tool_calls" } ] }),
+            &mut out,
+        );
+        st.finalize(&usage(9, 4), &mut out);
+
+        assert_eq!(
+            event_names(&out),
+            vec![
+                "message_start",
+                "content_block_start", // tool_use idx 0
+                "content_block_delta", // 第 1 段 arguments
+                "content_block_delta", // 第 2 段 arguments
+                "content_block_stop",
+                "message_delta",
+                "message_stop",
+            ]
+        );
+        // tool_use 块的身份信息
+        assert!(
+            out.contains("\"type\":\"tool_use\""),
+            "应有 tool_use 块: {out}"
+        );
+        assert!(out.contains("\"id\":\"toolu_1\""));
+        assert!(out.contains("\"name\":\"get_weather\""));
+        // arguments 分片通过 input_json_delta 转发
+        assert_eq!(out.matches("input_json_delta").count(), 2);
+        assert!(out.contains("partial_json"));
+        // finish_reason=tool_calls -> stop_reason=tool_use
+        assert!(out.contains("\"stop_reason\":\"tool_use\""), "{out}");
+    }
+
+    #[test]
+    fn text_then_tool_opens_two_blocks() {
+        let mut st = AnthropicStreamState::new("claude-x".into(), "msg_7".into());
+        let mut out = String::new();
+        st.on_chat_chunk(&chunk(json!({ "content": "我先查一下" })), &mut out);
+        st.on_chat_chunk(
+            &chunk(
+                json!({ "tool_calls": [{ "index": 0, "id": "toolu_9", "type": "function",
+                "function": { "name": "search", "arguments": "{}" } }] }),
+            ),
+            &mut out,
+        );
+        st.finalize(&usage(1, 1), &mut out);
+
+        assert_eq!(
+            event_names(&out),
+            vec![
+                "message_start",
+                "content_block_start", // text idx 0
+                "content_block_delta",
+                "content_block_stop",  // 关闭 text
+                "content_block_start", // tool_use idx 1
+                "content_block_delta",
+                "content_block_stop", // 关闭 tool_use
+                "message_delta",
+                "message_stop",
+            ]
+        );
+        // tool_use 必须是 index 1，不能复用 text 的 index
+        assert!(out.contains("\"index\":1"), "{out}");
+        assert!(out.contains("\"stop_reason\":\"tool_use\""));
     }
 }
