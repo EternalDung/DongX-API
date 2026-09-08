@@ -29,6 +29,7 @@ import { cn } from "@/lib/utils";
 import { knowledgeApi, mcpApi } from "@/lib/api";
 import { sleep } from "@/lib/async";
 import { WikiTabPanel } from "@/components/wiki/WikiTabPanel";
+import { SkillTab } from "@/components/skill/SkillTab";
 import { useTabKeyNavigation } from "@/hooks/useTabKeyNavigation";
 import type { KnowledgeBase, KnowledgeBaseInput, McpStatus } from "@/types";
 
@@ -37,7 +38,7 @@ const TABS = [
   { id: "rag", label: "RAG", desc: "以知识库为单元进行检索增强，摄入文档后可在问答中检索并引用。", icon: BookOpen },
   { id: "wiki", label: "Wiki", desc: "以项目为单元沉淀知识：摄入来源后由模型消化成结构化页面，并在后续摄入中增量更新。", icon: Globe },
   { id: "mcp", label: "MCP", desc: "将知识库以 MCP 工具暴露，供外部 Agent 直接调用检索与问答。", icon: Server },
-  { id: "skill", label: "Skill", desc: "Skill 扩展模块，后续接入。", icon: Zap },
+  { id: "skill", label: "Skill", desc: "把 MCP 工具连同契约打包成技能包，供客户端 Agent 直接加载并调用。", icon: Zap },
 ] as const;
 
 function fmtTime(iso: string | null): string {
@@ -195,20 +196,6 @@ function KnowledgeBaseRow({
           <Trash2 />
         </Button>
       </div>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// 未实现分类的占位
-// ---------------------------------------------------------------------------
-
-function Placeholder({ name }: { name: string }) {
-  return (
-    <div className="flex flex-col items-center justify-center rounded-xl border border-dashed bg-card/50 py-20 text-center">
-      <BookOpen className="h-8 w-8 text-muted-foreground/50" />
-      <p className="mt-3 text-sm font-medium">{name} 服务</p>
-      <p className="mt-1 text-xs text-muted-foreground">暂未实现，敬请期待</p>
     </div>
   );
 }
@@ -764,7 +751,7 @@ export function ServicesPage() {
           <McpTab kbs={kbs} />
         </TabsContent>
         <TabsContent value="skill" className="mt-6">
-          <Placeholder name="Skill" />
+          <SkillTab />
         </TabsContent>
       </Tabs>
 
