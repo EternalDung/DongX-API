@@ -103,7 +103,9 @@ pub struct ModelStat {
     pub success_count: i64,
     pub total_count: i64,
     pub avg_latency_ms: f64,
-    pub primary_mode: String,
+    /// 该模型各 mode（chat/responses/messages/rag/wiki）的调用次数分布，
+    /// 前端用于并列展示每个场景各调用了几次（替代原单一主 mode 标签）。
+    pub mode_breakdown: std::collections::HashMap<String, i64>,
 }
 
 /// Slim variant for list queries (excludes heavy request/response bodies).

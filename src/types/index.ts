@@ -212,8 +212,8 @@ export interface ModelStat {
   success_count: number;
   total_count: number;
   avg_latency_ms: number;
-  /** 该模型出现最多的数据面：chat / responses / messages */
-  primary_mode: string;
+  /** 该模型各场景（chat/responses/messages/rag/wiki）的调用次数分布 */
+  mode_breakdown: Record<string, number>;
 }
 
 // ============================================================

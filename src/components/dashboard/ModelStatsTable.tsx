@@ -46,12 +46,18 @@ const PALETTE = [
   "bg-indigo-500/70",
 ];
 
-function colorFor(model: string): string {
+// 同一模型名在多次渲染里保持同一颜色，但若与上一行撞色则顺延到下一个色，避免相邻同色。
+function colorFor(model: string, prevColor?: string): string {
   let h = 0;
   for (let i = 0; i < model.length; i++) {
     h = (h * 31 + model.charCodeAt(i)) >>> 0;
   }
-  return PALETTE[h % PALETTE.length];
+  const idx = h % PALETTE.length;
+  const candidate = PALETTE[idx];
+  if (prevColor && candidate === prevColor) {
+    return PALETTE[(idx + 1) % PALETTE.length];
+  }
+  return candidate;
 }
 
 function formatNumber(n: number): string {
@@ -91,13 +97,22 @@ function rateTone(pct: number): string {
   return "text-destructive";
 }
 
-/** primary_mode 徽章配色：rag=成功绿、wiki=警告黄、其余中性灰 */
-function modeBadgeVariant(
-  mode: string,
-): "success" | "warning" | "secondary" {
-  if (mode === "rag") return "success";
+// mode 展示顺序：先数据面（chat/responses/messages），后 RAG（rag/wiki），其余排末尾；组内按次数降序。
+const MODE_ORDER = ["chat", "responses", "messages", "rag", "wiki"];
+function modeChipVariant(mode: string): "pink" | "warning" | "secondary" {
+  if (mode === "rag") return "pink";
   if (mode === "wiki") return "warning";
   return "secondary";
+}
+function sortedModes(breakdown: Record<string, number>): [string, number][] {
+  return Object.entries(breakdown).sort((a, b) => {
+    const ia = MODE_ORDER.indexOf(a[0]);
+    const ib = MODE_ORDER.indexOf(b[0]);
+    const ka = ia === -1 ? 999 : ia;
+    const kb = ib === -1 ? 999 : ib;
+    if (ka !== kb) return ka - kb;
+    return b[1] - a[1];
+  });
 }
 
 export function ModelStatsTable() {
@@ -194,7 +209,12 @@ export function ModelStatsTable() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {data.map((s) => {
+              {(() => {
+                const rowColors: string[] = [];
+                for (let i = 0; i < data.length; i++) {
+                  rowColors.push(colorFor(data[i].model, rowColors[i - 1]));
+                }
+                return data.map((s, i) => {
                 const rate = successRate(s);
                 const share = grandTotal > 0 ? (s.total_tokens / grandTotal) * 100 : 0;
                 const cachePct =
@@ -208,19 +228,22 @@ export function ModelStatsTable() {
                         <span
                           className={cn(
                             "h-2.5 w-2.5 shrink-0 rounded-full",
-                            colorFor(s.model),
+                            rowColors[i],
                           )}
                         />
-                  <div className="min-w-0">
+                  <div className="flex min-w-0 flex-wrap items-center gap-1.5">
                     <div className="truncate font-medium">{s.model}</div>
-                    {s.primary_mode && s.primary_mode !== "chat" && (
-                      <Badge
-                        variant={modeBadgeVariant(s.primary_mode)}
-                        className="mt-0.5 px-1.5 py-0 text-[10px] font-normal"
-                      >
-                        {s.primary_mode}
-                      </Badge>
-                    )}
+                    <div className="flex shrink-0 flex-wrap items-center gap-1">
+                      {sortedModes(s.mode_breakdown).map(([mode, cnt]) => (
+                        <Badge
+                          key={mode}
+                          variant={modeChipVariant(mode)}
+                          className="rounded-full px-2 py-0 text-[10px] font-medium"
+                        >
+                          {mode} {cnt}
+                        </Badge>
+                      ))}
+                    </div>
                   </div>
                       </div>
                     </TableCell>
@@ -270,7 +293,7 @@ export function ModelStatsTable() {
                     </TableCell>
                   </TableRow>
                 );
-              })}
+              })})()}
             </TableBody>
           </Table>
         )}

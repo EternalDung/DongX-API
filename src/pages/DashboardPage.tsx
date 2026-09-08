@@ -345,7 +345,10 @@ export function DashboardPage() {
       <Card className="mt-6">
         <CardHeader className="flex flex-row items-center justify-between gap-4 space-y-0">
           <div className="min-w-0">
-            <CardTitle>统计概览</CardTitle>
+            <CardTitle className="flex items-center gap-2">
+              <Activity className="h-4 w-4 text-primary" />
+              统计概览
+            </CardTitle>
             <CardDescription className="truncate">
               {cardsCollapsed
                 ? `${overviewSummary} · 已折叠 12 项`
@@ -395,7 +398,10 @@ export function DashboardPage() {
       {/* 渠道状态列表 */}
       <Card className="mt-6">
         <CardHeader>
-          <CardTitle>渠道状态</CardTitle>
+          <CardTitle className="flex items-center gap-2">
+            <Network className="h-4 w-4 text-primary" />
+            渠道状态
+          </CardTitle>
           <CardDescription>各上游渠道的运行情况</CardDescription>
         </CardHeader>
         <CardContent>

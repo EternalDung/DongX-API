@@ -687,8 +687,8 @@ pub mod stats {
 
     /// 按模型聚合调用统计，支持时间窗过滤（from/to 为 RFC3339 字符串；
     /// 任一为 None 则不限时间）。成功 = `error_message` 为空。
-    /// `primary_mode` 取该模型出现最多的 mode（chat/responses/messages），
-    /// 用于前端展示「该模型主要走哪条数据面」。
+    /// `mode_breakdown` 记录该模型各 mode（chat/responses/messages/rag/wiki）的调用次数，
+    /// 用于前端「模型调用统计」并列展示每个场景各调用了几次（避免单一 primary_mode 误导）。
     pub async fn model_stats(
         pool: &SqlitePool,
         from: Option<&str>,
@@ -727,9 +727,9 @@ pub mod stats {
         qb.push(" GROUP BY model ORDER BY total_tokens DESC");
         let base: Vec<ModelStatBase> = qb.build_query_as::<ModelStatBase>().fetch_all(pool).await?;
 
-        // 2) 每个模型的 primary_mode（出现最多的 mode）
+        // 2) 每个模型的 mode 分布（各 mode 调用次数）
         let mut qb2: QueryBuilder<Sqlite> =
-            QueryBuilder::new("SELECT model, mode FROM request_logs");
+            QueryBuilder::new("SELECT model, mode, COUNT(*) AS cnt FROM request_logs");
         if from.is_some() || to.is_some() {
             qb2.push(" WHERE ");
             let mut first = true;
@@ -746,32 +746,32 @@ pub mod stats {
                 qb2.push_bind(t);
             }
         }
-        qb2.push(" GROUP BY model, mode ORDER BY model, COUNT(*) DESC");
+        qb2.push(" GROUP BY model, mode ORDER BY model, cnt DESC");
         let mode_rows: Vec<ModeCountRow> =
             qb2.build_query_as::<ModeCountRow>().fetch_all(pool).await?;
-        let mut top_mode: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
+        // model -> { mode -> count }
+        let mut breakdown: std::collections::HashMap<
+            String,
+            std::collections::HashMap<String, i64>,
+        > = std::collections::HashMap::new();
         for r in mode_rows {
-            top_mode.entry(r.model).or_insert(r.mode);
+            breakdown.entry(r.model).or_default().insert(r.mode, r.cnt);
         }
 
         // 3) 合并
         Ok(base
             .into_iter()
-            .map(|b| {
-                let model = b.model.clone();
-                ModelStat {
-                    model: b.model,
-                    request_count: b.request_count,
-                    prompt_tokens: b.prompt_tokens,
-                    completion_tokens: b.completion_tokens,
-                    cached_tokens: b.cached_tokens,
-                    total_tokens: b.total_tokens,
-                    success_count: b.success_count,
-                    total_count: b.total_count,
-                    avg_latency_ms: b.avg_latency_ms,
-                    primary_mode: top_mode.get(&model).cloned().unwrap_or_default(),
-                }
+            .map(|b| ModelStat {
+                model: b.model.clone(),
+                request_count: b.request_count,
+                prompt_tokens: b.prompt_tokens,
+                completion_tokens: b.completion_tokens,
+                cached_tokens: b.cached_tokens,
+                total_tokens: b.total_tokens,
+                success_count: b.success_count,
+                total_count: b.total_count,
+                avg_latency_ms: b.avg_latency_ms,
+                mode_breakdown: breakdown.remove(&b.model).unwrap_or_default(),
             })
             .collect())
     }
@@ -793,6 +793,7 @@ pub mod stats {
     struct ModeCountRow {
         pub model: String,
         pub mode: String,
+        pub cnt: i64,
     }
 }
 
