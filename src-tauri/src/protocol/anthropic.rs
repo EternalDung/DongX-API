@@ -86,10 +86,8 @@ pub(crate) fn anthropic_to_openai(req: &Value) -> Value {
                         messages.push(json!({ "role": role, "content": blocks }));
                     }
                 }
-                Some(Value::String(s)) => {
-                    if !s.is_empty() {
-                        messages.push(json!({ "role": role, "content": s }));
-                    }
+                Some(Value::String(s)) if !s.is_empty() => {
+                    messages.push(json!({ "role": role, "content": s }));
                 }
                 _ => {}
             }
