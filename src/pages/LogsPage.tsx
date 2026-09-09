@@ -31,6 +31,7 @@ import { Badge } from "@/components/ui/badge";
 import { StatusBadge, type StatusTone } from "@/components/ui/status-badge";
 import { useToast } from "@/components/ui/toast";
 import { CopyButton } from "@/components/ui/copy-button";
+import { DatePicker } from "@/components/DatePicker";
 import {
   Table,
   TableBody,
@@ -146,6 +147,9 @@ export function LogsPage() {
   const [channelFilter, setChannelFilter] = useState("all");
   const [modelFilter, setModelFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
+  const [autoRefresh, setAutoRefresh] = useState<"off" | "5" | "10" | "30">("off");
 
   const [clearOpen, setClearOpen] = useState(false);
   const [clearing, setClearing] = useState(false);
@@ -186,6 +190,8 @@ export function LogsPage() {
         trace_id: traceFilter.trim() || undefined,
         channel_name: channelFilter !== "all" ? channelFilter : undefined,
         model: modelFilter !== "all" ? modelFilter : undefined,
+        start_time: startDate ? `${startDate}T00:00:00` : undefined,
+        end_time: endDate ? `${endDate}T23:59:59` : undefined,
         page: p + 1, // backend is 1-indexed
         page_size: PAGE_SIZE,
       });
@@ -203,6 +209,14 @@ export function LogsPage() {
     }
   };
 
+  // auto-refresh：用 ref 持有最新 load/page/expandedId，避免 setInterval 闭包捕获过期值
+  const loadRef = useRef(load);
+  loadRef.current = load;
+  const pageRef = useRef(page);
+  pageRef.current = page;
+  const expandedRef = useRef(expandedId);
+  expandedRef.current = expandedId;
+
   // Load channels once (for the filter dropdown).
   useEffect(() => {
     channelApi.list().then(setChannels).catch(() => {});
@@ -217,7 +231,17 @@ export function LogsPage() {
     }, 300);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [keyword, traceFilter, channelFilter, modelFilter]);
+  }, [keyword, traceFilter, channelFilter, modelFilter, startDate, endDate]);
+
+  // 自动刷新：按间隔重载当前页；展开明细时跳过，避免收起正在看的行；卸载/切“关闭”自动清理。
+  useEffect(() => {
+    if (autoRefresh === "off") return;
+    const sec = autoRefresh === "5" ? 5 : autoRefresh === "10" ? 10 : 30;
+    const id = setInterval(() => {
+      if (expandedRef.current === null) loadRef.current(pageRef.current);
+    }, sec * 1000);
+    return () => clearInterval(id);
+  }, [autoRefresh]);
 
   const modelOptions = useMemo(
     () => Array.from(new Set(channels.flatMap((c) => c.models))).sort(),
@@ -252,6 +276,8 @@ export function LogsPage() {
     setChannelFilter("all");
     setModelFilter("all");
     setStatusFilter("all");
+    setStartDate("");
+    setEndDate("");
   };
 
   const hasFilter =
@@ -259,7 +285,9 @@ export function LogsPage() {
     traceFilter.trim() !== "" ||
     channelFilter !== "all" ||
     modelFilter !== "all" ||
-    statusFilter !== "all";
+    statusFilter !== "all" ||
+    startDate !== "" ||
+    endDate !== "";
 
   const goPrev = () => {
     const p = Math.max(0, page - 1);
@@ -296,6 +324,27 @@ export function LogsPage() {
             <RefreshCw className={spinning ? "animate-spin" : ""} />
             刷新
           </Button>
+          <Select value={autoRefresh} onValueChange={setAutoRefresh}>
+            <SelectTrigger
+              className={cn(
+                "w-[112px] justify-between",
+                autoRefresh !== "off" && "border-emerald-600/40 text-emerald-600",
+              )}
+            >
+              <span className="flex items-center gap-1.5">
+                {autoRefresh !== "off" && (
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                )}
+                {autoRefresh === "off" ? "自动刷新" : `自动 ${autoRefresh}s`}
+              </span>
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="off">关闭</SelectItem>
+              <SelectItem value="5">5 秒</SelectItem>
+              <SelectItem value="10">10 秒</SelectItem>
+              <SelectItem value="30">30 秒</SelectItem>
+            </SelectContent>
+          </Select>
           <Button
             variant="outline"
             size="sm"
@@ -310,19 +359,29 @@ export function LogsPage() {
 
       {/* 筛选栏 */}
       <div className="mt-6 flex flex-wrap items-center gap-2">
-        <div className="relative">
+        <div className="relative flex-1 min-w-[200px]">
           <Search className="absolute top-1/2 left-2.5 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <Input
-            className="w-52 pl-8"
-            placeholder="模型 / 渠道 / 错误信息"
+            className="w-full pl-8 pr-8"
+            placeholder="模型 / 渠道 / 错误 / 密钥名"
             value={keyword}
             onChange={(e) => setKeyword(e.target.value)}
           />
+          {keyword && (
+            <button
+              type="button"
+              title="清除关键词"
+              onClick={() => setKeyword("")}
+              className="absolute top-1/2 right-2 h-4 w-4 -translate-y-1/2 text-muted-foreground transition-colors hover:text-foreground"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          )}
         </div>
-        <div className="relative">
+        <div className="relative flex-1 min-w-[200px]">
           <Link2 className="absolute top-1/2 left-2.5 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <Input
-            className="w-60 pl-8 pr-8 font-mono text-xs"
+            className="w-full pl-8 pr-8 font-mono text-xs"
             placeholder="Trace ID 精确匹配"
             value={traceFilter}
             onChange={(e) => setTraceFilter(e.target.value)}
@@ -339,7 +398,7 @@ export function LogsPage() {
           )}
         </div>
         <Select value={channelFilter} onValueChange={setChannelFilter}>
-          <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
+          <SelectTrigger><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="all">全部渠道</SelectItem>
             {channels.map((c) => (
@@ -350,7 +409,7 @@ export function LogsPage() {
           </SelectContent>
         </Select>
         <Select value={modelFilter} onValueChange={setModelFilter}>
-          <SelectTrigger className="w-36"><SelectValue /></SelectTrigger>
+          <SelectTrigger><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="all">全部模型</SelectItem>
             {modelOptions.map((m) => (
@@ -361,7 +420,7 @@ export function LogsPage() {
           </SelectContent>
         </Select>
         <Select value={statusFilter} onValueChange={setStatusFilter}>
-          <SelectTrigger className="w-28"><SelectValue /></SelectTrigger>
+          <SelectTrigger><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="all">全部状态</SelectItem>
             <SelectItem value="2">2xx 成功</SelectItem>
@@ -369,14 +428,23 @@ export function LogsPage() {
             <SelectItem value="5">5xx 服务端</SelectItem>
           </SelectContent>
         </Select>
+        <div className="flex items-center gap-1.5">
+          <div className="w-[150px]">
+            <DatePicker value={startDate} onChange={setStartDate} placeholder="开始日期" />
+          </div>
+          <span className="text-xs text-muted-foreground">至</span>
+          <div className="w-[150px]">
+            <DatePicker value={endDate} onChange={setEndDate} placeholder="结束日期" />
+          </div>
+        </div>
         <Button
-          variant="ghost"
-          size="icon"
-          title="重置筛选"
+          variant="outline"
+          size="sm"
           onClick={resetFilters}
           className="shrink-0"
         >
           <RotateCcw className="h-4 w-4" />
+          重置
         </Button>
       </div>
 
@@ -444,10 +512,12 @@ export function LogsPage() {
                               </span>
                             </div>
                           </TableCell>
-                          <TableCell className="whitespace-nowrap text-muted-foreground">
+                          <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
                             {formatTime(l.created_at)}
                           </TableCell>
-                          <TableCell>{l.api_key_name ?? "-"}</TableCell>
+                          <TableCell className="max-w-[180px]">
+                            <span className="block truncate" title={l.api_key_name ?? undefined}>{l.api_key_name ?? "-"}</span>
+                          </TableCell>
                           <TableCell>{l.channel_name ?? "-"}</TableCell>
                           <TableCell>
                             <span className="font-mono text-xs">{l.model}</span>

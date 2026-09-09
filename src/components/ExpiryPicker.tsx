@@ -14,8 +14,8 @@ export interface ExpiryPickerProps {
 }
 
 const QUICK_OPTIONS = [
-  { label: "24 小时", days: 1 },
   { label: "30 天", days: 30 },
+  { label: "60 天", days: 60 },
   { label: "180 天", days: 180 },
   { label: "1 年", days: 365 },
 ];
