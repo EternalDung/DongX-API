@@ -530,12 +530,11 @@ pub mod request_logs {
         match older_than_days {
             Some(days) if days > 0 => {
                 let cutoff = (Utc::now() - chrono::Duration::days(days as i64)).to_rfc3339();
-                let n: i64 = sqlx::query_scalar(
-                    "SELECT COUNT(*) FROM request_logs WHERE created_at < ?1",
-                )
-                .bind(&cutoff)
-                .fetch_one(pool)
-                .await?;
+                let n: i64 =
+                    sqlx::query_scalar("SELECT COUNT(*) FROM request_logs WHERE created_at < ?1")
+                        .bind(&cutoff)
+                        .fetch_one(pool)
+                        .await?;
                 Ok(n)
             }
             _ => {
