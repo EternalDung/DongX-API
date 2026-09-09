@@ -19,8 +19,8 @@ import type { ServerStatus } from "@/types";
 
 const NAV_ITEMS = [
   { to: "/", label: "仪表盘", icon: LayoutDashboard, end: true },
-  { to: "/usage", label: "使用", icon: BookOpen },
-  { to: "/services", label: "服务", icon: Boxes },
+  { to: "/usage", label: "接入测试", icon: BookOpen },
+  { to: "/services", label: "知识服务", icon: Boxes },
   { to: "/channels", label: "渠道管理", icon: Network },
   { to: "/api-keys", label: "密钥管理", icon: KeyRound },
   { to: "/logs", label: "请求日志", icon: ScrollText },
@@ -178,7 +178,7 @@ export default function Layout() {
                     </span>
                     <span
                       className={cn(
-                        "text-[15px] transition-colors",
+                        "text-[17px] transition-colors",
                         isActive
                           ? "font-medium text-foreground"
                           : "text-muted-foreground group-hover:text-foreground",

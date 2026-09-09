@@ -30,6 +30,7 @@ import { channelApi, keyApi, settingsApi, clientConfigApi } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { ClientConfigView } from "@/components/ClientConfigView";
 import { CodeBlock } from "@/components/CodeBlock";
+import { useTabKeyNavigation } from "@/hooks/useTabKeyNavigation";
 import type { ApiKey, Channel, ClientInfo, Settings } from "@/types";
 
 // ============================================================
@@ -419,13 +420,24 @@ export function UsagePage() {
     }
   };
 
-  // 顶部 tabs：API 接口固定首位 + 后端下发的各客户端
-  const allTabs = useMemo(
-    () => [
+  // 顶部 tabs：API 接口固定首位 + 后端下发的各客户端。
+  // 已安装(available)的客户端置顶；同组保留后端原始下发顺序（稳定排序）。
+  const allTabs = useMemo(() => {
+    const sortedClients = [...clientConfigs].sort(
+      (a, b) => Number(b.available) - Number(a.available),
+    );
+    return [
       { id: "api", label: "API 接口" },
-      ...clientConfigs.map((c) => ({ id: c.name, label: c.label })),
-    ],
-    [clientConfigs],
+      ...sortedClients.map((c) => ({ id: c.name, label: c.label })),
+    ];
+  }, [clientConfigs]);
+
+  // 键盘 Tab 切换客户端页签（与服务页一致）：Tab=下一个，Shift+Tab=上一个，首尾循环；
+  // 输入框 / 文本域 / 可编辑区内不劫持，保留浏览器正常焦点移动。
+  useTabKeyNavigation(
+    allTabs.map((t) => t.id),
+    activeClient,
+    setActiveClient,
   );
 
   // 默认选第一个 model
@@ -586,7 +598,7 @@ export function UsagePage() {
             <BookOpen className="h-6 w-6" />
           </div>
           <div>
-            <h1 className="text-2xl font-semibold tracking-tight">LLM 使用</h1>
+            <h1 className="text-2xl font-semibold tracking-tight">接入测试</h1>
             <p className="mt-0.5 text-sm text-muted-foreground">
               本地网关直连测试 · OpenAI 兼容协议
             </p>

@@ -1,35 +1,17 @@
 // 静态技能包契约：RAG 工具清单（name / description / 入参 schema / 出参描述）。
-// 参数稳定、不随运行态变化，故写死于此，作为「展示 + 导出」单一事实源，
-// 与 waliapi 的纯前端 + 技能包模式一致。工具增减时手动同步此处即可。
-// 端点 URL 仍由后端 get_mcp_status 实时提供（见 SkillTab）。
+//
+// **必须与后端 `src-tauri/src/mcp/tools.rs` 的 `rag_specs()` 保持一致**——
+// 后端工具增减或改 schema 时，同步改这里（页面展示与导出都吃这份数据）。
+// 共享类型见 ./skillTypes（RAG / Wiki 两个技能包共用同一套结构）。
 
-export interface JsonProp {
-  type?: string;
-  description?: string;
-  default?: unknown;
-  minimum?: number;
-  maximum?: number;
-}
+import type { SkillToolSpec } from "./skillTypes";
 
-export interface RagToolSpec {
-  name: string;
-  description: string;
-  /** 出参结构描述（文本），供 Skill 页与导出 SKILL.md 展示 */
-  returns: string;
-  inputSchema: {
-    type: string;
-    properties: Record<string, JsonProp>;
-    required: string[];
-    additionalProperties?: boolean;
-  };
-}
-
-export const ragSkills: RagToolSpec[] = [
+export const ragSkills: SkillToolSpec[] = [
   {
     name: "search_knowledge_base",
     description: "语义检索 RAG，返回匹配文本片段和相似度评分",
     returns:
-      "文本。格式：知识库「名称」Top-N 命中，每条含序号、文档标题、相似度分数(0~1)、片段正文（截断 320 字）。未命中返回提示文本。",
+      "文本。格式：知识库「名称」Top-N 命中，每条含序号、文档标题、相似度分数(0~1)、doc_id（供 read_document 读全文）、片段正文（截断 320 字）。未命中返回提示文本。",
     inputSchema: {
       type: "object",
       properties: {
@@ -71,10 +53,10 @@ export const ragSkills: RagToolSpec[] = [
         question: { type: "string", description: "用户问题" },
         model: {
           type: "string",
-          description: "用于生成回答的 chat 模型（可省略，使用任意可用模型由网关分发）",
+          description: "用于生成回答的 chat 模型（必填，例如 deepseek-v4-flash；网关要求显式指定）",
         },
       },
-      required: ["kb_id", "question"],
+      required: ["kb_id", "question", "model"],
       additionalProperties: false,
     },
   },
@@ -98,6 +80,36 @@ export const ragSkills: RagToolSpec[] = [
     description: "获取 RAG 统计信息（文档数 / 切片数 / token 数）",
     returns:
       "文本：ID / 描述 / 嵌入模型 / 渠道 / 状态 / 已就绪文档数 / 分片总数 / 总字符数 / 总 token 数。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        kb_id: { type: "string", description: "知识库 id" },
+      },
+      required: ["kb_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "list_documents",
+    description:
+      "列出知识库下的文档（ID/标题/来源/分片数/状态），用于取得 read_document 需要的 doc_id",
+    returns:
+      "Markdown 表格：| ID | 标题 | 来源 | 字符 | 分片 | 状态 |，按创建时间倒序；末尾提示用 read_document 传 doc_id 读全文。库内无文档时返回提示文本。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        kb_id: { type: "string", description: "知识库 id" },
+      },
+      required: ["kb_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "rebuild_index",
+    description:
+      "重建索引：按知识库当前嵌入模型重新向量化全部分片（切换嵌入模型后必做）",
+    returns:
+      "文本：索引重建完成 + 嵌入模型 / 文档数 / 分片数 / 已向量化数 / 过期(stale) 数 / token 总数 / 索引是否完整。",
     inputSchema: {
       type: "object",
       properties: {
