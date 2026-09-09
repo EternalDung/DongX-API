@@ -521,6 +521,32 @@ pub mod request_logs {
         }
     }
 
+    /// Count logs that would be deleted by `clear(older_than_days)`.
+    /// Mirrors `clear`'s cutoff logic so the preview matches the actual delete.
+    pub async fn count_before(
+        pool: &SqlitePool,
+        older_than_days: Option<i32>,
+    ) -> Result<i64, sqlx::Error> {
+        match older_than_days {
+            Some(days) if days > 0 => {
+                let cutoff = (Utc::now() - chrono::Duration::days(days as i64)).to_rfc3339();
+                let n: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM request_logs WHERE created_at < ?1",
+                )
+                .bind(&cutoff)
+                .fetch_one(pool)
+                .await?;
+                Ok(n)
+            }
+            _ => {
+                let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM request_logs")
+                    .fetch_one(pool)
+                    .await?;
+                Ok(n)
+            }
+        }
+    }
+
     /// Delete a single log entry by id.
     pub async fn delete(pool: &SqlitePool, id: &str) -> Result<u64, sqlx::Error> {
         let res = sqlx::query("DELETE FROM request_logs WHERE id = ?")

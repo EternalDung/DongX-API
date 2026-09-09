@@ -153,6 +153,8 @@ export function LogsPage() {
 
   const [clearOpen, setClearOpen] = useState(false);
   const [clearing, setClearing] = useState(false);
+  const [clearScope, setClearScope] = useState<"7" | "30" | "all">("7");
+  const [clearCount, setClearCount] = useState<number | null>(null);
 
   const [deleteTarget, setDeleteTarget] = useState<RequestLog | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -254,17 +256,29 @@ export function LogsPage() {
     return logs.filter((l) => String(l.status_code).startsWith(statusFilter));
   }, [logs, statusFilter]);
 
+  const fetchClearCount = async (scope: "7" | "30" | "all") => {
+    try {
+      const days = scope === "all" ? undefined : Number(scope);
+      setClearCount(await logApi.countBefore(days));
+    } catch {
+      setClearCount(null);
+    }
+  };
+
   const handleClear = async () => {
     setClearing(true);
     try {
-      await logApi.clear();
-      toast.success("日志已清空");
+      const days = clearScope === "all" ? undefined : Number(clearScope);
+      await logApi.clear(days);
+      toast.success(
+        clearScope === "all" ? "已清理全部日志" : `已清理 ${clearScope} 天前的日志`,
+      );
       setClearOpen(false);
       setPage(0);
       await load(0);
     } catch (e) {
       console.error("Failed to clear logs:", e);
-      toast.error("清空失败");
+      toast.error("清理失败");
     } finally {
       setClearing(false);
     }
@@ -349,10 +363,14 @@ export function LogsPage() {
             variant="outline"
             size="sm"
             className="text-destructive hover:bg-destructive/10 hover:text-destructive"
-            onClick={() => setClearOpen(true)}
+            onClick={() => {
+              setClearScope("7");
+              setClearOpen(true);
+              fetchClearCount("7");
+            }}
           >
             <Trash2 />
-            清空
+            清理
           </Button>
         </div>
       </div>
@@ -381,7 +399,7 @@ export function LogsPage() {
         <div className="relative flex-1 min-w-[200px]">
           <Link2 className="absolute top-1/2 left-2.5 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <Input
-            className="w-full pl-8 pr-8 font-mono text-xs"
+            className="w-full pl-8 pr-8 font-mono text-xs placeholder:font-sans placeholder:font-normal"
             placeholder="Trace ID 精确匹配"
             value={traceFilter}
             onChange={(e) => setTraceFilter(e.target.value)}
@@ -598,24 +616,89 @@ export function LogsPage() {
         </CardContent>
       </Card>
 
-      {/* 清空确认 Dialog */}
+      {/* 清理确认 Dialog（范围选择 + 删除条数预览） */}
       <Dialog open={clearOpen} onOpenChange={setClearOpen}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <AlertTriangle className="h-5 w-5 text-destructive" />
-              清空请求日志
+              清理请求日志
             </DialogTitle>
             <DialogDescription>
-              确认清空全部请求日志？此操作不可恢复，审计事件不受影响。
+              选择要删除的日志时间范围，确认后不可恢复。审计事件不受影响。
             </DialogDescription>
           </DialogHeader>
+
+          <div className="space-y-2">
+            {([
+              { value: "7", label: "7 天前", desc: "删除 7 天前的日志" },
+              { value: "30", label: "30 天前", desc: "删除 30 天前的日志" },
+              { value: "all", label: "全部日志", desc: "删除所有请求日志", danger: true },
+            ] as const).map((opt) => {
+              const active = clearScope === opt.value;
+              return (
+                <button
+                  key={opt.value}
+                  type="button"
+                  onClick={() => {
+                    setClearScope(opt.value);
+                    fetchClearCount(opt.value);
+                  }}
+                  className={cn(
+                    "flex w-full items-center gap-3 rounded-lg border px-3 py-2.5 text-left transition-colors",
+                    active
+                      ? opt.danger
+                        ? "border-destructive bg-destructive/5"
+                        : "border-primary bg-primary/5"
+                      : "border hover:bg-muted/50",
+                  )}
+                >
+                  <span
+                    className={cn(
+                      "mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border",
+                      active ? "border-primary" : "border-muted-foreground/40",
+                      opt.danger && active && "border-destructive",
+                    )}
+                  >
+                    {active && (
+                      <span
+                        className={cn(
+                          "h-2 w-2 rounded-full",
+                          opt.danger ? "bg-destructive" : "bg-primary",
+                        )}
+                      />
+                    )}
+                  </span>
+                  <span className="flex-1">
+                    <span
+                      className={cn(
+                        "block text-sm font-medium",
+                        opt.danger && "text-destructive",
+                      )}
+                    >
+                      {opt.label}
+                    </span>
+                    <span className="block text-xs text-muted-foreground">{opt.desc}</span>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+
+          <p className="text-xs text-muted-foreground">
+            将删除约{" "}
+            <span className="font-medium text-foreground">
+              {clearCount === null ? "\u2026" : clearCount.toLocaleString()}
+            </span>{}
+            条记录
+          </p>
+
           <DialogFooter>
             <Button variant="outline" onClick={() => setClearOpen(false)}>
               取消
             </Button>
             <Button variant="destructive" onClick={handleClear} disabled={clearing}>
-              {clearing ? "清空中..." : "确认清空"}
+              {clearing ? "清理中..." : "确认清理"}
             </Button>
           </DialogFooter>
         </DialogContent>

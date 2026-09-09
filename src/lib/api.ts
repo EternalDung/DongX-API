@@ -271,6 +271,9 @@ export const logApi = {
   /** 清空日志，可选只清理 N 天前的记录 */
   clear: (olderThanDays?: number): Promise<void> =>
     invoke<void>("clear_logs", { olderThanDays }),
+  /** 预览将删除的日志条数（按时间范围，None/0 = 全部） */
+  countBefore: (olderThanDays?: number): Promise<number> =>
+    invoke<number>("count_logs_before", { olderThanDays }),
 
   /** 删除单条日志 */
   delete: (id: string): Promise<number> =>

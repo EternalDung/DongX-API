@@ -88,6 +88,16 @@ pub async fn clear_logs(
     Ok(())
 }
 
+/// Count logs older than N days (None = total). Used to preview the impact
+/// of a cleanup before the user confirms it.
+#[tauri::command]
+pub async fn count_logs_before(
+    older_than_days: Option<i32>,
+    state: State<'_, Arc<AppState>>,
+) -> AppResult<i64> {
+    Ok(request_logs::count_before(&state.db, older_than_days).await?)
+}
+
 /// Spawn a background task that periodically purges request logs older than
 /// the configured `log_retention_days` (default 30). Runs every 6 hours so
 /// logs can't grow unbounded even if the user never clears them manually.
