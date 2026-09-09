@@ -46,6 +46,7 @@ import type {
   BuiltinRule,
   BuiltinRuleUpdate,
 } from "@/types";
+import { UpdateSection } from "@/components/settings/UpdateSection";
 
 /** 安全审计 Tab 内 6 个检测项的复用卡片（标签 + 右上角开关） */
 function SecurityToggleCard({
@@ -897,6 +898,8 @@ export function SettingsPage() {
           </Button>
         </div>
       </div>
+
+      <UpdateSection />
 
       <Tabs defaultValue={initialTab} className="mt-6 gap-4">
         <TabsList>

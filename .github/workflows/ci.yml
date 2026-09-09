@@ -73,5 +73,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Type check & build (tsc + vite)
+        run: npm run build
+
       - name: Unit tests
         run: npm test

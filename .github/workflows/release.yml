@@ -52,11 +52,15 @@ jobs:
 
       # tauri-action 自动跑 cargo tauri build + 前端 npm run build，
       # 并把 bundle/ 下的安装包上传到同 tag 的 Release。
-      # 注意：当前未配置代码签名，产物均“未签名”。
+      # 注意：
+      # - 已配置 updater 签名（ed25519，TAURI_SIGNING_PRIVATE_KEY）：
+      #   会自动生成 latest.json + .sig 并随 Release 上传，供自动更新使用。
+      # - OS 代码签名（Windows Authenticode / macOS notarize）仍未配置，安装包本身“未签名”。
       - name: Build & release (Tauri)
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # 内置，无需自建
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'DongX ${{ github.ref_name }}'

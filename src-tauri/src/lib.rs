@@ -79,6 +79,7 @@ pub fn run() {
             None,
         ))
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_process::init()) // 更新完成后 relaunch() 用
         .on_window_event(|window, event| {
             // 关闭到托盘：拦截关闭请求，按设置决定是否隐藏而非退出。
             // 托盘菜单的「退出」用 app.exit(0) 强制退出，绕过此拦截。
@@ -173,6 +174,19 @@ pub fn run() {
                         .unwrap_or_else(|_| "dongx=info,tauri=info".into()),
                 )
                 .init();
+
+            // 注册 updater 插件（仅桌面端：windows/mac/linux）。
+            // 端点 + pubkey 在 tauri.conf.json 的 plugins.updater 配置；
+            // ed25519 私钥在 CI 用 TAURI_SIGNING_PRIVATE_KEY 环境变量传入签名，
+            // 此处不读私钥、不做网络请求，只装载校验器。
+            // build() 返回插件实例（非 Result），注册失败仅告警，不阻断启动。
+            #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+            {
+                let updater = tauri_plugin_updater::Builder::new().build();
+                if let Err(e) = app.handle().plugin(updater) {
+                    tracing::warn!("updater 插件注册失败，自动更新功能不可用: {}", e);
+                }
+            }
 
             // Resolve db path: %APPDATA%/<tauri.conf.json identifier>/dongx.db
             // (identifier = "com.wei.dongx", so: %APPDATA%/com.wei.dongx/dongx.db)

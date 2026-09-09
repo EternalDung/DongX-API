@@ -45,7 +45,9 @@
     "react-dom": "^19.2.0",
     "react-router-dom": "^7.18.0",
     "tailwind-merge": "^3.6.0",
-    "zustand": "^5.0.14"
+    "zustand": "^5.0.14",
+    "@tauri-apps/plugin-updater": "^2",
+    "@tauri-apps/plugin-process": "^2"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.0",

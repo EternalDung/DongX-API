@@ -24,6 +24,8 @@ tauri-plugin-clipboard-manager = "2" # 复制密钥到剪贴板
 tauri-plugin-notification = "2"      # 桌面通知（渠道异常、配额告警）
 tauri-plugin-autostart = "2"         # 开机自启
 tauri-plugin-dialog = "2"            # 文件选择对话框（导出日志等）
+tauri-plugin-updater = "2"           # 应用自动更新：拉 latest.json + ed25519 签名校验
+tauri-plugin-process = "2"           # 更新完成后通过 relaunch() 重启应用
 
 # ============================================================
 # Web 框架（数据面 — Axum HTTP 代理服务器）
