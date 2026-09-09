@@ -338,7 +338,7 @@ export function LogsPage() {
             <RefreshCw className={spinning ? "animate-spin" : ""} />
             刷新
           </Button>
-          <Select value={autoRefresh} onValueChange={setAutoRefresh}>
+          <Select value={autoRefresh} onValueChange={(v) => setAutoRefresh(v as "off" | "5" | "10" | "30")}>
             <SelectTrigger
               className={cn(
                 "w-[112px] justify-between",
@@ -631,8 +631,8 @@ export function LogsPage() {
 
           <div className="space-y-2">
             {([
-              { value: "7", label: "7 天前", desc: "删除 7 天前的日志" },
-              { value: "30", label: "30 天前", desc: "删除 30 天前的日志" },
+              { value: "7", label: "7 天前", desc: "删除 7 天前的日志", danger: false },
+              { value: "30", label: "30 天前", desc: "删除 30 天前的日志", danger: false },
               { value: "all", label: "全部日志", desc: "删除所有请求日志", danger: true },
             ] as const).map((opt) => {
               const active = clearScope === opt.value;
