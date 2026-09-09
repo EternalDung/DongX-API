@@ -1,5 +1,6 @@
 //! MCP 工具实现：把 dongx 现有 RAG 能力（`rag::retrieve` / `rag::ask` / 直接 DB 读）
-//! 包装成 MCP tools/list 注册的 5 个 tool。
+//! 包装成 MCP tools/list 注册的 RAG 工具；Wiki 工具见 [`wiki_tools`]，
+//! 两者在 `tool_specs()` 里合并、在 `dispatch` 里依次匹配。
 //!
 //! 重要：所有跨 KB 的入口都强制 `mcp_exposed = 1` 过滤，
 //! 否则 KB 列表的「MCP 暴露」开关会被绕过。
@@ -13,6 +14,7 @@ use sqlx::Row;
 use sqlx::SqlitePool;
 
 use crate::mcp::protocol::{JsonRpcError, ERR_MCP_KB_NOT_EXPOSED, ERR_MCP_KB_NOT_FOUND};
+use crate::mcp::wiki_tools;
 use crate::rag::models::KnowledgeBaseRow;
 use crate::rag::retrieve::{retrieve, RetrievalMode, RetrievedChunk};
 
@@ -34,72 +36,103 @@ pub struct McpToolSpec {
 /// 用 `OnceLock` 延迟初始化：`serde_json::Value` 非 const，构造不能放在静态上下文。
 pub fn tool_specs() -> &'static [McpToolSpec] {
     TOOL_SPECS.get_or_init(|| {
-        vec![
-            McpToolSpec {
-                name: "search_knowledge_base",
-                description: "语义检索 RAG，返回匹配文本片段和相似度评分",
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "kb_id": {"type": "string", "description": "知识库 id（必须已开启「MCP 暴露」）"},
-                        "query": {"type": "string", "description": "查询文本"},
-                        "top_k": {"type": "integer", "description": "返回条数（默认 5，范围 1-20）", "default": 5, "minimum": 1, "maximum": 20}
-                    },
-                    "required": ["kb_id", "query"],
-                    "additionalProperties": false
-                }),
-            },
-            McpToolSpec {
-                name: "list_knowledge_bases",
-                description: "列出所有已暴露的 RAG（ID/名称/文档数）",
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {},
-                    "required": [],
-                    "additionalProperties": false
-                }),
-            },
-            McpToolSpec {
-                name: "ask_knowledge_base",
-                description: "RAG 问答，基于检索内容生成回答并返回来源引用",
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "kb_id": {"type": "string", "description": "知识库 id（必须已开启「MCP 暴露」）"},
-                        "question": {"type": "string", "description": "用户问题"},
-                        "model": {"type": "string", "description": "用于生成回答的 chat 模型（可省略，使用任意可用模型由网关分发）"}
-                    },
-                    "required": ["kb_id", "question"],
-                    "additionalProperties": false
-                }),
-            },
-            McpToolSpec {
-                name: "read_document",
-                description: "读取指定文档的完整内容（含分片正文）",
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "kb_id": {"type": "string", "description": "知识库 id"},
-                        "doc_id": {"type": "string", "description": "文档 id"}
-                    },
-                    "required": ["kb_id", "doc_id"],
-                    "additionalProperties": false
-                }),
-            },
-            McpToolSpec {
-                name: "get_knowledge_base_stats",
-                description: "获取 RAG 统计信息（文档数 / 切片数 / token 数）",
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "kb_id": {"type": "string", "description": "知识库 id"}
-                    },
-                    "required": ["kb_id"],
-                    "additionalProperties": false
-                }),
-            },
-        ]
+        let mut specs = rag_specs();
+        specs.extend(wiki_tools::specs());
+        specs
     })
+}
+
+/// RAG 工具的静态元数据（Wiki 工具见 [`wiki_tools::specs`]）。
+fn rag_specs() -> Vec<McpToolSpec> {
+    vec![
+        McpToolSpec {
+            name: "search_knowledge_base",
+            description: "语义检索 RAG，返回匹配文本片段和相似度评分",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "kb_id": {"type": "string", "description": "知识库 id（必须已开启「MCP 暴露」）"},
+                    "query": {"type": "string", "description": "查询文本"},
+                    "top_k": {"type": "integer", "description": "返回条数（默认 5，范围 1-20）", "default": 5, "minimum": 1, "maximum": 20}
+                },
+                "required": ["kb_id", "query"],
+                "additionalProperties": false
+            }),
+        },
+        McpToolSpec {
+            name: "list_knowledge_bases",
+            description: "列出所有已暴露的 RAG（ID/名称/文档数）",
+            input_schema: json!({
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+            }),
+        },
+        McpToolSpec {
+            name: "ask_knowledge_base",
+            description: "RAG 问答，基于检索内容生成回答并返回来源引用",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "kb_id": {"type": "string", "description": "知识库 id（必须已开启「MCP 暴露」）"},
+                    "question": {"type": "string", "description": "用户问题"},
+                    "model": {"type": "string", "description": "用于生成回答的 chat 模型（必填，例如 deepseek-v4-flash；网关要求显式指定）"}
+                },
+                "required": ["kb_id", "question", "model"],
+                "additionalProperties": false
+            }),
+        },
+        McpToolSpec {
+            name: "read_document",
+            description: "读取指定文档的完整内容（含分片正文）",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "kb_id": {"type": "string", "description": "知识库 id"},
+                    "doc_id": {"type": "string", "description": "文档 id"}
+                },
+                "required": ["kb_id", "doc_id"],
+                "additionalProperties": false
+            }),
+        },
+        McpToolSpec {
+            name: "get_knowledge_base_stats",
+            description: "获取 RAG 统计信息（文档数 / 切片数 / token 数）",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "kb_id": {"type": "string", "description": "知识库 id"}
+                },
+                "required": ["kb_id"],
+                "additionalProperties": false
+            }),
+        },
+        McpToolSpec {
+            name: "list_documents",
+            description: "列出知识库下的文档（ID/标题/来源/分片数/状态），用于取得 read_document 需要的 doc_id",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "kb_id": {"type": "string", "description": "知识库 id"}
+                },
+                "required": ["kb_id"],
+                "additionalProperties": false
+            }),
+        },
+        McpToolSpec {
+            name: "rebuild_index",
+            description: "重建索引：按知识库当前嵌入模型重新向量化全部分片（切换嵌入模型后存量分片会失效，必须重建）。会调用上游嵌入接口，耗时随分片数增长。",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "kb_id": {"type": "string", "description": "知识库 id"}
+                },
+                "required": ["kb_id"],
+                "additionalProperties": false
+            }),
+        },
+    ]
 }
 
 static TOOL_SPECS: OnceLock<Vec<McpToolSpec>> = OnceLock::new();
@@ -130,13 +163,13 @@ pub enum ToolContent {
 }
 
 impl ToolCallResult {
-    fn text(s: impl Into<String>) -> Self {
+    pub(crate) fn text(s: impl Into<String>) -> Self {
         Self {
             content: vec![ToolContent::Text { text: s.into() }],
             is_error: false,
         }
     }
-    fn err(s: impl Into<String>) -> Self {
+    pub(crate) fn err(s: impl Into<String>) -> Self {
         Self {
             content: vec![ToolContent::Text { text: s.into() }],
             is_error: true,
@@ -144,7 +177,7 @@ impl ToolCallResult {
     }
 }
 
-/// 工具分发：按 `name` 路由到 5 个具体实现；未知 name 返回 -32001。
+/// 工具分发：先匹配 RAG 工具，未命中转 [`wiki_tools::dispatch_wiki`]。
 pub async fn dispatch(pool: Arc<SqlitePool>, name: &str, arguments: Value) -> ToolCallResult {
     match name {
         "search_knowledge_base" => search_knowledge_base(&pool, arguments).await,
@@ -152,13 +185,15 @@ pub async fn dispatch(pool: Arc<SqlitePool>, name: &str, arguments: Value) -> To
         "ask_knowledge_base" => ask_knowledge_base(&pool, arguments).await,
         "read_document" => read_document(&pool, arguments).await,
         "get_knowledge_base_stats" => get_knowledge_base_stats(&pool, arguments).await,
-        other => ToolCallResult::err(format!("未知工具: {}", other)),
+        "list_documents" => list_documents(&pool, arguments).await,
+        "rebuild_index" => rebuild_index(&pool, arguments).await,
+        other => wiki_tools::dispatch_wiki(&pool, other, arguments).await,
     }
 }
 
 /// 把 tool 内部错误（含 KB 未暴露）映射成 `ToolCallResult::err`，
 /// 避免网络层把内部错误堆栈泄给 MCP client。
-fn tool_err(e: JsonRpcError) -> ToolCallResult {
+pub(crate) fn tool_err(e: JsonRpcError) -> ToolCallResult {
     ToolCallResult::err(format!("[{}] {}", e.code, e.message))
 }
 
@@ -236,10 +271,11 @@ fn format_hits(kb_name: &str, hits: &[RetrievedChunk]) -> String {
     let mut s = format!("知识库「{}」Top-{} 命中：\n", kb_name, hits.len());
     for (i, h) in hits.iter().enumerate() {
         s.push_str(&format!(
-            "\n[{i}] {title}（相似度 {score:.3}）\n{snippet}\n",
+            "\n[{i}] {title}（相似度 {score:.3}）\n- doc_id: `{doc_id}`\n{snippet}\n",
             i = i + 1,
             title = h.doc_title,
             score = h.score,
+            doc_id = h.doc_id,
             snippet = truncate(&h.content, 320),
         ));
     }
@@ -313,6 +349,7 @@ async fn list_knowledge_bases(pool: &SqlitePool) -> ToolCallResult {
 struct AskArgs {
     kb_id: String,
     question: String,
+    /// 必填：网关侧 `rag::ask` 会拒绝空模型（历史默认值 "" 会被判为「回答模型不能为空」）。
     model: Option<String>,
 }
 
@@ -326,7 +363,15 @@ async fn ask_knowledge_base(pool: &SqlitePool, args: Value) -> ToolCallResult {
         return tool_err(e);
     }
 
-    let model = args.model.unwrap_or_default();
+    // 显式校验而不是回退空串：空串会在下游变成难以理解的「回答模型不能为空」。
+    let model = match args.model {
+        Some(m) if !m.trim().is_empty() => m,
+        _ => {
+            return ToolCallResult::err(
+                "参数非法: model 为必填（用于生成回答的 chat 模型），例如 deepseek-v4-flash",
+            )
+        }
+    };
 
     match crate::rag::ask::ask(
         pool,
@@ -544,6 +589,111 @@ async fn require_exposed_kb(
     Ok(row)
 }
 
+// -----------------------------------------------------------------------------
+// Tool 6: list_documents
+// -----------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct ListDocsArgs {
+    kb_id: String,
+}
+
+/// 列出文档：检索命中只给「标题 + 片段」，agent 需要靠本工具拿 `doc_id`
+/// 才能接着调 `read_document` 读全文（否则 `read_document` 无从下手）。
+async fn list_documents(pool: &SqlitePool, args: Value) -> ToolCallResult {
+    let args: ListDocsArgs = match serde_json::from_value(args) {
+        Ok(a) => a,
+        Err(e) => return ToolCallResult::err(format!("参数非法: {}", e)),
+    };
+    if let Err(e) = require_exposed_kb(pool, &args.kb_id).await {
+        return tool_err(e);
+    }
+
+    let rows = match sqlx::query(
+        "SELECT id, title, source_type, char_count, chunk_count, status, error_message
+         FROM kb_documents WHERE kb_id = ? ORDER BY created_at DESC",
+    )
+    .bind(&args.kb_id)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => return ToolCallResult::err(format!("查询文档失败: {}", e)),
+    };
+
+    if rows.is_empty() {
+        return ToolCallResult::text("该知识库暂无文档。");
+    }
+
+    let mut s = String::from(
+        "文档清单（按创建时间倒序）：\n\n| ID | 标题 | 来源 | 字符 | 分片 | 状态 |\n|---|---|---|---|---|---|\n",
+    );
+    for r in rows {
+        let id: String = r.try_get("id").unwrap_or_default();
+        let title: String = r.try_get("title").unwrap_or_default();
+        let source_type: String = r.try_get("source_type").unwrap_or_default();
+        let char_count: i64 = r.try_get("char_count").unwrap_or(0);
+        let chunk_count: i64 = r.try_get("chunk_count").unwrap_or(0);
+        let status: i64 = r.try_get("status").unwrap_or(1);
+        let err: Option<String> = r.try_get("error_message").unwrap_or(None);
+        let status_text = match status {
+            1 => "就绪".to_string(),
+            2 => format!(
+                "失败{}",
+                err.map(|e| format!("（{}）", e)).unwrap_or_default()
+            ),
+            _ => "处理中".to_string(),
+        };
+        s.push_str(&format!(
+            "| `{id}` | {title} | {st} | {chars} | {chunks} | {status} |\n",
+            id = id,
+            title = title,
+            st = source_type,
+            chars = char_count,
+            chunks = chunk_count,
+            status = status_text,
+        ));
+    }
+    s.push_str("\n用 `read_document` 传上表的 doc_id 即可读取全文。\n");
+    ToolCallResult::text(s)
+}
+
+// -----------------------------------------------------------------------------
+// Tool 7: rebuild_index
+// -----------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct RebuildArgs {
+    kb_id: String,
+}
+
+/// 重建索引：与前端「重建索引」按钮同一份实现（[`crate::rag::index::reindex_kb`]），
+/// 切换嵌入模型后必须执行，否则向量检索命中旧模型的向量结果。
+async fn rebuild_index(pool: &SqlitePool, args: Value) -> ToolCallResult {
+    let args: RebuildArgs = match serde_json::from_value(args) {
+        Ok(a) => a,
+        Err(e) => return ToolCallResult::err(format!("参数非法: {}", e)),
+    };
+    if let Err(e) = require_exposed_kb(pool, &args.kb_id).await {
+        return tool_err(e);
+    }
+
+    match crate::rag::index::reindex_kb(pool, &args.kb_id).await {
+        Ok(st) => ToolCallResult::text(format!(
+            "索引重建完成：知识库 `{id}`\n\n- 嵌入模型: {model}\n- 文档数: {docs}\n- 分片数: {chunks}\n- 已向量化: {embedded}\n- 过期(stale): {stale}\n- token 总数: {tokens}\n- 索引完整: {complete}\n",
+            id = args.kb_id,
+            model = st.embedding_model,
+            docs = st.doc_count,
+            chunks = st.chunk_count,
+            embedded = st.embedded_count,
+            stale = st.stale_count,
+            tokens = st.total_tokens,
+            complete = if st.is_complete { "是" } else { "否" },
+        )),
+        Err(e) => ToolCallResult::err(format!("重建索引失败: {}", e)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -583,17 +733,26 @@ mod tests {
 
     // ---------- 静态元数据（无需 DB） ----------
 
-    /// `tool_specs()` 必须暴露 5 个工具且名称与契约一致。
+    /// `tool_specs()` 必须暴露 12 个工具（RAG 5 + Wiki 7）且名称与契约一致。
     #[test]
-    fn tool_specs_exposes_five_known_tools() {
+    fn tool_specs_exposes_all_known_tools() {
         let specs = tool_specs();
-        assert_eq!(specs.len(), 5);
+        assert_eq!(specs.len(), 14);
         let names: Vec<&str> = specs.iter().map(|s| s.name).collect();
         assert!(names.contains(&"search_knowledge_base"));
         assert!(names.contains(&"list_knowledge_bases"));
         assert!(names.contains(&"ask_knowledge_base"));
         assert!(names.contains(&"read_document"));
         assert!(names.contains(&"get_knowledge_base_stats"));
+        assert!(names.contains(&"list_documents"));
+        assert!(names.contains(&"rebuild_index"));
+        assert!(names.contains(&"list_wiki_projects"));
+        assert!(names.contains(&"get_wiki_project"));
+        assert!(names.contains(&"list_wiki_pages"));
+        assert!(names.contains(&"get_wiki_page"));
+        assert!(names.contains(&"search_wiki"));
+        assert!(names.contains(&"ask_wiki"));
+        assert!(names.contains(&"list_wiki_sources"));
     }
 
     /// 每个 tool 的 `input_schema` 必须是合法 JSON Schema object（MCP 协议要求）。

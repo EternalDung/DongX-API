@@ -9,6 +9,7 @@ pub mod chunk;
 pub mod code_parser;
 pub mod embed;
 pub mod importer;
+pub mod index;
 pub mod ingest;
 pub mod models;
 pub mod parser;

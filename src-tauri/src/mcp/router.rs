@@ -370,7 +370,7 @@ mod tests {
     // ---------- tools/list ----------
 
     #[tokio::test]
-    async fn tools_list_returns_five_tools() {
+    async fn tools_list_returns_all_tools() {
         let pool = test_pool().await;
         let (status, body) = post_json(
             pool,
@@ -379,7 +379,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         let tools = body["result"]["tools"].as_array().expect("tools 应为数组");
-        assert_eq!(tools.len(), 5);
+        assert_eq!(tools.len(), 14);
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         for expected in [
             "search_knowledge_base",
@@ -387,6 +387,13 @@ mod tests {
             "ask_knowledge_base",
             "read_document",
             "get_knowledge_base_stats",
+            "list_wiki_projects",
+            "get_wiki_project",
+            "list_wiki_pages",
+            "get_wiki_page",
+            "search_wiki",
+            "ask_wiki",
+            "list_wiki_sources",
         ] {
             assert!(
                 names.contains(&expected),
@@ -512,6 +519,6 @@ mod tests {
         let (status, body) = get_json(pool, "/mcp/tools").await;
         assert_eq!(status, StatusCode::OK);
         let tools = body["tools"].as_array().expect("tools 数组");
-        assert_eq!(tools.len(), 5);
+        assert_eq!(tools.len(), 14);
     }
 }

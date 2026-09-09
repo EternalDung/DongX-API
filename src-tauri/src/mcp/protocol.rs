@@ -128,6 +128,10 @@ impl JsonRpcError {
 /// 这些 code 仅在 `require_exposed_kb` 等内部拒识处使用，不直接透传给 client。
 pub const ERR_MCP_KB_NOT_FOUND: i64 = -32003;
 pub const ERR_MCP_KB_NOT_EXPOSED: i64 = -32004;
+/// Wiki 项目不存在（MCP 工具专用）。
+pub const ERR_MCP_WIKI_NOT_FOUND: i64 = -32005;
+/// Wiki 项目存在但未开启 MCP 暴露（MCP 工具专用）。
+pub const ERR_MCP_WIKI_NOT_EXPOSED: i64 = -32006;
 
 #[cfg(test)]
 mod tests {

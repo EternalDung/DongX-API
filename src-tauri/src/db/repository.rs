@@ -431,7 +431,8 @@ pub mod request_logs {
             let like = format!("%{}%", kw);
             qb.push("AND (model LIKE ").push_bind(like.clone());
             qb.push(" OR channel_name LIKE ").push_bind(like.clone());
-            qb.push(" OR error_message LIKE ").push_bind(like);
+            qb.push(" OR error_message LIKE ").push_bind(like.clone());
+            qb.push(" OR api_key_name LIKE ").push_bind(like);
             qb.push(") ");
         }
         if let Some(c) = &filter.channel_name {

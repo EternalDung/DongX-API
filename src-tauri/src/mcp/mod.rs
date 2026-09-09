@@ -21,6 +21,7 @@
 pub mod protocol;
 pub mod router;
 pub mod tools;
+pub mod wiki_tools;
 
 use serde::Serialize;
 
