@@ -9,11 +9,6 @@ import { check } from "@tauri-apps/plugin-updater";
 import type { DownloadEvent } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { getVersion } from "@tauri-apps/api/app";
-import {
-  isPermissionGranted,
-  requestPermission,
-  sendNotification,
-} from "@tauri-apps/plugin-notification";
 
 /** 给 UI 层使用的精简更新信息 */
 export interface UpdateInfo {
@@ -98,31 +93,27 @@ export async function downloadAndInstall(
   }
 }
 
-/**
- * 启动后静默检查：发现更新则发系统通知，提示用户前往「设置 → 更新」手动升级。
- *
- * 设计取舍：
- * - 不弹窗、不抢焦点：每次启动都打扰会让用户把通知关掉
- * - 失败一律静默：网络/插件未注册等情况都不影响正常使用
- * - 通知权限按需请求：只有真的有更新才申请，避免一开始就弹权限框
- */
-export async function startupAutoCheck(): Promise<void> {
+/** 手动重启应用：安装完成后进程若未自行退出，由弹窗的「重启应用」按钮调用 */
+export async function relaunchApp(): Promise<void> {
   try {
-    const info = await checkForUpdate();
-    if (!info) return;
-
-    let granted = await isPermissionGranted();
-    if (!granted) {
-      const perm = await requestPermission();
-      granted = perm === "granted";
-    }
-    if (!granted) return;
-
-    await sendNotification({
-      title: `DongX v${info.version} 已发布`,
-      body: `当前 v${info.currentVersion}。前往「设置 → 更新」一键升级。`,
-    });
+    await relaunch();
   } catch {
-    // 静默吞掉
+    // 非 Tauri 环境或系统拒绝时静默
   }
+}
+
+/** 字节数格式化（更新弹窗与侧边栏进度共用） */
+export function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/** 下载百分比；服务器未给 Content-Length 时返回 0，UI 退化为不确定态 */
+export function downloadPercent(
+  downloaded: number,
+  total: number | undefined,
+): number {
+  if (!total || total <= 0) return 0;
+  return Math.min(100, Math.round((downloaded / total) * 100));
 }

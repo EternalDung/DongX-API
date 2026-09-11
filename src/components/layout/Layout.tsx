@@ -11,11 +11,21 @@ import {
   Sun,
   Moon,
   BookOpen,
+  Activity,
+  CircleSlash,
+  LoaderCircle,
+  Server,
+  Tag,
+  ArrowUpCircle,
+  CheckCircle2,
 } from "lucide-react";
 import { cn, formatListenUrl } from "@/lib/utils";
 import { applyTheme, getStoredTheme, type ThemeMode } from "@/lib/theme";
 import { serverApi } from "@/lib/api";
 import type { ServerStatus } from "@/types";
+import { CopyButton } from "@/components/ui/copy-button";
+import { downloadPercent } from "@/lib/updater";
+import { useUpdate } from "@/lib/update-store";
 
 const NAV_ITEMS = [
   { to: "/", label: "仪表盘", icon: LayoutDashboard, end: true },
@@ -74,6 +84,15 @@ function ThemeToggle() {
  */
 function GatewayStatus() {
   const [status, setStatus] = useState<ServerStatus | null>(null);
+  // 更新状态来自全局 store（应用启动时已静默检查过一次），
+  // 侧边栏只消费结果、不重复请求，也就不存在「两处状态打架」
+  const {
+    phase: updatePhase,
+    info: updateInfo,
+    progress: updateProgress,
+    currentVersion,
+    openDialog,
+  } = useUpdate();
 
   useEffect(() => {
     let cancelled = false;
@@ -100,33 +119,159 @@ function GatewayStatus() {
   // 配置与运行态不一致 → 展示的是旧地址，标注「待重启」避免误读
   const stale = running && (status?.restart_required ?? false);
 
+  // 颜色只给图标，文字保持前景色：大字染色会像可点链接，且对比度不如前景色。
+  // 「已停止」用灰色而非红色——主动停止属预期状态，红色留给真正的启动失败。
+  const StatusIcon = !status ? LoaderCircle : running ? Activity : CircleSlash;
+  const statusIconClass = !status
+    ? "text-muted-foreground"
+    : stale
+      ? "text-warning"
+      : running
+        ? "text-success"
+        : "text-muted-foreground";
+  const statusText = !status ? "加载中" : running ? "运行中" : "已停止";
+  const address =
+    running && status
+      ? formatListenUrl(status.host, status.port)
+      : status
+        ? String(status.configured_port)
+        : "--";
+
+  // none = 已是最新/还没查完 → 静态展示；有更新才让卡片可点
+  const updateState: "none" | "available" | "downloading" | "installed" =
+    updatePhase.kind === "downloading"
+      ? "downloading"
+      : updatePhase.kind === "installed"
+        ? "installed"
+        : updatePhase.kind === "available"
+          ? "available"
+          : "none";
+  const displayVersion =
+    updateState === "installed" && updateInfo
+      ? updateInfo.version
+      : currentVersion;
+  const downloadingPct = downloadPercent(
+    updateProgress?.downloaded ?? 0,
+    updateProgress?.total,
+  );
+
+  // 卡片左半部分两种形态共用，只有右侧的状态指示不同
+  const versionBody = (
+    <>
+      <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-background">
+        <Tag className="h-3.5 w-3.5 text-muted-foreground" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="text-[11px] text-muted-foreground">应用版本</div>
+        <div className="mt-0.5 font-mono text-xs">
+          v{displayVersion || "—"}
+        </div>
+        {updateState === "downloading" && (
+          <div className="mt-1.5 h-[3px] w-full overflow-hidden rounded-full bg-foreground/10">
+            <div
+              className="h-full bg-success transition-[width] duration-300"
+              style={{ width: `${downloadingPct}%` }}
+            />
+          </div>
+        )}
+      </div>
+    </>
+  );
+
   return (
-    <div className="border-t p-4">
-      <div className="flex items-center gap-2 text-xs text-muted-foreground">
-        <span className="relative flex h-2 w-2">
-          {running && (
-            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-success/60" />
-          )}
+    <div className="space-y-2 p-2.5">
+      {/* 服务状态卡：外卡承载状态，地址收进内嵌的圆角气泡 */}
+      <div className="rounded-xl bg-muted/50 p-3.5">
+        <div className="text-xs text-muted-foreground">服务状态</div>
+
+        <div className="mt-1.5 flex items-center gap-2">
+          <StatusIcon className={cn("h-4 w-4 shrink-0", statusIconClass)} />
           <span
             className={cn(
-              "relative inline-flex h-2 w-2 rounded-full",
-              running ? "bg-success" : "bg-muted-foreground/40",
+              "text-[17px] font-medium",
+              status && !running && "text-muted-foreground",
             )}
-          />
-        </span>
-        {running ? "网关运行中" : status ? "网关已停止" : "网关状态加载中"}
-      </div>
-      <div className="mt-1 font-mono text-[11px] text-muted-foreground">
-        {running && status
-          ? formatListenUrl(status.host, status.port)
-          : status
-            ? `配置端口 ${status.configured_port}`
-            : "--"}
-      </div>
-      {stale && (
-        <div className="mt-1 text-[11px] text-warning">
-          配置已变更，重启服务后生效
+          >
+            {statusText}
+          </span>
         </div>
+
+        <div className="mt-3 flex items-center gap-2.5 rounded-lg bg-background p-2.5">
+          <div
+            className={cn(
+              "flex h-7 w-7 shrink-0 items-center justify-center rounded-lg",
+              running ? "bg-success/10" : "bg-muted",
+            )}
+          >
+            <Server
+              className={cn(
+                "h-3.5 w-3.5",
+                running ? "text-success" : "text-muted-foreground",
+              )}
+            />
+          </div>
+          <div className="min-w-0 flex-1">
+            {/* 复制按钮挪到标题行右侧：把整行宽度让给地址，否则 24 字符的
+                http://127.0.0.1:9842/v1 在 256px 侧边栏里必然被截断 */}
+            <div className="flex items-center justify-between gap-1.5">
+              <span className="text-[11px] text-muted-foreground">
+                {running ? "API BaseUrl 地址" : "配置端口"}
+              </span>
+              {status && (
+                <CopyButton value={address} label="地址" variant="ghost" />
+              )}
+            </div>
+            {/* break-all 而非 truncate：host 可能被改成 192.168.x.x 或 IPv6，
+                地址长度不可控——宁可折行也绝不让用户看到残缺 URL */}
+            <div className="mt-0.5 font-mono text-[11px] break-all">
+              {address}
+            </div>
+          </div>
+        </div>
+
+        {stale && (
+          <div className="mt-2 text-[11px] text-warning">
+            配置已变更，重启服务后生效
+          </div>
+        )}
+      </div>
+
+      {/* 版本卡：无更新时是静态信息（不可点）；发现新版本才亮图标并整卡可点开更新弹窗 */}
+      {updateState === "none" ? (
+        <div className="flex items-center gap-2.5 rounded-xl bg-muted/50 p-3">
+          {versionBody}
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={openDialog}
+          title={
+            updateState === "available" && updateInfo
+              ? `发现新版本 v${updateInfo.version}，点击更新`
+              : "查看更新进度"
+          }
+          className="flex w-full items-center gap-2.5 rounded-xl bg-muted/50 p-3 text-left transition-colors hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-hidden"
+        >
+          {versionBody}
+          {updateState === "available" && (
+            <span className="relative flex h-[18px] w-[18px] shrink-0 items-center justify-center">
+              {/* 呼吸环：与运行状态点的 ping 同一套视觉语言 */}
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-success/40" />
+              <ArrowUpCircle className="relative h-[18px] w-[18px] text-success" />
+            </span>
+          )}
+          {updateState === "downloading" && (
+            <span className="shrink-0 text-[11px] text-success">
+              {downloadingPct}%
+            </span>
+          )}
+          {updateState === "installed" && (
+            <span className="flex shrink-0 items-center gap-1 text-[11px] text-success">
+              <CheckCircle2 className="h-3.5 w-3.5" />
+              已更新
+            </span>
+          )}
+        </button>
       )}
     </div>
   );

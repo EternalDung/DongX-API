@@ -46,7 +46,7 @@ import type {
   BuiltinRule,
   BuiltinRuleUpdate,
 } from "@/types";
-import { UpdateSection } from "@/components/settings/UpdateSection";
+import { AboutSection } from "@/components/settings/AboutSection";
 
 /** 安全审计 Tab 内 6 个检测项的复用卡片（标签 + 右上角开关） */
 function SecurityToggleCard({
@@ -737,7 +737,16 @@ export function SettingsPage() {
   const [serverBusy, setServerBusy] = useState(false);
 
   const [searchParams] = useSearchParams();
-  const initialTab = searchParams.get("tab") === "security" ? "security" : "server";
+  // 支持外部入口直达指定 Tab：?tab=about（侧边栏版本气泡跳入）、?tab=security（原有行为）
+  const tabParam = searchParams.get("tab");
+  const initialTab =
+    tabParam === "about" || tabParam === "security" ? tabParam : "server";
+  // 受控 Tabs：若用户已停在设置页，再次导航到同一路由不会重挂载，
+  // 仅靠 defaultValue 会「点了没反应」，必须用 state + effect 响应 query 变化。
+  const [activeTab, setActiveTab] = useState(initialTab);
+  useEffect(() => {
+    setActiveTab(initialTab);
+  }, [initialTab]);
 
   /** 刷新网关服务运行态（实际监听地址 + 是否需重启） */
   const loadStatus = async () => {
@@ -899,15 +908,18 @@ export function SettingsPage() {
         </div>
       </div>
 
-      <UpdateSection />
-
-      <Tabs defaultValue={initialTab} className="mt-6 gap-4">
+      <Tabs
+        value={activeTab}
+        onValueChange={setActiveTab}
+        className="mt-6 gap-4"
+      >
         <TabsList>
           <TabsTrigger value="server">服务配置</TabsTrigger>
           <TabsTrigger value="general">通用设置</TabsTrigger>
           <TabsTrigger value="appearance">界面设置</TabsTrigger>
           <TabsTrigger value="retry">限流与重试</TabsTrigger>
           <TabsTrigger value="security">安全审计</TabsTrigger>
+          <TabsTrigger value="about">关于</TabsTrigger>
         </TabsList>
 
         {/* ================= 服务配置 ================= */}
@@ -1294,6 +1306,11 @@ export function SettingsPage() {
 
           {/* 第二张卡片：自定义安全规则（黑名单 CRUD） */}
           <CustomRulesCard />
+        </TabsContent>
+
+        {/* ================= 关于 ================= */}
+        <TabsContent value="about">
+          <AboutSection />
         </TabsContent>
       </Tabs>
     </div>
