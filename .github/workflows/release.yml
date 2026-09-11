@@ -20,6 +20,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # 更新日志要算「上一个 tag..本次 tag」的区间，必须有完整历史与 tag；
+          # 默认 fetch-depth: 1 只拉一个提交且拿不到 tag，日志会退化。
+          fetch-depth: 0
 
       - name: Install Node.js
         uses: actions/setup-node@v4
@@ -56,6 +60,24 @@ jobs:
       # - 已配置 updater 签名（ed25519，TAURI_SIGNING_PRIVATE_KEY）：
       #   会自动生成 latest.json + .sig 并随 Release 上传，供自动更新使用。
       # - OS 代码签名（Windows Authenticode / macOS notarize）仍未配置，安装包本身“未签名”。
+      # 生成本次更新的日志：把「上一个 tag -> 本次 tag」的 commit 按类型分类。
+      # 这段文本有两个去处，且同源：
+      #   ① GitHub Release 正文（releaseBody）
+      #   ② tauri-action 写进 latest.json 的 notes -> 应用内更新弹窗的更新说明
+      # 于是每个版本的更新日志自动不同，不必再手工维护一段固定文案。
+      - name: Generate release notes
+        id: notes
+        shell: bash
+        run: |
+          bash .github/scripts/gen-release-notes.sh "${{ github.ref_name }}" release-notes.md
+          echo "===== 生成的更新日志 ====="
+          cat release-notes.md
+          {
+            echo 'body<<DONGX_NOTES_EOF'
+            cat release-notes.md
+            echo 'DONGX_NOTES_EOF'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build & release (Tauri)
         uses: tauri-apps/tauri-action@v0
         env:
@@ -64,6 +86,7 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'DongX ${{ github.ref_name }}'
-          releaseBody: 'Prebuilt installers. Windows may show SmartScreen — click "Run anyway". macOS is unsigned — first run `xattr -cr /Applications/DongX.app` then open from Finder. Linux: use .AppImage or .deb.'
+          # 更新日志来源见上一步 Generate release notes
+          releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: false    # 构建完成后自动公开发布，无需手动 Publish
           prerelease: false

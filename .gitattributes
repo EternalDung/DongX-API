@@ -3,3 +3,7 @@
 # startup panic on Windows: a CRLF<->LF flip changes the sqlx SHA-384
 # checksum recorded in _sqlx_migrations. (Fixed 2026-08-30.)
 src-tauri/migrations/* text eol=lf
+
+# Pin shell scripts to LF. CRLF breaks `bash script.sh` on the
+# Windows runner (`set -euo pipefail\r` -> "invalid option").
+*.sh text eol=lf
